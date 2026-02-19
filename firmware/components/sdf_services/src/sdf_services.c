@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 #define SDF_SERVICES_TASK_NAME "sdf_fp"
 #define SDF_SERVICES_TASK_STACK 4096
@@ -24,6 +25,9 @@
 
 #define SDF_SERVICES_DEFAULT_MATCH_POLL_MS 400u
 #define SDF_SERVICES_DEFAULT_MATCH_COOLDOWN_MS 3000u
+#define SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_THRESHOLD ((uint32_t)CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_THRESHOLD)
+#define SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_WINDOW_MS ((uint32_t)CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_WINDOW_MS)
+#define SDF_SERVICES_DEFAULT_LOCKOUT_DURATION_MS ((uint32_t)CONFIG_SDF_SECURITY_BIOMETRIC_LOCKOUT_MS)
 
 /*
  * LED command values are vendor-module specific. These are best-effort defaults
@@ -48,6 +52,9 @@ typedef struct {
     uint16_t request_user_id;
     uint8_t request_permission;
     int64_t match_cooldown_until_us;
+    uint32_t failed_attempt_count;
+    int64_t failed_attempt_window_start_us;
+    int64_t lockout_until_us;
 } sdf_services_state_t;
 
 static sdf_services_state_t s_state = {0};
@@ -130,6 +137,25 @@ static void sdf_services_notify_enrollment(void)
     }
 }
 
+static void sdf_services_notify_security_event(const sdf_services_security_event_t *event)
+{
+    if (event == NULL || s_state.lock == NULL) {
+        return;
+    }
+
+    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+        return;
+    }
+
+    sdf_services_security_event_cb cb = s_state.config.security_event_cb;
+    void *ctx = s_state.config.security_event_ctx;
+    xSemaphoreGive(s_state.lock);
+
+    if (cb != NULL) {
+        cb(ctx, event);
+    }
+}
+
 static void sdf_services_try_set_led(uint8_t mode, uint8_t color, uint8_t cycles)
 {
     sdf_fingerprint_led_command_t led_cmd = {
@@ -174,22 +200,55 @@ static void sdf_services_run_match_cycle(void)
     sdf_services_unlock_cb unlock_cb = NULL;
     void *unlock_ctx = NULL;
     uint32_t cooldown_ms = SDF_SERVICES_DEFAULT_MATCH_COOLDOWN_MS;
+    uint32_t failed_attempt_threshold = SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_THRESHOLD;
+    uint32_t failed_attempt_window_ms = SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_WINDOW_MS;
+    uint32_t lockout_duration_ms = SDF_SERVICES_DEFAULT_LOCKOUT_DURATION_MS;
     int64_t now_us = esp_timer_get_time();
+    bool lockout_cleared = false;
 
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
         return;
     }
 
+    if (s_state.lockout_until_us > 0 && now_us >= s_state.lockout_until_us) {
+        s_state.lockout_until_us = 0;
+        s_state.failed_attempt_count = 0;
+        s_state.failed_attempt_window_start_us = 0;
+        lockout_cleared = true;
+    }
+
     if (now_us < s_state.match_cooldown_until_us || sdf_enrollment_sm_is_active(&s_state.enrollment) ||
-        s_state.enrollment_request_pending) {
+        s_state.enrollment_request_pending || now_us < s_state.lockout_until_us) {
         xSemaphoreGive(s_state.lock);
+        if (lockout_cleared) {
+            sdf_services_security_event_t event = {
+                .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
+                .user_id = 0,
+                .failed_attempts = 0,
+                .lockout_remaining_ms = 0,
+            };
+            sdf_services_notify_security_event(&event);
+        }
         return;
     }
 
     unlock_cb = s_state.config.unlock_cb;
     unlock_ctx = s_state.config.unlock_ctx;
     cooldown_ms = s_state.config.match_cooldown_ms;
+    failed_attempt_threshold = s_state.config.failed_attempt_threshold;
+    failed_attempt_window_ms = s_state.config.failed_attempt_window_ms;
+    lockout_duration_ms = s_state.config.lockout_duration_ms;
     xSemaphoreGive(s_state.lock);
+
+    if (lockout_cleared) {
+        sdf_services_security_event_t event = {
+            .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
+            .user_id = 0,
+            .failed_attempts = 0,
+            .lockout_remaining_ms = 0,
+        };
+        sdf_services_notify_security_event(&event);
+    }
 
     if (unlock_cb == NULL) {
         return;
@@ -198,11 +257,65 @@ static void sdf_services_run_match_cycle(void)
     sdf_fingerprint_match_t match = {0};
     sdf_fingerprint_op_result_t match_result = sdf_fingerprint_driver_match_1n(&match);
     if (match_result == SDF_FINGERPRINT_OP_NO_MATCH || match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
+        bool emit_failed_attempt = false;
+        bool emit_lockout = false;
+        uint32_t failed_attempts = 0;
+        uint32_t lockout_remaining_ms = 0;
+
+        if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+            s_state.match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
+
+            if (match_result == SDF_FINGERPRINT_OP_NO_MATCH) {
+                if (s_state.failed_attempt_window_start_us == 0 ||
+                    (now_us - s_state.failed_attempt_window_start_us) >
+                        ((int64_t)failed_attempt_window_ms * 1000LL)) {
+                    s_state.failed_attempt_window_start_us = now_us;
+                    s_state.failed_attempt_count = 0;
+                }
+
+                s_state.failed_attempt_count++;
+                failed_attempts = s_state.failed_attempt_count;
+                emit_failed_attempt = true;
+
+                if (s_state.failed_attempt_count >= failed_attempt_threshold) {
+                    s_state.lockout_until_us = now_us + ((int64_t)lockout_duration_ms * 1000LL);
+                    s_state.failed_attempt_count = 0;
+                    s_state.failed_attempt_window_start_us = 0;
+                    lockout_remaining_ms = lockout_duration_ms;
+                    emit_lockout = true;
+                }
+            }
+            xSemaphoreGive(s_state.lock);
+        }
+
+        if (emit_failed_attempt) {
+            sdf_services_security_event_t event = {
+                .type = SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED,
+                .user_id = 0,
+                .failed_attempts = failed_attempts,
+                .lockout_remaining_ms = lockout_remaining_ms,
+            };
+            sdf_services_notify_security_event(&event);
+        }
+
+        if (emit_lockout) {
+            sdf_services_security_event_t event = {
+                .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED,
+                .user_id = 0,
+                .failed_attempts = failed_attempt_threshold,
+                .lockout_remaining_ms = lockout_remaining_ms,
+            };
+            sdf_services_notify_security_event(&event);
+        }
         return;
     }
 
     if (match_result != SDF_FINGERPRINT_OP_OK) {
         ESP_LOGW(TAG, "Fingerprint match error: %s", sdf_services_fingerprint_result_name(match_result));
+        if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+            s_state.match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
+            xSemaphoreGive(s_state.lock);
+        }
         return;
     }
 
@@ -218,8 +331,18 @@ static void sdf_services_run_match_cycle(void)
 
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
         s_state.match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
+        s_state.failed_attempt_count = 0;
+        s_state.failed_attempt_window_start_us = 0;
         xSemaphoreGive(s_state.lock);
     }
+
+    sdf_services_security_event_t event = {
+        .type = SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED,
+        .user_id = match.user_id,
+        .failed_attempts = 0,
+        .lockout_remaining_ms = 0,
+    };
+    sdf_services_notify_security_event(&event);
 }
 
 static void sdf_services_run_enrollment_step(void)
@@ -368,15 +491,25 @@ void sdf_services_get_default_config(sdf_services_config_t *config)
 
     config->match_poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
     config->match_cooldown_ms = SDF_SERVICES_DEFAULT_MATCH_COOLDOWN_MS;
+    config->failed_attempt_threshold = SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_THRESHOLD;
+    config->failed_attempt_window_ms = SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_WINDOW_MS;
+    config->lockout_duration_ms = SDF_SERVICES_DEFAULT_LOCKOUT_DURATION_MS;
     config->unlock_cb = NULL;
     config->unlock_ctx = NULL;
     config->enrollment_cb = NULL;
     config->enrollment_ctx = NULL;
+    config->security_event_cb = NULL;
+    config->security_event_ctx = NULL;
 }
 
 esp_err_t sdf_services_init(const sdf_services_config_t *config)
 {
-    if (config == NULL || config->match_poll_interval_ms == 0 || config->match_cooldown_ms == 0) {
+    if (config == NULL ||
+        config->match_poll_interval_ms == 0 ||
+        config->match_cooldown_ms == 0 ||
+        config->failed_attempt_threshold == 0 ||
+        config->failed_attempt_window_ms == 0 ||
+        config->lockout_duration_ms == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -402,6 +535,9 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config)
     s_state.request_user_id = 0;
     s_state.request_permission = 0;
     s_state.match_cooldown_until_us = 0;
+    s_state.failed_attempt_count = 0;
+    s_state.failed_attempt_window_start_us = 0;
+    s_state.lockout_until_us = 0;
     xSemaphoreGive(s_state.lock);
 
     esp_err_t err = sdf_fingerprint_driver_init(&config->fingerprint);

@@ -4,12 +4,19 @@
 
 #include "esp_random.h"
 #include "mbedtls/md.h"
+#include "sdkconfig.h"
 
 #include "sdf_nuki_crypto.h"
 
 #define SDF_NUKI_ADATA_LEN 30
 #define SDF_NUKI_PDATA_HEADER_LEN 6
 #define SDF_NUKI_SECRETBOX_OVERHEAD 16
+
+#if CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW > SDF_NUKI_NONCE_CACHE_MAX
+#define SDF_NUKI_NONCE_REPLAY_WINDOW SDF_NUKI_NONCE_CACHE_MAX
+#else
+#define SDF_NUKI_NONCE_REPLAY_WINDOW CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW
+#endif
 
 static uint16_t sdf_nuki_le16_read(const uint8_t *src)
 {
@@ -36,6 +43,13 @@ static void sdf_nuki_le32_write(uint8_t *dst, uint32_t value)
     dst[1] = (uint8_t)((value >> 8) & 0xFF);
     dst[2] = (uint8_t)((value >> 16) & 0xFF);
     dst[3] = (uint8_t)((value >> 24) & 0xFF);
+}
+
+static void sdf_nuki_le64_write(uint8_t *dst, uint64_t value)
+{
+    for (size_t i = 0; i < 8; ++i) {
+        dst[i] = (uint8_t)((value >> (8 * i)) & 0xFF);
+    }
 }
 
 static uint16_t sdf_nuki_crc_ccitt(const uint8_t *data, size_t len)
@@ -198,7 +212,67 @@ static int sdf_nuki_build_pdata(
     return SDF_NUKI_RESULT_OK;
 }
 
+static void sdf_nuki_next_nonce(sdf_nuki_client_t *client, uint8_t nonce[SDF_NUKI_NONCE_LEN])
+{
+    if (client == NULL || nonce == NULL) {
+        return;
+    }
+
+    if (client->tx_nonce_counter == 0) {
+        sdf_nuki_random(client->tx_nonce_salt, sizeof(client->tx_nonce_salt));
+    }
+
+    client->tx_nonce_counter++;
+
+    memcpy(nonce, client->tx_nonce_salt, sizeof(client->tx_nonce_salt));
+    sdf_nuki_le64_write(nonce + 8, client->tx_nonce_counter);
+
+    uint64_t random_tail = ((uint64_t)esp_random() << 32) | esp_random();
+    sdf_nuki_le64_write(nonce + 16, random_tail);
+}
+
+static bool sdf_nuki_nonce_seen(
+    const sdf_nuki_client_t *client,
+    uint32_t authorization_id,
+    const uint8_t nonce[SDF_NUKI_NONCE_LEN])
+{
+    if (client == NULL || nonce == NULL) {
+        return false;
+    }
+
+    for (size_t i = 0; i < client->rx_nonce_cache_count; ++i) {
+        if (client->rx_nonce_auth_cache[i] == authorization_id &&
+            memcmp(client->rx_nonce_cache[i], nonce, SDF_NUKI_NONCE_LEN) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void sdf_nuki_nonce_remember(
+    sdf_nuki_client_t *client,
+    uint32_t authorization_id,
+    const uint8_t nonce[SDF_NUKI_NONCE_LEN])
+{
+    if (client == NULL || nonce == NULL || SDF_NUKI_NONCE_REPLAY_WINDOW == 0) {
+        return;
+    }
+
+    size_t idx = client->rx_nonce_cache_write_idx;
+    if (idx >= SDF_NUKI_NONCE_REPLAY_WINDOW) {
+        idx = 0;
+    }
+
+    memcpy(client->rx_nonce_cache[idx], nonce, SDF_NUKI_NONCE_LEN);
+    client->rx_nonce_auth_cache[idx] = authorization_id;
+    client->rx_nonce_cache_write_idx = (uint8_t)((idx + 1) % SDF_NUKI_NONCE_REPLAY_WINDOW);
+    if (client->rx_nonce_cache_count < SDF_NUKI_NONCE_REPLAY_WINDOW) {
+        client->rx_nonce_cache_count++;
+    }
+}
+
 static int sdf_nuki_build_encrypted_message_custom(
+    const uint8_t nonce[SDF_NUKI_NONCE_LEN],
     uint32_t authorization_id,
     const uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN],
     uint16_t command,
@@ -208,7 +282,7 @@ static int sdf_nuki_build_encrypted_message_custom(
     size_t out_cap,
     size_t *out_len)
 {
-    if (shared_key == NULL || out == NULL || out_len == NULL) {
+    if (nonce == NULL || shared_key == NULL || out == NULL || out_len == NULL) {
         return SDF_NUKI_RESULT_ERR_ARG;
     }
 
@@ -226,9 +300,6 @@ static int sdf_nuki_build_encrypted_message_custom(
     if (res != SDF_NUKI_RESULT_OK) {
         return res;
     }
-
-    uint8_t nonce[SDF_NUKI_NONCE_LEN];
-    sdf_nuki_random(nonce, sizeof(nonce));
 
     uint8_t ciphertext[SDF_NUKI_MAX_PDATA + SDF_NUKI_SECRETBOX_OVERHEAD];
     size_t ciphertext_len = 0;
@@ -273,7 +344,11 @@ static int sdf_nuki_build_encrypted_message(
         return SDF_NUKI_RESULT_ERR_ARG;
     }
 
+    uint8_t nonce[SDF_NUKI_NONCE_LEN];
+    sdf_nuki_next_nonce(client, nonce);
+
     return sdf_nuki_build_encrypted_message_custom(
+        nonce,
         client->creds.authorization_id,
         client->creds.shared_key,
         command,
@@ -308,6 +383,10 @@ static int sdf_nuki_process_encrypted_custom(
         return SDF_NUKI_RESULT_ERR_AUTH;
     }
 
+    if (sdf_nuki_nonce_seen(client, authorization_id, buf)) {
+        return SDF_NUKI_RESULT_ERR_NONCE_REUSE;
+    }
+
     size_t plaintext_len = 0;
     int res = sdf_nuki_secretbox_decrypt(
         buf + SDF_NUKI_ADATA_LEN,
@@ -337,6 +416,8 @@ static int sdf_nuki_process_encrypted_custom(
     if (crc_expected != crc_actual) {
         return SDF_NUKI_RESULT_ERR_CRC;
     }
+
+    sdf_nuki_nonce_remember(client, authorization_id, buf);
 
     sdf_nuki_message_t msg = {
         .command_id = sdf_nuki_le16_read(client->pd_buf + 4),
@@ -569,10 +650,14 @@ int sdf_nuki_client_send_encrypted_custom(
         return SDF_NUKI_RESULT_ERR_ARG;
     }
 
+    uint8_t nonce[SDF_NUKI_NONCE_LEN];
+    sdf_nuki_next_nonce(client, nonce);
+
     uint8_t message[SDF_NUKI_MAX_MESSAGE];
     size_t message_len = 0;
 
     int res = sdf_nuki_build_encrypted_message_custom(
+        nonce,
         authorization_id,
         shared_key,
         command,

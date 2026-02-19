@@ -17,6 +17,10 @@ Firmware and documentation for the Smart Door Finger (SDF) biometrics bridge dev
 * NimBLE address bytes in `ble_addr_t.val` are little-endian. Example lock address `AA:BB:CC:DD:EE:FF` must be configured as `{0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}`.
 * First successful pairing stores Nuki `authorization_id` and `shared_key` in NVS via `sdf_storage`; subsequent boots reuse these credentials.
 * NVS encryption is enabled. Keep `firmware/partition_table.csv` with the `nvs_keys` partition, otherwise encrypted NVS initialization will fail.
+* Phase 6 hardening adds boot-time secure-storage policy verification in `sdf_storage`. By default (`CONFIG_SDF_SECURITY_REQUIRE_ENCRYPTED_NVS=y`), startup flags an error if encrypted NVS policy is not met.
+* Biometric brute-force protection is enabled in `sdf_services` with configurable threshold/window/lockout (`CONFIG_SDF_SECURITY_BIOMETRIC_*`).
+* BLE encrypted frame handling now rejects replayed nonces using a bounded cache (`CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW`).
+* Optional audit-event consumers can register `sdf_app_set_audit_callback` to receive structured security/audit events.
 * Debug profile defaults are in `firmware/sdkconfig.debug.defaults`.
 * Release profile defaults are in `firmware/sdkconfig.release.defaults`.
 * Use `SDKCONFIG_DEFAULTS` when invoking `idf.py` to select a profile.

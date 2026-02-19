@@ -9,6 +9,7 @@
 #define SDF_NUKI_CHALLENGE_NONCE_LEN 32
 #define SDF_NUKI_SHARED_KEY_LEN 32
 #define SDF_NUKI_NAME_SUFFIX_MAX 20
+#define SDF_NUKI_NONCE_CACHE_MAX 16
 
 #define SDF_NUKI_MAX_PDATA 512
 #define SDF_NUKI_MAX_MESSAGE (30 + 16 + SDF_NUKI_MAX_PDATA)
@@ -21,7 +22,8 @@ typedef enum {
     SDF_NUKI_RESULT_ERR_CRC = -4,
     SDF_NUKI_RESULT_ERR_AUTH = -5,
     SDF_NUKI_RESULT_ERR_TOO_LARGE = -6,
-    SDF_NUKI_RESULT_ERR_INCOMPLETE = -7
+    SDF_NUKI_RESULT_ERR_INCOMPLETE = -7,
+    SDF_NUKI_RESULT_ERR_NONCE_REUSE = -8
 } sdf_nuki_result_t;
 
 typedef enum {
@@ -111,6 +113,14 @@ typedef struct {
     size_t rx_len;
     size_t rx_expected;
     uint8_t pd_buf[SDF_NUKI_MAX_PDATA];
+
+    uint64_t tx_nonce_counter;
+    uint8_t tx_nonce_salt[8];
+
+    uint8_t rx_nonce_cache[SDF_NUKI_NONCE_CACHE_MAX][SDF_NUKI_NONCE_LEN];
+    uint32_t rx_nonce_auth_cache[SDF_NUKI_NONCE_CACHE_MAX];
+    uint8_t rx_nonce_cache_count;
+    uint8_t rx_nonce_cache_write_idx;
 } sdf_nuki_client_t;
 
 void sdf_protocol_ble_init(void);

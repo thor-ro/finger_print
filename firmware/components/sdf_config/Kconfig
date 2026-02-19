@@ -1,0 +1,41 @@
+menu "SDF Security & Hardening"
+
+config SDF_SECURITY_NONCE_REPLAY_WINDOW
+    int "BLE nonce replay window size"
+    range 1 16
+    default 8
+    help
+        Number of recently accepted encrypted-message nonces to track per
+        authorization ID. Reused nonces in this window are rejected.
+
+config SDF_SECURITY_BIOMETRIC_FAIL_THRESHOLD
+    int "Biometric failed-attempt threshold"
+    range 1 20
+    default 5
+    help
+        Number of failed fingerprint matches allowed inside the configured
+        attempt window before lockout is activated.
+
+config SDF_SECURITY_BIOMETRIC_FAIL_WINDOW_MS
+    int "Biometric failed-attempt window (ms)"
+    range 1000 600000
+    default 60000
+    help
+        Sliding time window used to count failed fingerprint matches.
+
+config SDF_SECURITY_BIOMETRIC_LOCKOUT_MS
+    int "Biometric lockout duration (ms)"
+    range 1000 3600000
+    default 120000
+    help
+        Duration of the temporary lockout after failed-attempt threshold
+        has been reached.
+
+config SDF_SECURITY_REQUIRE_ENCRYPTED_NVS
+    bool "Require encrypted NVS policy at boot"
+    default y
+    help
+        Fail secure-storage initialization if encrypted NVS is not enabled or
+        no NVS keys partition is present.
+
+endmenu

@@ -2,6 +2,21 @@
 
 This file tracks firmware-level changes and maps them to project versions.
 
+## 0.1.4 — 2026-02-19
+
+### Added
+- Phase 6 security and hardening baseline:
+  - BLE encrypted-message nonce replay detection window with per-authorization tracking.
+  - Biometric failed-attempt rate limiting with configurable threshold/window/lockout.
+  - App-level audit hook API (`sdf_app_set_audit_callback`) and structured audit events.
+  - Boot-time secure-storage policy verification for encrypted NVS and `nvs_keys` partition.
+- New Kconfig security menu in `/Users/thorstenropertz/workspace/smart_door/firmware/components/sdf_config/Kconfig`.
+
+### Changed
+- `sdkconfig.defaults` now includes security knobs for nonce replay window, biometric lockout policy, and required encrypted NVS.
+- `sdf_services` now emits security events for failed matches, lockout enter/clear, and successful match.
+- `sdf_app` now maps security events to Zigbee alarm bits and audit events.
+
 ## 0.1.3 — 2026-02-19
 
 ### Added
