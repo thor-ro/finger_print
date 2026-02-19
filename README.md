@@ -21,3 +21,4 @@ Firmware and documentation for the Smart Door Finger (SDF) biometrics bridge dev
 * Release profile defaults are in `firmware/sdkconfig.release.defaults`.
 * Use `SDKCONFIG_DEFAULTS` when invoking `idf.py` to select a profile.
 * Home Assistant/ZHA validation steps for lock/unlock/state reporting are documented in `doc/ha-validation-checklist.md`.
+* Fingerprint sensor `Control LED (0x3C)` payload bytes are module-variant specific. The default values in `firmware/components/sdf_services/src/sdf_services.c` are best-effort and may require tuning on real hardware.

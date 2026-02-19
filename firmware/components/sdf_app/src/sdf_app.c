@@ -9,6 +9,7 @@
 #include "sdf_nuki_pairing.h"
 #include "sdf_protocol_ble.h"
 #include "sdf_protocol_zigbee.h"
+#include "sdf_services.h"
 #include "sdf_storage.h"
 
 #define SDF_APP_ID 1u
@@ -17,6 +18,12 @@
 #define SDF_APP_LOCK_ACTION_MAX_RETRIES 2u
 #define SDF_APP_ZB_ALARM_ACTION_FAILURE 0x0001u
 #define SDF_APP_ZB_ALARM_LOW_BATTERY 0x0002u
+
+#define SDF_APP_FP_UART_PORT 1
+#define SDF_APP_FP_UART_TX_PIN 4
+#define SDF_APP_FP_UART_RX_PIN 5
+#define SDF_APP_FP_MATCH_POLL_MS 400u
+#define SDF_APP_FP_MATCH_COOLDOWN_MS 3000u
 // Set this to your lock's BLE address to avoid accidental pairing.
 // Example for lock address AA:BB:CC:DD:EE:FF (LSB first for NimBLE):
 // {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}
@@ -142,6 +149,109 @@ static const char *sdf_app_zb_programming_cmd_name(uint8_t cmd_id)
     }
 }
 
+static const char *sdf_app_enrollment_state_name(sdf_enrollment_state_t state)
+{
+    switch (state) {
+    case SDF_ENROLLMENT_STATE_IDLE:
+        return "IDLE";
+    case SDF_ENROLLMENT_STATE_STEP_1:
+        return "STEP_1";
+    case SDF_ENROLLMENT_STATE_STEP_2:
+        return "STEP_2";
+    case SDF_ENROLLMENT_STATE_STEP_3:
+        return "STEP_3";
+    case SDF_ENROLLMENT_STATE_SUCCESS:
+        return "SUCCESS";
+    case SDF_ENROLLMENT_STATE_ERROR:
+        return "ERROR";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static const char *sdf_app_enrollment_result_name(sdf_enrollment_result_t result)
+{
+    switch (result) {
+    case SDF_ENROLLMENT_RESULT_NONE:
+        return "NONE";
+    case SDF_ENROLLMENT_RESULT_SUCCESS:
+        return "SUCCESS";
+    case SDF_ENROLLMENT_RESULT_FAILED:
+        return "FAILED";
+    case SDF_ENROLLMENT_RESULT_TIMEOUT:
+        return "TIMEOUT";
+    case SDF_ENROLLMENT_RESULT_FULL:
+        return "FULL";
+    case SDF_ENROLLMENT_RESULT_USER_OCCUPIED:
+        return "USER_OCCUPIED";
+    case SDF_ENROLLMENT_RESULT_FINGER_OCCUPIED:
+        return "FINGER_OCCUPIED";
+    case SDF_ENROLLMENT_RESULT_PROTOCOL_ERROR:
+        return "PROTOCOL_ERROR";
+    case SDF_ENROLLMENT_RESULT_IO_ERROR:
+        return "IO_ERROR";
+    case SDF_ENROLLMENT_RESULT_BAD_ARG:
+        return "BAD_ARG";
+    case SDF_ENROLLMENT_RESULT_BUSY:
+        return "BUSY";
+    default:
+        return "UNKNOWN";
+    }
+}
+
+static uint8_t sdf_app_choose_fingerprint_permission(const sdf_protocol_zigbee_programming_event_t *pe)
+{
+    if (pe == NULL) {
+        return 1;
+    }
+
+    if (pe->has_user_type && pe->user_type >= 1u && pe->user_type <= 3u) {
+        return pe->user_type;
+    }
+
+    if (pe->has_user_status && pe->user_status >= 1u && pe->user_status <= 3u) {
+        return pe->user_status;
+    }
+
+    return 1;
+}
+
+static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id)
+{
+    (void)ctx;
+
+    if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
+        return SDF_NUKI_RESULT_ERR_NO_KEY;
+    }
+
+    ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting unlock", (unsigned)user_id);
+    return sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLOCK, 0);
+}
+
+static void sdf_app_on_enrollment_state(void *ctx, const sdf_enrollment_sm_t *state)
+{
+    (void)ctx;
+
+    if (state == NULL) {
+        return;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Enrollment user_id=%u permission=%u state=%s completed_steps=%u result=%s",
+        (unsigned)state->user_id,
+        (unsigned)state->permission,
+        sdf_app_enrollment_state_name(state->state),
+        (unsigned)state->completed_steps,
+        sdf_app_enrollment_result_name(state->result));
+
+    if (state->state == SDF_ENROLLMENT_STATE_SUCCESS) {
+        sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
+    } else if (state->state == SDF_ENROLLMENT_STATE_ERROR) {
+        sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+    }
+}
+
 static int sdf_app_start_unlock_unlatch_sequence(void)
 {
     if (s_latch_sequence_active || s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
@@ -194,7 +304,37 @@ static esp_err_t sdf_app_on_zigbee_command(void *ctx, const sdf_protocol_zigbee_
             pe->has_user_type ? "" : "n/a:",
             (unsigned)(pe->has_user_type ? pe->user_type : 0),
             (unsigned)(pe->has_credential ? pe->credential_len : 0));
-        /* Enrollment/user-management flow is implemented in a later roadmap phase. */
+
+        if (pe->zcl_command_id == 0x05 || pe->zcl_command_id == 0x16) {
+            if (!pe->has_user_id) {
+                ESP_LOGW(TAG, "Enrollment command without user_id");
+                return ESP_ERR_INVALID_ARG;
+            }
+
+            uint8_t permission = sdf_app_choose_fingerprint_permission(pe);
+            esp_err_t enroll_err = sdf_services_request_enrollment(pe->user_id, permission);
+            if (enroll_err != ESP_OK) {
+                ESP_LOGW(
+                    TAG,
+                    "Failed to queue enrollment for user_id=%u permission=%u: %s",
+                    (unsigned)pe->user_id,
+                    (unsigned)permission,
+                    esp_err_to_name(enroll_err));
+                sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+                return enroll_err;
+            }
+
+            ESP_LOGI(
+                TAG,
+                "Enrollment requested from Zigbee for user_id=%u permission=%u",
+                (unsigned)pe->user_id,
+                (unsigned)permission);
+        } else {
+            ESP_LOGI(
+                TAG,
+                "Programming command 0x%02X currently mapped as no-op",
+                (unsigned)pe->zcl_command_id);
+        }
         return ESP_OK;
     }
     default:
@@ -644,6 +784,23 @@ void sdf_app_init(void)
         NULL,
         sdf_app_on_message,
         NULL);
+
+    sdf_services_config_t services_cfg;
+    sdf_services_get_default_config(&services_cfg);
+    services_cfg.fingerprint.uart_port = SDF_APP_FP_UART_PORT;
+    services_cfg.fingerprint.tx_pin = SDF_APP_FP_UART_TX_PIN;
+    services_cfg.fingerprint.rx_pin = SDF_APP_FP_UART_RX_PIN;
+    services_cfg.match_poll_interval_ms = SDF_APP_FP_MATCH_POLL_MS;
+    services_cfg.match_cooldown_ms = SDF_APP_FP_MATCH_COOLDOWN_MS;
+    services_cfg.unlock_cb = sdf_app_on_fingerprint_unlock;
+    services_cfg.unlock_ctx = NULL;
+    services_cfg.enrollment_cb = sdf_app_on_enrollment_state;
+    services_cfg.enrollment_ctx = NULL;
+
+    err = sdf_services_init(&services_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize fingerprint services: %s", esp_err_to_name(err));
+    }
 
     err = sdf_protocol_zigbee_set_command_handler(sdf_app_on_zigbee_command, NULL);
     if (err != ESP_OK) {
