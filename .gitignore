@@ -1,0 +1,6 @@
+.DS_Store
+build
+doc/*.zip
+doc/*.7z
+doc/*.pxc
+ref
