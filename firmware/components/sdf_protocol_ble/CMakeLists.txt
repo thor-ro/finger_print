@@ -5,6 +5,6 @@ idf_component_register(
         "src/sdf_nuki_pairing.c"
         "src/sdf_nuki_ble_transport.c"
     INCLUDE_DIRS "include"
-    REQUIRES sdf_common sdf_config sdf_platform
-    PRIV_REQUIRES bt esp_system mbedtls
+    REQUIRES sdf_common sdf_config sdf_platform bt
+    PRIV_REQUIRES esp_system mbedtls
 )

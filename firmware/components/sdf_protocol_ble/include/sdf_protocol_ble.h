@@ -35,6 +35,7 @@ typedef enum {
     SDF_NUKI_CMD_KEYTURNER_STATES = 0x000C,
     SDF_NUKI_CMD_LOCK_ACTION = 0x000D,
     SDF_NUKI_CMD_STATUS = 0x000E,
+    SDF_NUKI_CMD_ERROR_REPORT = 0x0012,
     SDF_NUKI_CMD_SIMPLE_LOCK_ACTION = 0x0100,
     SDF_NUKI_CMD_AUTHORIZATION_INFO = 0x004C
 } sdf_nuki_command_t;
@@ -58,6 +59,35 @@ typedef struct {
     const uint8_t *payload;
     size_t payload_len;
 } sdf_nuki_message_t;
+
+typedef struct {
+    uint8_t nuki_state;
+    uint8_t lock_state;
+    uint8_t trigger;
+    uint16_t current_time_year;
+    uint8_t current_time_month;
+    uint8_t current_time_day;
+    uint8_t current_time_hour;
+    uint8_t current_time_minute;
+    uint8_t current_time_second;
+    int16_t timezone_offset_minutes;
+    uint8_t critical_battery_state;
+    uint8_t lock_n_go_timer;
+    uint8_t last_lock_action;
+    bool has_last_lock_action_trigger;
+    uint8_t last_lock_action_trigger;
+    bool has_last_lock_action_completion_status;
+    uint8_t last_lock_action_completion_status;
+    bool has_door_sensor_state;
+    uint8_t door_sensor_state;
+    bool has_nightmode_active;
+    uint8_t nightmode_active;
+} sdf_nuki_keyturner_state_t;
+
+typedef struct {
+    int8_t error_code;
+    uint16_t command_identifier;
+} sdf_nuki_error_report_t;
 
 typedef int (*sdf_nuki_send_cb)(void *ctx, const uint8_t *data, size_t len);
 typedef void (*sdf_nuki_message_cb)(void *ctx, const sdf_nuki_message_t *msg);
@@ -164,5 +194,13 @@ int sdf_nuki_parse_challenge(
 int sdf_nuki_parse_status(
     const sdf_nuki_message_t *msg,
     uint8_t *status_out);
+
+int sdf_nuki_parse_keyturner_states(
+    const sdf_nuki_message_t *msg,
+    sdf_nuki_keyturner_state_t *state_out);
+
+int sdf_nuki_parse_error_report(
+    const sdf_nuki_message_t *msg,
+    sdf_nuki_error_report_t *error_out);
 
 #endif /* SDF_PROTOCOL_BLE_H */

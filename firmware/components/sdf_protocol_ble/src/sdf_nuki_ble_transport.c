@@ -4,7 +4,6 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
-#include "esp_nimble_hci.h"
 
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
@@ -75,6 +74,7 @@ static int sdf_nuki_ble_disc_chr_cb(
 static int sdf_nuki_ble_disc_dsc_cb(
     uint16_t conn_handle,
     const struct ble_gatt_error *error,
+    uint16_t chr_val_handle,
     const struct ble_gatt_dsc *dsc,
     void *arg);
 static int sdf_nuki_ble_on_subscribe_gdio(
@@ -132,16 +132,13 @@ static bool sdf_nuki_ble_adv_has_nuki_service(const struct ble_hs_adv_fields *fi
 
 static int sdf_nuki_ble_connect(const ble_addr_t *addr)
 {
-    struct ble_gap_conn_params params;
-    ble_gap_conn_params_init(&params);
-
     s_transport->state = SDF_NUKI_BLE_STATE_CONNECTING;
 
     return ble_gap_connect(
         s_transport->own_addr_type,
         addr,
         BLE_HS_FOREVER,
-        &params,
+        NULL,
         sdf_nuki_ble_gap_event,
         NULL);
 }
@@ -230,11 +227,11 @@ static int sdf_nuki_ble_disc_chr_cb(
 {
     if (error->status == 0 && chr != NULL) {
         if (s_disc_state == SDF_NUKI_DISC_PAIRING_CHR) {
-            if (ble_uuid_cmp(chr->uuid, SDF_NUKI_GDIO_UUID) == 0) {
+            if (ble_uuid_cmp(&chr->uuid.u, SDF_NUKI_GDIO_UUID) == 0) {
                 s_transport->gdio_handle = chr->val_handle;
             }
         } else if (s_disc_state == SDF_NUKI_DISC_KEYTURNER_CHR) {
-            if (ble_uuid_cmp(chr->uuid, SDF_NUKI_USDIO_UUID) == 0) {
+            if (ble_uuid_cmp(&chr->uuid.u, SDF_NUKI_USDIO_UUID) == 0) {
                 s_transport->usdio_handle = chr->val_handle;
             }
         }
@@ -282,9 +279,12 @@ static int sdf_nuki_ble_disc_chr_cb(
 static int sdf_nuki_ble_disc_dsc_cb(
     uint16_t conn_handle,
     const struct ble_gatt_error *error,
+    uint16_t chr_val_handle,
     const struct ble_gatt_dsc *dsc,
     void *arg)
 {
+    (void)chr_val_handle;
+
     if (error->status == 0 && dsc != NULL) {
         if (ble_uuid_u16(&dsc->uuid.u) == BLE_GATT_DSC_CLT_CFG_UUID16) {
             if (s_disc_state == SDF_NUKI_DISC_PAIRING_DSC) {
@@ -464,9 +464,15 @@ static void sdf_nuki_ble_handle_notify(const struct ble_gap_event *event)
         return;
     }
 
-    if (ble_hs_mbuf_to_flat(event->notify_rx.om, buffer, len, &len) != 0) {
+    uint16_t copied_len = 0;
+    if (ble_hs_mbuf_to_flat(
+            event->notify_rx.om,
+            buffer,
+            (uint16_t)len,
+            &copied_len) != 0) {
         return;
     }
+    len = copied_len;
 
     if (s_transport->rx_cb != NULL) {
         s_transport->rx_cb(s_transport->rx_ctx, channel, buffer, len);
@@ -553,12 +559,6 @@ int sdf_nuki_ble_init(
 
     s_transport = transport;
 
-    esp_err_t err = esp_nimble_hci_and_controller_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_nimble_hci_and_controller_init failed: %s", esp_err_to_name(err));
-        return (int)err;
-    }
-
     int rc = nimble_port_init();
     if (rc != 0) {
         ESP_LOGE(TAG, "nimble_port_init failed: %d", rc);
@@ -567,9 +567,6 @@ int sdf_nuki_ble_init(
 
     ble_hs_cfg.reset_cb = sdf_nuki_ble_on_reset;
     ble_hs_cfg.sync_cb = sdf_nuki_ble_on_sync;
-
-    ble_svc_gap_init();
-    ble_svc_gatt_init();
 
     nimble_port_freertos_init(sdf_nuki_ble_host_task);
 

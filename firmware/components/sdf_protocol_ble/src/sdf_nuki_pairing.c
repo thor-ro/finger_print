@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "esp_system.h"
+#include "esp_random.h"
 #include "sdf_nuki_crypto.h"
 
 static uint16_t sdf_nuki_le16_read(const uint8_t *src)

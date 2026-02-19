@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#include "esp_system.h"
+#include "esp_random.h"
 #include "mbedtls/md.h"
 
 #include "sdf_nuki_crypto.h"
@@ -804,5 +804,76 @@ int sdf_nuki_parse_status(
     }
 
     *status_out = msg->payload[0];
+    return SDF_NUKI_RESULT_OK;
+}
+
+int sdf_nuki_parse_keyturner_states(
+    const sdf_nuki_message_t *msg,
+    sdf_nuki_keyturner_state_t *state_out)
+{
+    if (msg == NULL || state_out == NULL) {
+        return SDF_NUKI_RESULT_ERR_ARG;
+    }
+
+    if (msg->command_id != SDF_NUKI_CMD_KEYTURNER_STATES || msg->payload_len < 15) {
+        return SDF_NUKI_RESULT_ERR_ARG;
+    }
+
+    memset(state_out, 0, sizeof(*state_out));
+
+    const uint8_t *p = msg->payload;
+    state_out->nuki_state = p[0];
+    state_out->lock_state = p[1];
+    state_out->trigger = p[2];
+    state_out->current_time_year = sdf_nuki_le16_read(p + 3);
+    state_out->current_time_month = p[5];
+    state_out->current_time_day = p[6];
+    state_out->current_time_hour = p[7];
+    state_out->current_time_minute = p[8];
+    state_out->current_time_second = p[9];
+    state_out->timezone_offset_minutes = (int16_t)sdf_nuki_le16_read(p + 10);
+    state_out->critical_battery_state = p[12];
+    state_out->lock_n_go_timer = p[13];
+    state_out->last_lock_action = p[14];
+
+    // Optional fields are parsed progressively for extended payload variants.
+    if (msg->payload_len >= 16) {
+        state_out->has_last_lock_action_trigger = true;
+        state_out->last_lock_action_trigger = p[15];
+    }
+
+    if (msg->payload_len >= 17) {
+        state_out->has_last_lock_action_completion_status = true;
+        state_out->last_lock_action_completion_status = p[16];
+    }
+
+    if (msg->payload_len >= 18) {
+        state_out->has_door_sensor_state = true;
+        state_out->door_sensor_state = p[17];
+    }
+
+    if (msg->payload_len >= 19) {
+        state_out->has_nightmode_active = true;
+        state_out->nightmode_active = p[18];
+    }
+
+    return SDF_NUKI_RESULT_OK;
+}
+
+int sdf_nuki_parse_error_report(
+    const sdf_nuki_message_t *msg,
+    sdf_nuki_error_report_t *error_out)
+{
+    if (msg == NULL || error_out == NULL) {
+        return SDF_NUKI_RESULT_ERR_ARG;
+    }
+
+    if (msg->command_id != SDF_NUKI_CMD_ERROR_REPORT || msg->payload_len < 3) {
+        return SDF_NUKI_RESULT_ERR_ARG;
+    }
+
+    error_out->error_code = (int8_t)msg->payload[0];
+    error_out->command_identifier = sdf_nuki_le16_read(msg->payload + 1);
+
     return SDF_NUKI_RESULT_OK;
 }
