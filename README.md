@@ -20,3 +20,4 @@ Firmware and documentation for the Smart Door Finger (SDF) biometrics bridge dev
 * Debug profile defaults are in `firmware/sdkconfig.debug.defaults`.
 * Release profile defaults are in `firmware/sdkconfig.release.defaults`.
 * Use `SDKCONFIG_DEFAULTS` when invoking `idf.py` to select a profile.
+* Home Assistant/ZHA validation steps for lock/unlock/state reporting are documented in `doc/ha-validation-checklist.md`.

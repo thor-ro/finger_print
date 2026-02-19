@@ -118,6 +118,30 @@ static void sdf_app_update_zigbee_from_action(uint8_t lock_action)
     }
 }
 
+static const char *sdf_app_zb_programming_cmd_name(uint8_t cmd_id)
+{
+    switch (cmd_id) {
+    case 0x05:
+        return "SET_PIN_CODE";
+    case 0x07:
+        return "CLEAR_PIN_CODE";
+    case 0x08:
+        return "CLEAR_ALL_PIN_CODES";
+    case 0x09:
+        return "SET_USER_STATUS";
+    case 0x14:
+        return "SET_USER_TYPE";
+    case 0x16:
+        return "SET_RFID_CODE";
+    case 0x18:
+        return "CLEAR_RFID_CODE";
+    case 0x19:
+        return "CLEAR_ALL_RFID_CODES";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 static int sdf_app_start_unlock_unlatch_sequence(void)
 {
     if (s_latch_sequence_active || s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
@@ -132,12 +156,16 @@ static int sdf_app_start_unlock_unlatch_sequence(void)
     return res;
 }
 
-static esp_err_t sdf_app_on_zigbee_command(void *ctx, sdf_protocol_zigbee_command_t command)
+static esp_err_t sdf_app_on_zigbee_command(void *ctx, const sdf_protocol_zigbee_command_event_t *event)
 {
     (void)ctx;
 
+    if (event == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     int res = SDF_NUKI_RESULT_ERR_ARG;
-    switch (command) {
+    switch (event->command) {
     case SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK:
         ESP_LOGI(TAG, "Received Zigbee lock command");
         res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_LOCK, 0);
@@ -150,9 +178,25 @@ static esp_err_t sdf_app_on_zigbee_command(void *ctx, sdf_protocol_zigbee_comman
         ESP_LOGI(TAG, "Received Zigbee latch command (unlock + unlatch)");
         res = sdf_app_start_unlock_unlatch_sequence();
         break;
-    case SDF_PROTOCOL_ZIGBEE_COMMAND_PROGRAMMING_EVENT:
-        ESP_LOGI(TAG, "Received Zigbee programming event (enrollment flow pending)");
+    case SDF_PROTOCOL_ZIGBEE_COMMAND_PROGRAMMING_EVENT: {
+        const sdf_protocol_zigbee_programming_event_t *pe = &event->programming_event;
+        ESP_LOGI(
+            TAG,
+            "Programming command 0x%02X (%s), src=0x%04X/%u, user_id=%s%u, user_status=%s%u, user_type=%s%u, credential_len=%u",
+            (unsigned)pe->zcl_command_id,
+            sdf_app_zb_programming_cmd_name(pe->zcl_command_id),
+            (unsigned)pe->src_short_addr,
+            (unsigned)pe->src_endpoint,
+            pe->has_user_id ? "" : "n/a:",
+            (unsigned)(pe->has_user_id ? pe->user_id : 0),
+            pe->has_user_status ? "" : "n/a:",
+            (unsigned)(pe->has_user_status ? pe->user_status : 0),
+            pe->has_user_type ? "" : "n/a:",
+            (unsigned)(pe->has_user_type ? pe->user_type : 0),
+            (unsigned)(pe->has_credential ? pe->credential_len : 0));
+        /* Enrollment/user-management flow is implemented in a later roadmap phase. */
         return ESP_OK;
+    }
     default:
         return ESP_ERR_INVALID_ARG;
     }

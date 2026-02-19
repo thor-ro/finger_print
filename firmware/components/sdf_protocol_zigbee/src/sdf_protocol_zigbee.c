@@ -237,9 +237,9 @@ static void sdf_zigbee_apply_cached_attributes(void)
         alarm_mask);
 }
 
-static esp_err_t sdf_zigbee_dispatch_command(sdf_protocol_zigbee_command_t command)
+static esp_err_t sdf_zigbee_dispatch_command_event(const sdf_protocol_zigbee_command_event_t *event)
 {
-    if (s_state.lock == NULL) {
+    if (event == NULL || s_state.lock == NULL) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -253,11 +253,119 @@ static esp_err_t sdf_zigbee_dispatch_command(sdf_protocol_zigbee_command_t comma
     }
 
     if (cb == NULL) {
-        ESP_LOGW(TAG, "No command handler registered for Zigbee command %d", (int)command);
+        ESP_LOGW(TAG, "No command handler registered for Zigbee command %d", (int)event->command);
         return ESP_ERR_INVALID_STATE;
     }
 
-    return cb(ctx, command);
+    return cb(ctx, event);
+}
+
+static uint16_t sdf_zigbee_u16_from_le(const uint8_t *data)
+{
+    return (uint16_t)data[0] | ((uint16_t)data[1] << 8);
+}
+
+static bool sdf_zigbee_is_programming_command(uint8_t cmd_id)
+{
+    switch (cmd_id) {
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_PIN_CODE:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_PIN_CODE:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_ALL_PIN_CODES:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_USER_STATUS:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_USER_TYPE:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_RFID_CODE:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_RFID_CODE:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_ALL_RFID_CODES:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static esp_err_t sdf_zigbee_parse_programming_payload(
+    const esp_zb_zcl_privilege_command_message_t *message,
+    sdf_protocol_zigbee_programming_event_t *event)
+{
+    if (message == NULL || event == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    memset(event, 0, sizeof(*event));
+    event->zcl_command_id = message->info.command.id;
+    event->src_endpoint = message->info.src_endpoint;
+    if (message->info.src_address.addr_type == ESP_ZB_ZCL_ADDR_TYPE_SHORT) {
+        event->src_short_addr = message->info.src_address.u.short_addr;
+    }
+
+    const uint8_t *payload = (const uint8_t *)message->data;
+    size_t payload_len = message->size;
+
+    switch (message->info.command.id) {
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_PIN_CODE:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_RFID_CODE: {
+        if (payload == NULL || payload_len < 5U) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        event->has_user_id = true;
+        event->user_id = sdf_zigbee_u16_from_le(payload);
+        event->has_user_status = true;
+        event->user_status = payload[2];
+        event->has_user_type = true;
+        event->user_type = payload[3];
+
+        uint8_t credential_len = payload[4];
+        if (payload_len < (size_t)(5U + credential_len)) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+
+        event->has_credential = true;
+        event->credential_len = credential_len;
+        if (event->credential_len > sizeof(event->credential)) {
+            event->credential_len = sizeof(event->credential);
+        }
+        if (event->credential_len > 0U) {
+            memcpy(event->credential, payload + 5, event->credential_len);
+        }
+        return ESP_OK;
+    }
+
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_PIN_CODE:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_RFID_CODE:
+        if (payload == NULL || payload_len < 2U) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        event->has_user_id = true;
+        event->user_id = sdf_zigbee_u16_from_le(payload);
+        return ESP_OK;
+
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_USER_STATUS:
+        if (payload == NULL || payload_len < 3U) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        event->has_user_id = true;
+        event->user_id = sdf_zigbee_u16_from_le(payload);
+        event->has_user_status = true;
+        event->user_status = payload[2];
+        return ESP_OK;
+
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_USER_TYPE:
+        if (payload == NULL || payload_len < 3U) {
+            return ESP_ERR_INVALID_SIZE;
+        }
+        event->has_user_id = true;
+        event->user_id = sdf_zigbee_u16_from_le(payload);
+        event->has_user_type = true;
+        event->user_type = payload[2];
+        return ESP_OK;
+
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_ALL_PIN_CODES:
+    case ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_ALL_RFID_CODES:
+        return ESP_OK;
+
+    default:
+        return ESP_ERR_NOT_SUPPORTED;
+    }
 }
 
 static esp_err_t sdf_zigbee_handle_door_lock_command(const esp_zb_zcl_door_lock_lock_door_message_t *message)
@@ -275,18 +383,20 @@ static esp_err_t sdf_zigbee_handle_door_lock_command(const esp_zb_zcl_door_lock_
         return ESP_OK;
     }
 
-    sdf_protocol_zigbee_command_t command = SDF_PROTOCOL_ZIGBEE_COMMAND_PROGRAMMING_EVENT;
+    sdf_protocol_zigbee_command_event_t event = {
+        .command = SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK,
+    };
 
     switch (message->cmd_id) {
     case ESP_ZB_ZCL_CMD_DOOR_LOCK_LOCK_DOOR:
-        command = SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK;
+        event.command = SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK;
         break;
     case ESP_ZB_ZCL_CMD_DOOR_LOCK_UNLOCK_DOOR:
-        command = SDF_PROTOCOL_ZIGBEE_COMMAND_UNLOCK;
+        event.command = SDF_PROTOCOL_ZIGBEE_COMMAND_UNLOCK;
         break;
     case ESP_ZB_ZCL_CMD_DOOR_LOCK_UNLOCK_WITH_TIMEOUT:
         /* Use Unlock With Timeout as "open door" semantic: unlock + unlatch sequence. */
-        command = SDF_PROTOCOL_ZIGBEE_COMMAND_LATCH;
+        event.command = SDF_PROTOCOL_ZIGBEE_COMMAND_LATCH;
         break;
     case ESP_ZB_ZCL_CMD_DOOR_LOCK_TOGGLE: {
         uint8_t current_lock_state = SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED;
@@ -294,22 +404,101 @@ static esp_err_t sdf_zigbee_handle_door_lock_command(const esp_zb_zcl_door_lock_
             current_lock_state = s_state.lock_state;
             xSemaphoreGive(s_state.lock);
         }
-        command = (current_lock_state == SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED)
-                      ? SDF_PROTOCOL_ZIGBEE_COMMAND_UNLOCK
-                      : SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK;
+        event.command = (current_lock_state == SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED)
+                            ? SDF_PROTOCOL_ZIGBEE_COMMAND_UNLOCK
+                            : SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK;
         break;
     }
     default:
-        command = SDF_PROTOCOL_ZIGBEE_COMMAND_PROGRAMMING_EVENT;
-        break;
+        ESP_LOGW(TAG, "Unsupported Door Lock command id=0x%02X", message->cmd_id);
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
-    ESP_LOGI(TAG, "Received Zigbee Door Lock command id=0x%02X -> action=%d", message->cmd_id, (int)command);
-    esp_err_t err = sdf_zigbee_dispatch_command(command);
+    ESP_LOGI(
+        TAG,
+        "Received Zigbee Door Lock command id=0x%02X -> action=%d",
+        message->cmd_id,
+        (int)event.command);
+    esp_err_t err = sdf_zigbee_dispatch_command_event(&event);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Door Lock command dispatch failed: %s", esp_err_to_name(err));
     }
     return err;
+}
+
+static esp_err_t sdf_zigbee_handle_privilege_command(const esp_zb_zcl_privilege_command_message_t *message)
+{
+    if (message == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (message->info.status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+        ESP_LOGW(TAG, "Received invalid privilege command status=0x%02X", (unsigned)message->info.status);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (message->info.dst_endpoint != SDF_ZIGBEE_ENDPOINT ||
+        message->info.cluster != ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK ||
+        message->info.command.direction != ESP_ZB_ZCL_CMD_DIRECTION_TO_SRV ||
+        !sdf_zigbee_is_programming_command(message->info.command.id)) {
+        return ESP_OK;
+    }
+
+    sdf_protocol_zigbee_command_event_t event = {
+        .command = SDF_PROTOCOL_ZIGBEE_COMMAND_PROGRAMMING_EVENT,
+    };
+
+    esp_err_t parse_err = sdf_zigbee_parse_programming_payload(message, &event.programming_event);
+    if (parse_err != ESP_OK) {
+        ESP_LOGW(
+            TAG,
+            "Invalid programming command payload id=0x%02X size=%u: %s",
+            message->info.command.id,
+            (unsigned)message->size,
+            esp_err_to_name(parse_err));
+        return parse_err;
+    }
+
+    ESP_LOGI(
+        TAG,
+        "Programming command id=0x%02X from 0x%04X ep=%u",
+        event.programming_event.zcl_command_id,
+        event.programming_event.src_short_addr,
+        (unsigned)event.programming_event.src_endpoint);
+
+    esp_err_t err = sdf_zigbee_dispatch_command_event(&event);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Programming command dispatch failed: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+static void sdf_zigbee_register_privilege_commands(void)
+{
+    static const uint8_t programming_cmds[] = {
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_PIN_CODE,
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_PIN_CODE,
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_ALL_PIN_CODES,
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_USER_STATUS,
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_USER_TYPE,
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_SET_RFID_CODE,
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_RFID_CODE,
+        ESP_ZB_ZCL_CMD_DOOR_LOCK_CLEAR_ALL_RFID_CODES,
+    };
+
+    for (size_t i = 0; i < (sizeof(programming_cmds) / sizeof(programming_cmds[0])); ++i) {
+        esp_err_t err = esp_zb_zcl_add_privilege_command(
+            SDF_ZIGBEE_ENDPOINT,
+            ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
+            programming_cmds[i]);
+        if (err != ESP_OK) {
+            ESP_LOGW(
+                TAG,
+                "Failed to register privilege command 0x%02X: %s",
+                programming_cmds[i],
+                esp_err_to_name(err));
+        }
+    }
 }
 
 static esp_err_t sdf_zigbee_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message)
@@ -317,6 +506,8 @@ static esp_err_t sdf_zigbee_action_handler(esp_zb_core_action_callback_id_t call
     switch (callback_id) {
     case ESP_ZB_CORE_DOOR_LOCK_LOCK_DOOR_CB_ID:
         return sdf_zigbee_handle_door_lock_command((const esp_zb_zcl_door_lock_lock_door_message_t *)message);
+    case ESP_ZB_CORE_CMD_PRIVILEGE_COMMAND_REQ_CB_ID:
+        return sdf_zigbee_handle_privilege_command((const esp_zb_zcl_privilege_command_message_t *)message);
     default:
         ESP_LOGD(TAG, "Unhandled Zigbee callback id=0x%04X", (unsigned)callback_id);
         return ESP_OK;
@@ -383,6 +574,7 @@ static esp_err_t sdf_zigbee_register_endpoint(void)
     err = esp_zb_device_register(ep_list);
     ESP_RETURN_ON_ERROR(err, TAG, "Failed to register Zigbee endpoint");
 
+    sdf_zigbee_register_privilege_commands();
     esp_zb_core_action_handler_register(sdf_zigbee_action_handler);
     return ESP_OK;
 }

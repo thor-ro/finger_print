@@ -13,6 +13,26 @@ typedef enum {
     SDF_PROTOCOL_ZIGBEE_COMMAND_PROGRAMMING_EVENT = 3
 } sdf_protocol_zigbee_command_t;
 
+typedef struct {
+    uint8_t zcl_command_id;
+    uint16_t src_short_addr;
+    uint8_t src_endpoint;
+    bool has_user_id;
+    uint16_t user_id;
+    bool has_user_status;
+    uint8_t user_status;
+    bool has_user_type;
+    uint8_t user_type;
+    bool has_credential;
+    uint8_t credential_len;
+    uint8_t credential[32];
+} sdf_protocol_zigbee_programming_event_t;
+
+typedef struct {
+    sdf_protocol_zigbee_command_t command;
+    sdf_protocol_zigbee_programming_event_t programming_event;
+} sdf_protocol_zigbee_command_event_t;
+
 typedef enum {
     SDF_PROTOCOL_ZIGBEE_LOCK_STATE_NOT_FULLY_LOCKED = 0x00,
     SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED = 0x01,
@@ -22,7 +42,7 @@ typedef enum {
 
 typedef esp_err_t (*sdf_protocol_zigbee_command_cb)(
     void *ctx,
-    sdf_protocol_zigbee_command_t command);
+    const sdf_protocol_zigbee_command_event_t *event);
 
 esp_err_t sdf_protocol_zigbee_init(void);
 
