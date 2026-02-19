@@ -15,6 +15,8 @@ CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
 
 # Zigbee (option names may vary by ESP-IDF/esp-zigbee version).
 CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZED=y
+# CONFIG_ZB_ZCZR is not set
 
 # NVS
 CONFIG_NVS_ENCRYPTION=y

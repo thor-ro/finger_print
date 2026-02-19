@@ -8,12 +8,15 @@
 #include "sdf_nuki_ble_transport.h"
 #include "sdf_nuki_pairing.h"
 #include "sdf_protocol_ble.h"
+#include "sdf_protocol_zigbee.h"
 #include "sdf_storage.h"
 
 #define SDF_APP_ID 1u
 #define SDF_APP_NAME "SDF"
 #define SDF_APP_LOCK_SUFFIX "SDF"
 #define SDF_APP_LOCK_ACTION_MAX_RETRIES 2u
+#define SDF_APP_ZB_ALARM_ACTION_FAILURE 0x0001u
+#define SDF_APP_ZB_ALARM_LOW_BATTERY 0x0002u
 // Set this to your lock's BLE address to avoid accidental pairing.
 // Example for lock address AA:BB:CC:DD:EE:FF (LSB first for NimBLE):
 // {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}
@@ -32,6 +35,8 @@ static sdf_app_event_cb s_event_cb;
 static void *s_event_ctx;
 static bool s_has_creds;
 static bool s_pairing_active;
+static uint16_t s_zigbee_alarm_mask;
+static bool s_latch_sequence_active;
 
 typedef enum {
     SDF_APP_LOCK_FLOW_IDLE = 0,
@@ -59,6 +64,106 @@ static const char *sdf_app_status_name(uint8_t status)
     default:
         return "UNKNOWN";
     }
+}
+
+static void sdf_app_set_alarm_mask_bits(uint16_t set_bits, uint16_t clear_bits)
+{
+    s_zigbee_alarm_mask |= set_bits;
+    s_zigbee_alarm_mask &= (uint16_t)(~clear_bits);
+    sdf_protocol_zigbee_update_alarm_mask(s_zigbee_alarm_mask);
+}
+
+static void sdf_app_abort_latch_sequence(const char *reason)
+{
+    if (!s_latch_sequence_active) {
+        return;
+    }
+
+    s_latch_sequence_active = false;
+    ESP_LOGW(TAG, "Aborted latch sequence: %s", reason);
+}
+
+static sdf_protocol_zigbee_lock_state_t sdf_app_map_lock_state_to_zigbee(uint8_t nuki_lock_state)
+{
+    switch (nuki_lock_state) {
+    case 0x01: /* locked */
+        return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED;
+    case 0x03: /* unlocked */
+    case 0x05: /* unlatched */
+    case 0x06: /* unlocked (lock n go) */
+        return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNLOCKED;
+    case 0x02: /* unlocking */
+    case 0x04: /* locking */
+    case 0x07: /* unlatching */
+        return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_NOT_FULLY_LOCKED;
+    default:
+        return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED;
+    }
+}
+
+static void sdf_app_update_zigbee_from_action(uint8_t lock_action)
+{
+    switch (lock_action) {
+    case SDF_NUKI_LOCK_ACTION_LOCK:
+    case SDF_NUKI_LOCK_ACTION_LOCK_N_GO:
+    case SDF_NUKI_LOCK_ACTION_FULL_LOCK:
+        sdf_protocol_zigbee_update_lock_state(SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED);
+        break;
+    case SDF_NUKI_LOCK_ACTION_UNLOCK:
+    case SDF_NUKI_LOCK_ACTION_UNLATCH:
+        sdf_protocol_zigbee_update_lock_state(SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNLOCKED);
+        break;
+    default:
+        break;
+    }
+}
+
+static int sdf_app_start_unlock_unlatch_sequence(void)
+{
+    if (s_latch_sequence_active || s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
+        return SDF_NUKI_RESULT_ERR_INCOMPLETE;
+    }
+
+    int res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLOCK, 0);
+    if (res == SDF_NUKI_RESULT_OK) {
+        s_latch_sequence_active = true;
+        ESP_LOGI(TAG, "Started latch sequence: unlock -> unlatch");
+    }
+    return res;
+}
+
+static esp_err_t sdf_app_on_zigbee_command(void *ctx, sdf_protocol_zigbee_command_t command)
+{
+    (void)ctx;
+
+    int res = SDF_NUKI_RESULT_ERR_ARG;
+    switch (command) {
+    case SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK:
+        ESP_LOGI(TAG, "Received Zigbee lock command");
+        res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_LOCK, 0);
+        break;
+    case SDF_PROTOCOL_ZIGBEE_COMMAND_UNLOCK:
+        ESP_LOGI(TAG, "Received Zigbee unlock command");
+        res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLOCK, 0);
+        break;
+    case SDF_PROTOCOL_ZIGBEE_COMMAND_LATCH:
+        ESP_LOGI(TAG, "Received Zigbee latch command (unlock + unlatch)");
+        res = sdf_app_start_unlock_unlatch_sequence();
+        break;
+    case SDF_PROTOCOL_ZIGBEE_COMMAND_PROGRAMMING_EVENT:
+        ESP_LOGI(TAG, "Received Zigbee programming event (enrollment flow pending)");
+        return ESP_OK;
+    default:
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (res != SDF_NUKI_RESULT_OK) {
+        ESP_LOGW(TAG, "Unable to execute Zigbee command, lock action result=%d", res);
+        sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
 }
 
 static const char *sdf_app_error_name(int8_t code)
@@ -146,6 +251,8 @@ static int sdf_app_retry_lock_action(const char *reason)
             s_lock_flow.requested_action,
             (unsigned)s_lock_flow.retry_count,
             reason);
+        sdf_app_abort_latch_sequence("lock action failed");
+        sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
         sdf_app_lock_flow_reset();
         sdf_app_emit_lock_progress();
         return SDF_NUKI_RESULT_ERR_AUTH;
@@ -163,6 +270,7 @@ static int sdf_app_retry_lock_action(const char *reason)
     int res = sdf_app_request_challenge_locked();
     if (res != SDF_NUKI_RESULT_OK) {
         ESP_LOGE(TAG, "Challenge retry failed: %d", res);
+        sdf_app_abort_latch_sequence("challenge retry failed");
         sdf_app_lock_flow_reset();
     }
     sdf_app_emit_lock_progress();
@@ -293,6 +401,25 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg)
                 sdf_app_lock_flow_reset();
                 sdf_app_emit_lock_progress();
                 ESP_LOGI(TAG, "Lock action 0x%02X completed", action);
+                sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
+                sdf_app_update_zigbee_from_action(action);
+
+                if (s_latch_sequence_active && action == SDF_NUKI_LOCK_ACTION_UNLOCK) {
+                    int res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLATCH, 0);
+                    if (res == SDF_NUKI_RESULT_OK) {
+                        ESP_LOGI(TAG, "Latch sequence continuing with unlatch");
+                        return;
+                    }
+                    ESP_LOGW(TAG, "Failed to start unlatch step in latch sequence: %d", res);
+                    sdf_app_abort_latch_sequence("failed to start unlatch");
+                    sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+                } else if (s_latch_sequence_active) {
+                    if (action == SDF_NUKI_LOCK_ACTION_UNLATCH) {
+                        ESP_LOGI(TAG, "Latch sequence finished");
+                    }
+                    s_latch_sequence_active = false;
+                }
+
                 sdf_app_request_keyturner_state();
                 return;
             }
@@ -324,6 +451,15 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg)
         event.lock_action = s_lock_flow.requested_action;
         event.retry_count = s_lock_flow.retry_count;
         sdf_app_emit_event(&event);
+
+        sdf_protocol_zigbee_update_lock_state(sdf_app_map_lock_state_to_zigbee(state.lock_state));
+        if (state.critical_battery_state) {
+            sdf_protocol_zigbee_update_battery_percent(10);
+            sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_LOW_BATTERY, 0);
+        } else {
+            sdf_protocol_zigbee_update_battery_percent(100);
+            sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_LOW_BATTERY);
+        }
         return;
     }
 
@@ -348,6 +484,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg)
         event.lock_action = s_lock_flow.requested_action;
         event.retry_count = s_lock_flow.retry_count;
         sdf_app_emit_event(&event);
+        sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
 
         if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
             sdf_app_retry_lock_action("received error report");
@@ -365,6 +502,7 @@ static void sdf_app_on_ble_ready(void *ctx)
 
     if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
         ESP_LOGW(TAG, "Resetting stale lock action flow after reconnect");
+        sdf_app_abort_latch_sequence("BLE reconnect during action");
         sdf_app_lock_flow_reset();
         sdf_app_emit_lock_progress();
     }
@@ -433,6 +571,8 @@ static void sdf_app_on_ble_rx(
 void sdf_app_init(void)
 {
     sdf_app_lock_flow_reset();
+    s_zigbee_alarm_mask = 0;
+    s_latch_sequence_active = false;
 
     esp_err_t err = sdf_storage_init();
     if (err != ESP_OK) {
@@ -460,6 +600,20 @@ void sdf_app_init(void)
         NULL,
         sdf_app_on_message,
         NULL);
+
+    err = sdf_protocol_zigbee_set_command_handler(sdf_app_on_zigbee_command, NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set Zigbee command handler: %s", esp_err_to_name(err));
+    }
+
+    err = sdf_protocol_zigbee_init();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to start Zigbee protocol: %s", esp_err_to_name(err));
+    } else {
+        sdf_protocol_zigbee_update_lock_state(SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED);
+        sdf_protocol_zigbee_update_battery_percent(100);
+        sdf_protocol_zigbee_update_alarm_mask(0);
+    }
 
     sdf_nuki_ble_init(&s_ble, sdf_app_on_ble_rx, NULL, sdf_app_on_ble_ready, NULL);
     sdf_nuki_ble_set_target_addr(&s_ble, &SDF_NUKI_TARGET_ADDR);
