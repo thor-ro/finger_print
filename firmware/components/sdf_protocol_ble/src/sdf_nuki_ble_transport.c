@@ -391,6 +391,10 @@ static int sdf_nuki_ble_start_keyturner_service_discovery(void)
 
 static void sdf_nuki_ble_start_scan(void)
 {
+    if (s_transport == NULL || !s_transport->enabled || !s_transport->start_requested) {
+        return;
+    }
+
     struct ble_gap_disc_params params;
     memset(&params, 0, sizeof(params));
     params.itvl = SDF_NUKI_SCAN_ITVL;
@@ -414,7 +418,7 @@ static void sdf_nuki_ble_start_scan(void)
 
 static void sdf_nuki_ble_handle_adv(const struct ble_gap_event *event)
 {
-    if (s_transport->state != SDF_NUKI_BLE_STATE_SCANNING) {
+    if (!s_transport->enabled || s_transport->state != SDF_NUKI_BLE_STATE_SCANNING) {
         return;
     }
 
@@ -486,7 +490,7 @@ static int sdf_nuki_ble_gap_event(struct ble_gap_event *event, void *arg)
         sdf_nuki_ble_handle_adv(event);
         return 0;
     case BLE_GAP_EVENT_DISC_COMPLETE:
-        if (s_pending_connect) {
+        if (s_transport->enabled && s_pending_connect) {
             s_pending_connect = false;
             sdf_nuki_ble_connect(&s_pending_addr);
         }
@@ -494,7 +498,9 @@ static int sdf_nuki_ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_CONNECT:
         if (event->connect.status != 0) {
             ESP_LOGW(TAG, "Connect failed; status=%d", event->connect.status);
-            sdf_nuki_ble_start_scan();
+            if (s_transport->enabled) {
+                sdf_nuki_ble_start_scan();
+            }
             return 0;
         }
         s_transport->conn_handle = event->connect.conn_handle;
@@ -526,7 +532,9 @@ static int sdf_nuki_ble_gap_event(struct ble_gap_event *event, void *arg)
         s_transport->usdio_handle = 0;
         s_transport->gdio_cccd = 0;
         s_transport->usdio_cccd = 0;
-        sdf_nuki_ble_start_scan();
+        if (s_transport->enabled && s_transport->start_requested) {
+            sdf_nuki_ble_start_scan();
+        }
         return 0;
     case BLE_GAP_EVENT_NOTIFY_RX:
         sdf_nuki_ble_handle_notify(event);
@@ -556,6 +564,7 @@ int sdf_nuki_ble_init(
     transport->ready_cb = ready_cb;
     transport->ready_ctx = ready_ctx;
     transport->conn_handle = BLE_HS_CONN_HANDLE_NONE;
+    transport->enabled = true;
 
     s_transport = transport;
 
@@ -580,11 +589,48 @@ int sdf_nuki_ble_start(sdf_nuki_ble_transport_t *transport)
     }
 
     transport->start_requested = true;
-    if (transport->synced) {
+    if (transport->synced && transport->enabled) {
         sdf_nuki_ble_start_scan();
     }
 
     return 0;
+}
+
+int sdf_nuki_ble_set_enabled(sdf_nuki_ble_transport_t *transport, bool enabled)
+{
+    if (transport == NULL) {
+        return -1;
+    }
+
+    if (transport->enabled == enabled) {
+        return 0;
+    }
+
+    transport->enabled = enabled;
+    if (!enabled) {
+        s_pending_connect = false;
+        if (transport->state == SDF_NUKI_BLE_STATE_SCANNING) {
+            ble_gap_disc_cancel();
+        }
+        if (transport->conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+            ble_gap_terminate(transport->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+        }
+        transport->state = SDF_NUKI_BLE_STATE_IDLE;
+        return 0;
+    }
+
+    if (transport->start_requested &&
+        transport->synced &&
+        transport->conn_handle == BLE_HS_CONN_HANDLE_NONE &&
+        transport->state == SDF_NUKI_BLE_STATE_IDLE) {
+        sdf_nuki_ble_start_scan();
+    }
+    return 0;
+}
+
+bool sdf_nuki_ble_is_enabled(const sdf_nuki_ble_transport_t *transport)
+{
+    return transport != NULL && transport->enabled;
 }
 
 int sdf_nuki_ble_set_target_addr(

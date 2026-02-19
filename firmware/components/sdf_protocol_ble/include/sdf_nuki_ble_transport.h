@@ -52,6 +52,7 @@ typedef struct {
     sdf_nuki_ble_state_t state;
     bool synced;
     bool start_requested;
+    bool enabled;
 
     sdf_nuki_ble_rx_cb rx_cb;
     void *rx_ctx;
@@ -67,6 +68,9 @@ int sdf_nuki_ble_init(
     void *ready_ctx);
 
 int sdf_nuki_ble_start(sdf_nuki_ble_transport_t *transport);
+
+int sdf_nuki_ble_set_enabled(sdf_nuki_ble_transport_t *transport, bool enabled);
+bool sdf_nuki_ble_is_enabled(const sdf_nuki_ble_transport_t *transport);
 
 int sdf_nuki_ble_set_target_addr(
     sdf_nuki_ble_transport_t *transport,

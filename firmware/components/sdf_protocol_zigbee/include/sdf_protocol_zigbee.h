@@ -58,4 +58,7 @@ esp_err_t sdf_protocol_zigbee_update_alarm_mask(uint16_t alarm_mask);
 
 bool sdf_protocol_zigbee_is_ready(void);
 
+esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms);
+uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void);
+
 #endif /* SDF_PROTOCOL_ZIGBEE_H */

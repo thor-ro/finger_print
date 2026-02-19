@@ -4,6 +4,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 #include "sdf_nuki_ble_transport.h"
 #include "sdf_nuki_pairing.h"
@@ -11,6 +12,7 @@
 #include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
 #include "sdf_storage.h"
+#include "sdf_tasks.h"
 
 #define SDF_APP_ID 1u
 #define SDF_APP_NAME "SDF"
@@ -24,6 +26,16 @@
 #define SDF_APP_FP_UART_RX_PIN 5
 #define SDF_APP_FP_MATCH_POLL_MS 400u
 #define SDF_APP_FP_MATCH_COOLDOWN_MS 3000u
+#define SDF_APP_FP_WAKE_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_WAKE_GPIO)
+
+#define SDF_APP_POWER_CHECKIN_INTERVAL_MS ((uint32_t)CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS)
+#define SDF_APP_POWER_IDLE_BEFORE_SLEEP_MS ((uint32_t)CONFIG_SDF_POWER_IDLE_BEFORE_SLEEP_MS)
+#define SDF_APP_POWER_POST_WAKE_GUARD_MS ((uint32_t)CONFIG_SDF_POWER_POST_WAKE_GUARD_MS)
+#define SDF_APP_POWER_LOOP_INTERVAL_MS ((uint32_t)CONFIG_SDF_POWER_LOOP_INTERVAL_MS)
+#define SDF_APP_POWER_BATTERY_REPORT_MS ((uint32_t)CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS)
+#define SDF_APP_POWER_BATTERY_DEFAULT_PERCENT ((uint8_t)CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT)
+#define SDF_APP_POWER_ENABLE_LIGHT_SLEEP CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP
+#define SDF_APP_POWER_ENABLE_BLE_RADIO_GATING CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING
 // Set this to your lock's BLE address to avoid accidental pairing.
 // Example for lock address AA:BB:CC:DD:EE:FF (LSB first for NimBLE):
 // {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}
@@ -44,6 +56,7 @@ static bool s_has_creds;
 static bool s_pairing_active;
 static uint16_t s_zigbee_alarm_mask;
 static bool s_latch_sequence_active;
+static uint8_t s_battery_percent_cached = SDF_APP_POWER_BATTERY_DEFAULT_PERCENT;
 
 typedef enum {
     SDF_APP_LOCK_FLOW_IDLE = 0,
@@ -216,9 +229,69 @@ static uint8_t sdf_app_choose_fingerprint_permission(const sdf_protocol_zigbee_p
     return 1;
 }
 
+static const char *sdf_app_power_wake_reason_name(sdf_power_wake_reason_t reason)
+{
+    switch (reason) {
+    case SDF_POWER_WAKE_REASON_TIMER:
+        return "timer";
+    case SDF_POWER_WAKE_REASON_FINGERPRINT:
+        return "fingerprint";
+    case SDF_POWER_WAKE_REASON_OTHER:
+        return "other";
+    case SDF_POWER_WAKE_REASON_NONE:
+    default:
+        return "none";
+    }
+}
+
+static void sdf_app_update_battery_percent(uint8_t battery_percent)
+{
+    s_battery_percent_cached = battery_percent;
+    esp_err_t err = sdf_tasks_set_battery_percent(battery_percent);
+    if (err != ESP_OK) {
+        sdf_protocol_zigbee_update_battery_percent(battery_percent);
+    }
+}
+
+static bool sdf_app_power_busy(void *ctx)
+{
+    (void)ctx;
+    if (s_pairing_active || s_latch_sequence_active) {
+        return true;
+    }
+    if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
+        return true;
+    }
+    return sdf_services_is_enrollment_active();
+}
+
+static void sdf_app_power_wakeup(void *ctx, sdf_power_wake_reason_t reason)
+{
+    (void)ctx;
+    sdf_tasks_mark_activity();
+    ESP_LOGI(TAG, "Power wake event: %s", sdf_app_power_wake_reason_name(reason));
+
+    if (reason == SDF_POWER_WAKE_REASON_TIMER &&
+        s_has_creds &&
+        !s_pairing_active &&
+        sdf_nuki_ble_is_ready(&s_ble)) {
+        int res = sdf_app_request_keyturner_state();
+        if (res != SDF_NUKI_RESULT_OK) {
+            ESP_LOGD(TAG, "Periodic keyturner refresh skipped: %d", res);
+        }
+    }
+}
+
+static int sdf_app_power_battery_percent(void *ctx)
+{
+    (void)ctx;
+    return (int)s_battery_percent_cached;
+}
+
 static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id)
 {
     (void)ctx;
+    sdf_tasks_mark_activity();
 
     if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
         return SDF_NUKI_RESULT_ERR_NO_KEY;
@@ -231,6 +304,7 @@ static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id)
 static void sdf_app_on_enrollment_state(void *ctx, const sdf_enrollment_sm_t *state)
 {
     (void)ctx;
+    sdf_tasks_mark_activity();
 
     if (state == NULL) {
         return;
@@ -269,6 +343,7 @@ static int sdf_app_start_unlock_unlatch_sequence(void)
 static esp_err_t sdf_app_on_zigbee_command(void *ctx, const sdf_protocol_zigbee_command_event_t *event)
 {
     (void)ctx;
+    sdf_tasks_mark_activity();
 
     if (event == NULL) {
         return ESP_ERR_INVALID_ARG;
@@ -475,6 +550,7 @@ static int sdf_app_send_unencrypted(void *ctx, const uint8_t *data, size_t len)
 
 int sdf_app_request_keyturner_state(void)
 {
+    sdf_tasks_mark_activity();
     if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
         return SDF_NUKI_RESULT_ERR_ARG;
     }
@@ -488,6 +564,7 @@ int sdf_app_request_keyturner_state(void)
 
 int sdf_app_lock_action(uint8_t lock_action, uint8_t flags)
 {
+    sdf_tasks_mark_activity();
     if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
         return SDF_NUKI_RESULT_ERR_ARG;
     }
@@ -525,6 +602,7 @@ void sdf_app_set_event_callback(sdf_app_event_cb cb, void *ctx)
 static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg)
 {
     (void)ctx;
+    sdf_tasks_mark_activity();
 
     if (msg == NULL) {
         return;
@@ -638,10 +716,10 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg)
 
         sdf_protocol_zigbee_update_lock_state(sdf_app_map_lock_state_to_zigbee(state.lock_state));
         if (state.critical_battery_state) {
-            sdf_protocol_zigbee_update_battery_percent(10);
+            sdf_app_update_battery_percent(10);
             sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_LOW_BATTERY, 0);
         } else {
-            sdf_protocol_zigbee_update_battery_percent(100);
+            sdf_app_update_battery_percent(100);
             sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_LOW_BATTERY);
         }
         return;
@@ -682,6 +760,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg)
 static void sdf_app_on_ble_ready(void *ctx)
 {
     (void)ctx;
+    sdf_tasks_mark_activity();
     ESP_LOGI(TAG, "BLE transport ready");
 
     if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
@@ -719,6 +798,7 @@ static void sdf_app_on_ble_rx(
     size_t len)
 {
     (void)ctx;
+    sdf_tasks_mark_activity();
 
     if (channel == SDF_NUKI_BLE_CHANNEL_GDIO) {
         if (s_pairing_active) {
@@ -802,6 +882,11 @@ void sdf_app_init(void)
         ESP_LOGW(TAG, "Failed to initialize fingerprint services: %s", esp_err_to_name(err));
     }
 
+    err = sdf_protocol_zigbee_set_checkin_interval_ms(SDF_APP_POWER_CHECKIN_INTERVAL_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to set Zigbee check-in interval: %s", esp_err_to_name(err));
+    }
+
     err = sdf_protocol_zigbee_set_command_handler(sdf_app_on_zigbee_command, NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to set Zigbee command handler: %s", esp_err_to_name(err));
@@ -812,7 +897,7 @@ void sdf_app_init(void)
         ESP_LOGW(TAG, "Failed to start Zigbee protocol: %s", esp_err_to_name(err));
     } else {
         sdf_protocol_zigbee_update_lock_state(SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED);
-        sdf_protocol_zigbee_update_battery_percent(100);
+        sdf_app_update_battery_percent(SDF_APP_POWER_BATTERY_DEFAULT_PERCENT);
         sdf_protocol_zigbee_update_alarm_mask(0);
     }
 
@@ -820,4 +905,30 @@ void sdf_app_init(void)
     sdf_nuki_ble_set_target_addr(&s_ble, &SDF_NUKI_TARGET_ADDR);
     ESP_LOGI(TAG, "Starting BLE scan (target address set)");
     sdf_nuki_ble_start(&s_ble);
+
+    sdf_power_manager_config_t power_cfg;
+    sdf_tasks_get_default_power_config(&power_cfg);
+    power_cfg.ble_transport = &s_ble;
+    power_cfg.fingerprint_wake_gpio = SDF_APP_FP_WAKE_GPIO;
+    power_cfg.checkin_interval_ms = SDF_APP_POWER_CHECKIN_INTERVAL_MS;
+    power_cfg.idle_before_sleep_ms = SDF_APP_POWER_IDLE_BEFORE_SLEEP_MS;
+    power_cfg.post_wake_guard_ms = SDF_APP_POWER_POST_WAKE_GUARD_MS;
+    power_cfg.loop_interval_ms = SDF_APP_POWER_LOOP_INTERVAL_MS;
+    power_cfg.battery_report_interval_ms = SDF_APP_POWER_BATTERY_REPORT_MS;
+    power_cfg.enable_light_sleep = SDF_APP_POWER_ENABLE_LIGHT_SLEEP;
+    power_cfg.enable_ble_radio_gating = SDF_APP_POWER_ENABLE_BLE_RADIO_GATING;
+    power_cfg.battery_percent_default = SDF_APP_POWER_BATTERY_DEFAULT_PERCENT;
+    power_cfg.busy_cb = sdf_app_power_busy;
+    power_cfg.busy_ctx = NULL;
+    power_cfg.wake_cb = sdf_app_power_wakeup;
+    power_cfg.wake_ctx = NULL;
+    power_cfg.battery_cb = sdf_app_power_battery_percent;
+    power_cfg.battery_ctx = NULL;
+
+    err = sdf_tasks_init_power_manager(&power_cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to start power manager: %s", esp_err_to_name(err));
+    }
+
+    sdf_tasks_mark_activity();
 }

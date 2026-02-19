@@ -2,6 +2,25 @@
 
 This file tracks firmware-level changes and maps them to project versions.
 
+## 0.1.3 — 2026-02-19
+
+### Added
+- SDK configuration options for Phase 5 power management:
+  - Zigbee check-in interval
+  - idle-before-sleep window
+  - post-wake guard window
+  - power task loop interval
+  - battery reporting interval
+  - fingerprint WAKE GPIO
+  - light-sleep enable toggle
+  - BLE radio gating enable toggle
+  - default battery percentage
+- New power options menu in `/Users/thorstenropertz/workspace/smart_door/firmware/components/sdf_tasks/Kconfig`.
+
+### Changed
+- Replaced hardcoded power values in app/power initialization with `CONFIG_SDF_POWER_*` options.
+- Updated default project profile values in `/Users/thorstenropertz/workspace/smart_door/firmware/sdkconfig.defaults`.
+
 ## 0.1.2 — 2026-02-19
 
 ### Added

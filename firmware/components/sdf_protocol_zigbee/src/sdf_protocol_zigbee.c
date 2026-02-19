@@ -24,7 +24,9 @@
 
 #define SDF_ZIGBEE_INSTALL_CODE_POLICY false
 #define SDF_ZIGBEE_ED_TIMEOUT ESP_ZB_ED_AGING_TIMEOUT_64MIN
-#define SDF_ZIGBEE_ED_KEEP_ALIVE_MS 3000U
+#define SDF_ZIGBEE_CHECKIN_INTERVAL_DEFAULT_MS 3000U
+#define SDF_ZIGBEE_CHECKIN_INTERVAL_MIN_MS 1000U
+#define SDF_ZIGBEE_CHECKIN_INTERVAL_MAX_MS 600000U
 #define SDF_ZIGBEE_PRIMARY_CHANNEL_MASK ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK
 
 static const char *TAG = "sdf_protocol_zigbee";
@@ -40,6 +42,7 @@ typedef struct {
     uint8_t lock_state;
     uint8_t battery_percent_remaining;
     uint16_t alarm_mask;
+    uint32_t checkin_interval_ms;
 } sdf_protocol_zigbee_state_t;
 
 static sdf_protocol_zigbee_state_t s_state = {
@@ -53,6 +56,7 @@ static sdf_protocol_zigbee_state_t s_state = {
     .lock_state = SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED,
     .battery_percent_remaining = 200,
     .alarm_mask = 0,
+    .checkin_interval_ms = SDF_ZIGBEE_CHECKIN_INTERVAL_DEFAULT_MS,
 };
 
 static void sdf_zigbee_start_commissioning_cb(uint8_t mode_mask)
@@ -583,12 +587,18 @@ static void sdf_zigbee_task(void *arg)
 {
     (void)arg;
 
+    uint32_t checkin_interval_ms = SDF_ZIGBEE_CHECKIN_INTERVAL_DEFAULT_MS;
+    if (s_state.lock != NULL && xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+        checkin_interval_ms = s_state.checkin_interval_ms;
+        xSemaphoreGive(s_state.lock);
+    }
+
     esp_zb_cfg_t zb_nwk_cfg = {
         .esp_zb_role = ESP_ZB_DEVICE_TYPE_ED,
         .install_code_policy = SDF_ZIGBEE_INSTALL_CODE_POLICY,
         .nwk_cfg.zed_cfg = {
             .ed_timeout = SDF_ZIGBEE_ED_TIMEOUT,
-            .keep_alive = SDF_ZIGBEE_ED_KEEP_ALIVE_MS,
+            .keep_alive = checkin_interval_ms,
         },
     };
 
@@ -806,4 +816,44 @@ bool sdf_protocol_zigbee_is_ready(void)
         xSemaphoreGive(s_state.lock);
     }
     return ready;
+}
+
+esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms)
+{
+    if (interval_ms < SDF_ZIGBEE_CHECKIN_INTERVAL_MIN_MS ||
+        interval_ms > SDF_ZIGBEE_CHECKIN_INTERVAL_MAX_MS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_state.lock == NULL) {
+        s_state.checkin_interval_ms = interval_ms;
+        return ESP_OK;
+    }
+
+    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (s_state.stack_started) {
+        xSemaphoreGive(s_state.lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_state.checkin_interval_ms = interval_ms;
+    xSemaphoreGive(s_state.lock);
+    return ESP_OK;
+}
+
+uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void)
+{
+    if (s_state.lock == NULL) {
+        return s_state.checkin_interval_ms;
+    }
+
+    uint32_t interval_ms = s_state.checkin_interval_ms;
+    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+        interval_ms = s_state.checkin_interval_ms;
+        xSemaphoreGive(s_state.lock);
+    }
+    return interval_ms;
 }

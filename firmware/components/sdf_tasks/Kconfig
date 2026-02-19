@@ -1,0 +1,64 @@
+menu "SDF Power Manager"
+
+config SDF_POWER_CHECKIN_INTERVAL_MS
+    int "Zigbee check-in interval (ms)"
+    range 1000 600000
+    default 15000
+    help
+        Period used for sleepy-end-device timer wakeups and Zigbee keep-alive.
+
+config SDF_POWER_IDLE_BEFORE_SLEEP_MS
+    int "Idle before light sleep (ms)"
+    range 500 600000
+    default 5000
+    help
+        Minimum inactivity window before entering light sleep.
+
+config SDF_POWER_POST_WAKE_GUARD_MS
+    int "Post-wake guard window (ms)"
+    range 100 60000
+    default 1500
+    help
+        Guard time after waking before sleep can be entered again.
+
+config SDF_POWER_LOOP_INTERVAL_MS
+    int "Power task loop interval (ms)"
+    range 50 10000
+    default 250
+    help
+        Scheduler interval for the power manager task.
+
+config SDF_POWER_BATTERY_REPORT_INTERVAL_MS
+    int "Battery report interval (ms)"
+    range 1000 86400000
+    default 60000
+    help
+        Interval for periodic battery attribute updates.
+
+config SDF_POWER_BATTERY_DEFAULT_PERCENT
+    int "Default battery percent"
+    range 0 100
+    default 100
+    help
+        Fallback battery percentage used at boot before sampling.
+
+config SDF_POWER_FP_WAKE_GPIO
+    int "Fingerprint WAKE GPIO"
+    range -1 30
+    default 6
+    help
+        GPIO used as fingerprint wake source. Set to -1 to disable GPIO wake.
+
+config SDF_POWER_ENABLE_LIGHT_SLEEP
+    bool "Enable light sleep"
+    default y
+    help
+        Enables timer/GPIO wake based light sleep operation.
+
+config SDF_POWER_ENABLE_BLE_RADIO_GATING
+    bool "Enable BLE radio gating while sleeping"
+    default y
+    help
+        Temporarily disables BLE scanning/connection while sleeping.
+
+endmenu
