@@ -49,6 +49,13 @@ config SDF_POWER_FP_WAKE_GPIO
     help
         GPIO used as fingerprint wake source. Set to -1 to disable GPIO wake.
 
+config SDF_POWER_FP_EN_GPIO
+    int "Fingerprint Power Enable GPIO"
+    range -1 30
+    default 7
+    help
+        GPIO used to enable/disable power to the fingerprint sensor. Set to -1 to disable.
+
 config SDF_POWER_ENABLE_LIGHT_SLEEP
     bool "Enable light sleep"
     default y
