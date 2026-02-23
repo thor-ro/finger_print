@@ -1,9 +1,9 @@
 #ifndef SDF_PROTOCOL_BLE_H
 #define SDF_PROTOCOL_BLE_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #define SDF_NUKI_NONCE_LEN 24
 #define SDF_NUKI_CHALLENGE_NONCE_LEN 32
@@ -15,174 +15,114 @@
 #define SDF_NUKI_MAX_MESSAGE (30 + 16 + SDF_NUKI_MAX_PDATA)
 
 typedef enum {
-    SDF_NUKI_RESULT_OK = 0,
-    SDF_NUKI_RESULT_ERR_ARG = -1,
-    SDF_NUKI_RESULT_ERR_NO_KEY = -2,
-    SDF_NUKI_RESULT_ERR_CRYPTO = -3,
-    SDF_NUKI_RESULT_ERR_CRC = -4,
-    SDF_NUKI_RESULT_ERR_AUTH = -5,
-    SDF_NUKI_RESULT_ERR_TOO_LARGE = -6,
-    SDF_NUKI_RESULT_ERR_INCOMPLETE = -7,
-    SDF_NUKI_RESULT_ERR_NONCE_REUSE = -8
+  SDF_NUKI_RESULT_OK = 0,
+  SDF_NUKI_RESULT_ERR_ARG = -1,
+  SDF_NUKI_RESULT_ERR_NO_KEY = -2,
+  SDF_NUKI_RESULT_ERR_CRYPTO = -3,
+  SDF_NUKI_RESULT_ERR_CRC = -4,
+  SDF_NUKI_RESULT_ERR_AUTH = -5,
+  SDF_NUKI_RESULT_ERR_TOO_LARGE = -6,
+  SDF_NUKI_RESULT_ERR_INCOMPLETE = -7,
+  SDF_NUKI_RESULT_ERR_NONCE_REUSE = -8
 } sdf_nuki_result_t;
 
 typedef enum {
-    SDF_NUKI_CMD_REQUEST_DATA = 0x0001,
-    SDF_NUKI_CMD_PUBLIC_KEY = 0x0003,
-    SDF_NUKI_CMD_CHALLENGE = 0x0004,
-    SDF_NUKI_CMD_AUTHORIZATION_AUTHENTICATOR = 0x0005,
-    SDF_NUKI_CMD_AUTHORIZATION_DATA = 0x0006,
-    SDF_NUKI_CMD_AUTHORIZATION_ID = 0x0007,
-    SDF_NUKI_CMD_AUTHORIZATION_ID_CONFIRMATION = 0x001E,
-    SDF_NUKI_CMD_KEYTURNER_STATES = 0x000C,
-    SDF_NUKI_CMD_LOCK_ACTION = 0x000D,
-    SDF_NUKI_CMD_STATUS = 0x000E,
-    SDF_NUKI_CMD_ERROR_REPORT = 0x0012,
-    SDF_NUKI_CMD_SIMPLE_LOCK_ACTION = 0x0100,
-    SDF_NUKI_CMD_AUTHORIZATION_INFO = 0x004C
+  SDF_NUKI_CMD_REQUEST_DATA = 0x0001,
+  SDF_NUKI_CMD_PUBLIC_KEY = 0x0003,
+  SDF_NUKI_CMD_CHALLENGE = 0x0004,
+  SDF_NUKI_CMD_AUTHORIZATION_AUTHENTICATOR = 0x0005,
+  SDF_NUKI_CMD_AUTHORIZATION_DATA = 0x0006,
+  SDF_NUKI_CMD_AUTHORIZATION_ID = 0x0007,
+  SDF_NUKI_CMD_AUTHORIZATION_ID_CONFIRMATION = 0x001E,
+  SDF_NUKI_CMD_KEYTURNER_STATES = 0x000C,
+  SDF_NUKI_CMD_LOCK_ACTION = 0x000D,
+  SDF_NUKI_CMD_STATUS = 0x000E,
+  SDF_NUKI_CMD_ERROR_REPORT = 0x0012,
+  SDF_NUKI_CMD_SIMPLE_LOCK_ACTION = 0x0100,
+  SDF_NUKI_CMD_AUTHORIZATION_INFO = 0x004C
 } sdf_nuki_command_t;
 
-typedef enum {
-    SDF_NUKI_LOCK_ACTION_UNLOCK = 0x01,
-    SDF_NUKI_LOCK_ACTION_LOCK = 0x02,
-    SDF_NUKI_LOCK_ACTION_UNLATCH = 0x03,
-    SDF_NUKI_LOCK_ACTION_LOCK_N_GO = 0x04,
-    SDF_NUKI_LOCK_ACTION_LOCK_N_GO_UNLATCH = 0x05,
-    SDF_NUKI_LOCK_ACTION_FULL_LOCK = 0x06
-} sdf_nuki_lock_action_t;
-
-typedef enum {
-    SDF_NUKI_STATUS_COMPLETE = 0x00,
-    SDF_NUKI_STATUS_ACCEPTED = 0x01
-} sdf_nuki_status_t;
+#include "sdf_common.h"
 
 typedef struct {
-    uint16_t command_id;
-    const uint8_t *payload;
-    size_t payload_len;
+  uint16_t command_id;
+  const uint8_t *payload;
+  size_t payload_len;
 } sdf_nuki_message_t;
-
-typedef struct {
-    uint8_t nuki_state;
-    uint8_t lock_state;
-    uint8_t trigger;
-    uint16_t current_time_year;
-    uint8_t current_time_month;
-    uint8_t current_time_day;
-    uint8_t current_time_hour;
-    uint8_t current_time_minute;
-    uint8_t current_time_second;
-    int16_t timezone_offset_minutes;
-    uint8_t critical_battery_state;
-    uint8_t lock_n_go_timer;
-    uint8_t last_lock_action;
-    bool has_last_lock_action_trigger;
-    uint8_t last_lock_action_trigger;
-    bool has_last_lock_action_completion_status;
-    uint8_t last_lock_action_completion_status;
-    bool has_door_sensor_state;
-    uint8_t door_sensor_state;
-    bool has_nightmode_active;
-    uint8_t nightmode_active;
-} sdf_nuki_keyturner_state_t;
-
-typedef struct {
-    int8_t error_code;
-    uint16_t command_identifier;
-} sdf_nuki_error_report_t;
 
 typedef int (*sdf_nuki_send_cb)(void *ctx, const uint8_t *data, size_t len);
 typedef void (*sdf_nuki_message_cb)(void *ctx, const sdf_nuki_message_t *msg);
 
 typedef struct {
-    uint32_t authorization_id;
-    uint32_t app_id;
-    uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN];
+  uint32_t authorization_id;
+  uint32_t app_id;
+  uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN];
 } sdf_nuki_credentials_t;
 
 typedef struct {
-    sdf_nuki_credentials_t creds;
-    sdf_nuki_send_cb send_encrypted_cb;
-    void *send_encrypted_ctx;
-    sdf_nuki_send_cb send_unencrypted_cb;
-    void *send_unencrypted_ctx;
-    sdf_nuki_message_cb message_cb;
-    void *message_ctx;
+  sdf_nuki_credentials_t creds;
+  sdf_nuki_send_cb send_encrypted_cb;
+  void *send_encrypted_ctx;
+  sdf_nuki_send_cb send_unencrypted_cb;
+  void *send_unencrypted_ctx;
+  sdf_nuki_message_cb message_cb;
+  void *message_ctx;
 
-    uint8_t rx_buf[SDF_NUKI_MAX_MESSAGE];
-    size_t rx_len;
-    size_t rx_expected;
-    uint8_t pd_buf[SDF_NUKI_MAX_PDATA];
+  uint8_t rx_buf[SDF_NUKI_MAX_MESSAGE];
+  size_t rx_len;
+  size_t rx_expected;
+  uint8_t pd_buf[SDF_NUKI_MAX_PDATA];
 
-    uint64_t tx_nonce_counter;
-    uint8_t tx_nonce_salt[8];
+  uint64_t tx_nonce_counter;
+  uint8_t tx_nonce_salt[8];
 
-    uint8_t rx_nonce_cache[SDF_NUKI_NONCE_CACHE_MAX][SDF_NUKI_NONCE_LEN];
-    uint32_t rx_nonce_auth_cache[SDF_NUKI_NONCE_CACHE_MAX];
-    uint8_t rx_nonce_cache_count;
-    uint8_t rx_nonce_cache_write_idx;
+  uint8_t rx_nonce_cache[SDF_NUKI_NONCE_CACHE_MAX][SDF_NUKI_NONCE_LEN];
+  uint32_t rx_nonce_auth_cache[SDF_NUKI_NONCE_CACHE_MAX];
+  uint8_t rx_nonce_cache_count;
+  uint8_t rx_nonce_cache_write_idx;
 } sdf_nuki_client_t;
 
 void sdf_protocol_ble_init(void);
 
-int sdf_nuki_client_init(
-    sdf_nuki_client_t *client,
-    const sdf_nuki_credentials_t *creds,
-    sdf_nuki_send_cb send_encrypted_cb,
-    void *send_encrypted_ctx,
-    sdf_nuki_send_cb send_unencrypted_cb,
-    void *send_unencrypted_ctx,
-    sdf_nuki_message_cb message_cb,
-    void *message_ctx);
+int sdf_nuki_client_init(sdf_nuki_client_t *client,
+                         const sdf_nuki_credentials_t *creds,
+                         sdf_nuki_send_cb send_encrypted_cb,
+                         void *send_encrypted_ctx,
+                         sdf_nuki_send_cb send_unencrypted_cb,
+                         void *send_unencrypted_ctx,
+                         sdf_nuki_message_cb message_cb, void *message_ctx);
 
 void sdf_nuki_client_reset_rx(sdf_nuki_client_t *client);
 
-int sdf_nuki_client_send_unencrypted(
-    sdf_nuki_client_t *client,
-    uint16_t command,
-    const uint8_t *payload,
-    size_t payload_len);
+int sdf_nuki_client_send_unencrypted(sdf_nuki_client_t *client,
+                                     uint16_t command, const uint8_t *payload,
+                                     size_t payload_len);
 
-int sdf_nuki_client_feed_encrypted(
-    sdf_nuki_client_t *client,
-    const uint8_t *data,
-    size_t len);
+int sdf_nuki_client_feed_encrypted(sdf_nuki_client_t *client,
+                                   const uint8_t *data, size_t len);
 
 int sdf_nuki_client_feed_encrypted_custom(
-    sdf_nuki_client_t *client,
-    uint32_t authorization_id,
-    const uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN],
-    const uint8_t *data,
-    size_t len,
-    sdf_nuki_message_cb message_cb,
-    void *message_ctx);
+    sdf_nuki_client_t *client, uint32_t authorization_id,
+    const uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN], const uint8_t *data,
+    size_t len, sdf_nuki_message_cb message_cb, void *message_ctx);
 
 int sdf_nuki_client_send_encrypted_custom(
-    sdf_nuki_client_t *client,
-    uint32_t authorization_id,
-    const uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN],
-    uint16_t command,
-    const uint8_t *payload,
-    size_t payload_len);
+    sdf_nuki_client_t *client, uint32_t authorization_id,
+    const uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN], uint16_t command,
+    const uint8_t *payload, size_t payload_len);
 
-int sdf_nuki_client_send_request_data(
-    sdf_nuki_client_t *client,
-    uint16_t requested_command,
-    const uint8_t *additional_data,
-    size_t additional_len);
+int sdf_nuki_client_send_request_data(sdf_nuki_client_t *client,
+                                      uint16_t requested_command,
+                                      const uint8_t *additional_data,
+                                      size_t additional_len);
 
 int sdf_nuki_client_send_lock_action(
-    sdf_nuki_client_t *client,
-    uint8_t lock_action,
-    uint8_t flags,
-    const uint8_t *name_suffix,
-    size_t name_suffix_len,
+    sdf_nuki_client_t *client, uint8_t lock_action, uint8_t flags,
+    const uint8_t *name_suffix, size_t name_suffix_len,
     const uint8_t nonce_nk[SDF_NUKI_CHALLENGE_NONCE_LEN]);
 
 int sdf_nuki_client_send_simple_lock_action(
-    sdf_nuki_client_t *client,
-    uint8_t lock_action,
-    const uint8_t *name_suffix,
+    sdf_nuki_client_t *client, uint8_t lock_action, const uint8_t *name_suffix,
     size_t name_suffix_len,
     const uint8_t nonce_nk[SDF_NUKI_CHALLENGE_NONCE_LEN]);
 
@@ -191,26 +131,19 @@ int sdf_nuki_compute_shared_key(
     const uint8_t public_key[SDF_NUKI_SHARED_KEY_LEN],
     uint8_t shared_key_out[SDF_NUKI_SHARED_KEY_LEN]);
 
-int sdf_nuki_compute_authenticator(
-    const uint8_t *data,
-    size_t data_len,
-    const uint8_t key[SDF_NUKI_SHARED_KEY_LEN],
-    uint8_t out[32]);
+int sdf_nuki_compute_authenticator(const uint8_t *data, size_t data_len,
+                                   const uint8_t key[SDF_NUKI_SHARED_KEY_LEN],
+                                   uint8_t out[32]);
 
-int sdf_nuki_parse_challenge(
-    const sdf_nuki_message_t *msg,
-    uint8_t nonce_nk[SDF_NUKI_CHALLENGE_NONCE_LEN]);
+int sdf_nuki_parse_challenge(const sdf_nuki_message_t *msg,
+                             uint8_t nonce_nk[SDF_NUKI_CHALLENGE_NONCE_LEN]);
 
-int sdf_nuki_parse_status(
-    const sdf_nuki_message_t *msg,
-    uint8_t *status_out);
+int sdf_nuki_parse_status(const sdf_nuki_message_t *msg, uint8_t *status_out);
 
-int sdf_nuki_parse_keyturner_states(
-    const sdf_nuki_message_t *msg,
-    sdf_nuki_keyturner_state_t *state_out);
+int sdf_nuki_parse_keyturner_states(const sdf_nuki_message_t *msg,
+                                    sdf_keyturner_state_t *state_out);
 
-int sdf_nuki_parse_error_report(
-    const sdf_nuki_message_t *msg,
-    sdf_nuki_error_report_t *error_out);
+int sdf_nuki_parse_error_report(const sdf_nuki_message_t *msg,
+                                sdf_error_report_t *error_out);
 
 #endif /* SDF_PROTOCOL_BLE_H */

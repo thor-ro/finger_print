@@ -894,7 +894,7 @@ int sdf_nuki_parse_status(
 
 int sdf_nuki_parse_keyturner_states(
     const sdf_nuki_message_t *msg,
-    sdf_nuki_keyturner_state_t *state_out)
+    sdf_keyturner_state_t *state_out)
 {
     if (msg == NULL || state_out == NULL) {
         return SDF_NUKI_RESULT_ERR_ARG;
@@ -947,7 +947,7 @@ int sdf_nuki_parse_keyturner_states(
 
 int sdf_nuki_parse_error_report(
     const sdf_nuki_message_t *msg,
-    sdf_nuki_error_report_t *error_out)
+    sdf_error_report_t *error_out)
 {
     if (msg == NULL || error_out == NULL) {
         return SDF_NUKI_RESULT_ERR_ARG;

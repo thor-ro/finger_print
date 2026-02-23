@@ -59,10 +59,16 @@ static const char *TAG = "sdf_app";
 static sdf_nuki_ble_transport_t s_ble;
 static sdf_nuki_client_t s_client;
 static sdf_nuki_pairing_t s_pairing;
-static sdf_app_event_cb s_event_cb;
+static sdf_event_cb s_event_cb;
 static void *s_event_ctx;
-static sdf_app_audit_cb s_audit_cb;
+static sdf_audit_cb s_audit_cb;
 static void *s_audit_ctx;
+
+// Diagnostic counters
+static uint32_t s_app_audit_err_biometric_failed = 0;
+static uint32_t s_app_audit_err_auth_lockout = 0;
+static uint32_t s_app_audit_err_nonce_replay = 0;
+static uint32_t s_app_audit_err_protocol = 0;
 static bool s_has_creds;
 static bool s_pairing_active;
 static uint16_t s_zigbee_alarm_mask;
@@ -85,15 +91,15 @@ typedef struct {
 
 static sdf_app_lock_flow_t s_lock_flow;
 
-static void sdf_app_emit_audit(sdf_app_audit_event_type_t type,
+static void sdf_app_emit_audit(sdf_audit_event_type_t type,
                                uint16_t user_id, int32_t status,
                                uint16_t detail);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
-  case SDF_NUKI_STATUS_ACCEPTED:
+  case SDF_STATUS_ACCEPTED:
     return "ACCEPTED";
-  case SDF_NUKI_STATUS_COMPLETE:
+  case SDF_STATUS_COMPLETE:
     return "COMPLETE";
   default:
     return "UNKNOWN";
@@ -136,14 +142,14 @@ sdf_app_map_lock_state_to_zigbee(uint8_t nuki_lock_state) {
 
 static void sdf_app_update_zigbee_from_action(uint8_t lock_action) {
   switch (lock_action) {
-  case SDF_NUKI_LOCK_ACTION_LOCK:
-  case SDF_NUKI_LOCK_ACTION_LOCK_N_GO:
-  case SDF_NUKI_LOCK_ACTION_FULL_LOCK:
+  case SDF_LOCK_ACTION_LOCK:
+  case SDF_LOCK_ACTION_LOCK_N_GO:
+  case SDF_LOCK_ACTION_FULL_LOCK:
     sdf_protocol_zigbee_update_lock_state(
         SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED);
     break;
-  case SDF_NUKI_LOCK_ACTION_UNLOCK:
-  case SDF_NUKI_LOCK_ACTION_UNLATCH:
+  case SDF_LOCK_ACTION_UNLOCK:
+  case SDF_LOCK_ACTION_UNLATCH:
     sdf_protocol_zigbee_update_lock_state(
         SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNLOCKED);
     break;
@@ -304,7 +310,7 @@ sdf_app_on_security_event(void *ctx,
 
   switch (event->type) {
   case SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED:
-    sdf_app_emit_audit(SDF_APP_AUDIT_BIOMETRIC_FAILED, 0,
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_FAILED, 0,
                        (int32_t)event->failed_attempts,
                        (uint16_t)(event->lockout_remaining_ms > 0xFFFFu
                                       ? 0xFFFFu
@@ -312,7 +318,7 @@ sdf_app_on_security_event(void *ctx,
     break;
   case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED:
     sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT, 0);
-    sdf_app_emit_audit(SDF_APP_AUDIT_BIOMETRIC_LOCKOUT, 0,
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_LOCKOUT, 0,
                        (int32_t)event->failed_attempts,
                        (uint16_t)(event->lockout_remaining_ms > 0xFFFFu
                                       ? 0xFFFFu
@@ -320,10 +326,10 @@ sdf_app_on_security_event(void *ctx,
     break;
   case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED:
     sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT);
-    sdf_app_emit_audit(SDF_APP_AUDIT_BIOMETRIC_LOCKOUT_CLEARED, 0, 0, 0);
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_LOCKOUT_CLEARED, 0, 0, 0);
     break;
   case SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED:
-    sdf_app_emit_audit(SDF_APP_AUDIT_BIOMETRIC_MATCH_SUCCESS, event->user_id, 0,
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_MATCH_SUCCESS, event->user_id, 0,
                        0);
     break;
   default:
@@ -341,7 +347,7 @@ static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
 
   ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting unlock",
            (unsigned)user_id);
-  return sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLOCK, 0);
+  return sdf_app_lock_action(SDF_LOCK_ACTION_UNLOCK, 0);
 }
 
 static void sdf_app_on_enrollment_state(void *ctx,
@@ -373,7 +379,7 @@ static int sdf_app_start_unlock_unlatch_sequence(void) {
     return SDF_NUKI_RESULT_ERR_INCOMPLETE;
   }
 
-  int res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLOCK, 0);
+  int res = sdf_app_lock_action(SDF_LOCK_ACTION_UNLOCK, 0);
   if (res == SDF_NUKI_RESULT_OK) {
     s_latch_sequence_active = true;
     ESP_LOGI(TAG, "Started latch sequence: unlock -> unlatch");
@@ -395,11 +401,11 @@ sdf_app_on_zigbee_command(void *ctx,
   switch (event->command) {
   case SDF_PROTOCOL_ZIGBEE_COMMAND_LOCK:
     ESP_LOGI(TAG, "Received Zigbee lock command");
-    res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_LOCK, 0);
+    res = sdf_app_lock_action(SDF_LOCK_ACTION_LOCK, 0);
     break;
   case SDF_PROTOCOL_ZIGBEE_COMMAND_UNLOCK:
     ESP_LOGI(TAG, "Received Zigbee unlock command");
-    res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLOCK, 0);
+    res = sdf_app_lock_action(SDF_LOCK_ACTION_UNLOCK, 0);
     break;
   case SDF_PROTOCOL_ZIGBEE_COMMAND_LATCH:
     ESP_LOGI(TAG, "Received Zigbee latch command (unlock + unlatch)");
@@ -484,55 +490,55 @@ static const char *sdf_app_error_name(int8_t code) {
 
 static bool sdf_app_valid_lock_action(uint8_t lock_action) {
   switch (lock_action) {
-  case SDF_NUKI_LOCK_ACTION_UNLOCK:
-  case SDF_NUKI_LOCK_ACTION_LOCK:
-  case SDF_NUKI_LOCK_ACTION_UNLATCH:
-  case SDF_NUKI_LOCK_ACTION_LOCK_N_GO:
-  case SDF_NUKI_LOCK_ACTION_LOCK_N_GO_UNLATCH:
-  case SDF_NUKI_LOCK_ACTION_FULL_LOCK:
+  case SDF_LOCK_ACTION_UNLOCK:
+  case SDF_LOCK_ACTION_LOCK:
+  case SDF_LOCK_ACTION_UNLATCH:
+  case SDF_LOCK_ACTION_LOCK_N_GO:
+  case SDF_LOCK_ACTION_LOCK_N_GO_UNLATCH:
+  case SDF_LOCK_ACTION_FULL_LOCK:
     return true;
   default:
     return false;
   }
 }
 
-static void sdf_app_emit_event(const sdf_app_event_t *event) {
+static void sdf_app_emit_event(const sdf_event_t *event) {
   if (s_event_cb != NULL && event != NULL) {
     s_event_cb(s_event_ctx, event);
   }
 }
 
-static const char *sdf_app_audit_event_name(sdf_app_audit_event_type_t type) {
+static const char *sdf_app_audit_event_name(sdf_audit_event_type_t type) {
   switch (type) {
-  case SDF_APP_AUDIT_STORAGE_POLICY_OK:
+  case SDF_AUDIT_STORAGE_POLICY_OK:
     return "STORAGE_POLICY_OK";
-  case SDF_APP_AUDIT_STORAGE_POLICY_FAILED:
+  case SDF_AUDIT_STORAGE_POLICY_FAILED:
     return "STORAGE_POLICY_FAILED";
-  case SDF_APP_AUDIT_BIOMETRIC_FAILED:
+  case SDF_AUDIT_BIOMETRIC_FAILED:
     return "BIOMETRIC_FAILED";
-  case SDF_APP_AUDIT_BIOMETRIC_LOCKOUT:
+  case SDF_AUDIT_BIOMETRIC_LOCKOUT:
     return "BIOMETRIC_LOCKOUT";
-  case SDF_APP_AUDIT_BIOMETRIC_LOCKOUT_CLEARED:
+  case SDF_AUDIT_BIOMETRIC_LOCKOUT_CLEARED:
     return "BIOMETRIC_LOCKOUT_CLEARED";
-  case SDF_APP_AUDIT_BIOMETRIC_MATCH_SUCCESS:
+  case SDF_AUDIT_BIOMETRIC_MATCH_SUCCESS:
     return "BIOMETRIC_MATCH_SUCCESS";
-  case SDF_APP_AUDIT_NONCE_REPLAY_BLOCKED:
+  case SDF_AUDIT_NONCE_REPLAY_BLOCKED:
     return "NONCE_REPLAY_BLOCKED";
-  case SDF_APP_AUDIT_PROTOCOL_ERROR:
+  case SDF_AUDIT_PROTOCOL_ERROR:
     return "PROTOCOL_ERROR";
-  case SDF_APP_AUDIT_PAIRING_COMPLETE:
+  case SDF_AUDIT_PAIRING_COMPLETE:
     return "PAIRING_COMPLETE";
-  case SDF_APP_AUDIT_PAIRING_FAILED:
+  case SDF_AUDIT_PAIRING_FAILED:
     return "PAIRING_FAILED";
   default:
     return "UNKNOWN";
   }
 }
 
-static void sdf_app_emit_audit(sdf_app_audit_event_type_t type,
+static void sdf_app_emit_audit(sdf_audit_event_type_t type,
                                uint16_t user_id, int32_t status,
                                uint16_t detail) {
-  sdf_app_audit_event_t event = {
+  sdf_audit_event_t event = {
       .timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000LL),
       .type = type,
       .user_id = user_id,
@@ -542,7 +548,24 @@ static void sdf_app_emit_audit(sdf_app_audit_event_type_t type,
 
   ESP_LOGI(TAG, "AUDIT %s user=%u status=%ld detail=%u",
            sdf_app_audit_event_name(type), (unsigned)event.user_id,
-           (long)event.status, (unsigned)event.detail);
+           event.status, (unsigned)event.detail);
+
+  switch (type) {
+  case SDF_AUDIT_BIOMETRIC_FAILED:
+    s_app_audit_err_biometric_failed++;
+    break;
+  case SDF_AUDIT_BIOMETRIC_LOCKOUT:
+    s_app_audit_err_auth_lockout++;
+    break;
+  case SDF_AUDIT_NONCE_REPLAY_BLOCKED:
+    s_app_audit_err_nonce_replay++;
+    break;
+  case SDF_AUDIT_PROTOCOL_ERROR:
+    s_app_audit_err_protocol++;
+    break;
+  default:
+    break;
+  }
 
   if (s_audit_cb != NULL) {
     s_audit_cb(s_audit_ctx, &event);
@@ -550,9 +573,9 @@ static void sdf_app_emit_audit(sdf_app_audit_event_type_t type,
 }
 
 static void sdf_app_emit_lock_progress(void) {
-  sdf_app_event_t event;
+  sdf_event_t event;
   memset(&event, 0, sizeof(event));
-  event.type = SDF_APP_EVENT_LOCK_ACTION_PROGRESS;
+  event.type = SDF_EVENT_LOCK_ACTION_PROGRESS;
   event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
   event.lock_action = s_lock_flow.requested_action;
   event.retry_count = s_lock_flow.retry_count;
@@ -655,12 +678,12 @@ int sdf_app_lock_action(uint8_t lock_action, uint8_t flags) {
   return SDF_NUKI_RESULT_OK;
 }
 
-void sdf_app_set_event_callback(sdf_app_event_cb cb, void *ctx) {
+void sdf_app_set_event_callback(sdf_event_cb cb, void *ctx) {
   s_event_cb = cb;
   s_event_ctx = ctx;
 }
 
-void sdf_app_set_audit_callback(sdf_app_audit_cb cb, void *ctx) {
+void sdf_app_set_audit_callback(sdf_audit_cb cb, void *ctx) {
   s_audit_cb = cb;
   s_audit_ctx = ctx;
 }
@@ -708,9 +731,9 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
 
     ESP_LOGI(TAG, "Status 0x%02X (%s)", status, sdf_app_status_name(status));
 
-    sdf_app_event_t event;
+    sdf_event_t event;
     memset(&event, 0, sizeof(event));
-    event.type = SDF_APP_EVENT_STATUS;
+    event.type = SDF_EVENT_STATUS;
     event.data.status = status;
     event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
     event.lock_action = s_lock_flow.requested_action;
@@ -718,11 +741,11 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     sdf_app_emit_event(&event);
 
     if (s_lock_flow.state == SDF_APP_LOCK_FLOW_WAIT_COMPLETION) {
-      if (status == SDF_NUKI_STATUS_ACCEPTED) {
+      if (status == SDF_STATUS_ACCEPTED) {
         return;
       }
 
-      if (status == SDF_NUKI_STATUS_COMPLETE) {
+      if (status == SDF_STATUS_COMPLETE) {
         uint8_t action = s_lock_flow.requested_action;
         sdf_app_lock_flow_reset();
         sdf_app_emit_lock_progress();
@@ -730,8 +753,8 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
         sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
         sdf_app_update_zigbee_from_action(action);
 
-        if (s_latch_sequence_active && action == SDF_NUKI_LOCK_ACTION_UNLOCK) {
-          int res = sdf_app_lock_action(SDF_NUKI_LOCK_ACTION_UNLATCH, 0);
+        if (s_latch_sequence_active && action == SDF_LOCK_ACTION_UNLOCK) {
+          int res = sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
           if (res == SDF_NUKI_RESULT_OK) {
             ESP_LOGI(TAG, "Latch sequence continuing with unlatch");
             return;
@@ -741,7 +764,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
           sdf_app_abort_latch_sequence("failed to start unlatch");
           sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
         } else if (s_latch_sequence_active) {
-          if (action == SDF_NUKI_LOCK_ACTION_UNLATCH) {
+          if (action == SDF_LOCK_ACTION_UNLATCH) {
             ESP_LOGI(TAG, "Latch sequence finished");
           }
           s_latch_sequence_active = false;
@@ -757,7 +780,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
   }
 
   if (msg->command_id == SDF_NUKI_CMD_KEYTURNER_STATES) {
-    sdf_nuki_keyturner_state_t state;
+    sdf_keyturner_state_t state;
     if (sdf_nuki_parse_keyturner_states(msg, &state) != SDF_NUKI_RESULT_OK) {
       return;
     }
@@ -767,9 +790,9 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
              (unsigned)state.nuki_state, (unsigned)state.lock_state,
              (unsigned)state.trigger, (unsigned)state.critical_battery_state);
 
-    sdf_app_event_t event;
+    sdf_event_t event;
     memset(&event, 0, sizeof(event));
-    event.type = SDF_APP_EVENT_KEYTURNER_STATE;
+    event.type = SDF_EVENT_KEYTURNER_STATE;
     event.data.keyturner_state = state;
     event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
     event.lock_action = s_lock_flow.requested_action;
@@ -789,7 +812,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
   }
 
   if (msg->command_id == SDF_NUKI_CMD_ERROR_REPORT) {
-    sdf_nuki_error_report_t report;
+    sdf_error_report_t report;
     if (sdf_nuki_parse_error_report(msg, &report) != SDF_NUKI_RESULT_OK) {
       return;
     }
@@ -798,9 +821,9 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
              (unsigned)((uint8_t)report.error_code),
              sdf_app_error_name(report.error_code), report.command_identifier);
 
-    sdf_app_event_t event;
+    sdf_event_t event;
     memset(&event, 0, sizeof(event));
-    event.type = SDF_APP_EVENT_ERROR;
+    event.type = SDF_EVENT_ERROR;
     event.data.error_report = report;
     event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
     event.lock_action = s_lock_flow.requested_action;
@@ -835,7 +858,7 @@ static void sdf_app_on_ble_ready(void *ctx) {
                                     SDF_APP_NAME);
     if (res != SDF_NUKI_RESULT_OK) {
       ESP_LOGE(TAG, "Pairing init failed: %d", res);
-      sdf_app_emit_audit(SDF_APP_AUDIT_PAIRING_FAILED, 0, res, 0);
+      sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 0);
       return;
     }
     s_pairing_active = true;
@@ -843,7 +866,7 @@ static void sdf_app_on_ble_ready(void *ctx) {
     res = sdf_nuki_pairing_start(&s_pairing);
     if (res != SDF_NUKI_RESULT_OK) {
       ESP_LOGE(TAG, "Pairing start failed: %d", res);
-      sdf_app_emit_audit(SDF_APP_AUDIT_PAIRING_FAILED, 0, res, 1);
+      sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 1);
     }
     return;
   }
@@ -866,7 +889,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
       if (pairing_res != SDF_NUKI_RESULT_OK &&
           pairing_res != SDF_NUKI_RESULT_ERR_INCOMPLETE) {
         ESP_LOGW(TAG, "Pairing GDIO handling failed: %d", pairing_res);
-        sdf_app_emit_audit(SDF_APP_AUDIT_PAIRING_FAILED, 0, pairing_res, 2);
+        sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, pairing_res, 2);
       }
     }
     return;
@@ -877,7 +900,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
     if (pairing_res != SDF_NUKI_RESULT_OK &&
         pairing_res != SDF_NUKI_RESULT_ERR_INCOMPLETE) {
       ESP_LOGW(TAG, "Pairing USDIO handling failed: %d", pairing_res);
-      sdf_app_emit_audit(SDF_APP_AUDIT_PAIRING_FAILED, 0, pairing_res, 3);
+      sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, pairing_res, 3);
     }
 
     if (s_pairing.state == SDF_NUKI_PAIRING_COMPLETE) {
@@ -887,13 +910,13 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
         s_client.creds = creds;
         s_has_creds = true;
         s_pairing_active = false;
-        sdf_app_emit_audit(SDF_APP_AUDIT_PAIRING_COMPLETE, 0,
+        sdf_app_emit_audit(SDF_AUDIT_PAIRING_COMPLETE, 0,
                            (int32_t)creds.authorization_id, 0);
         esp_err_t err =
             sdf_storage_nuki_save(creds.authorization_id, creds.shared_key);
         if (err != ESP_OK) {
           ESP_LOGE(TAG, "Failed to save credentials: %s", esp_err_to_name(err));
-          sdf_app_emit_audit(SDF_APP_AUDIT_STORAGE_POLICY_FAILED, 0, err, 1);
+          sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 1);
         }
         ESP_LOGI(TAG, "Pairing complete; credentials stored");
         int res = sdf_app_request_keyturner_state();
@@ -914,13 +937,13 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
   if (feed_res == SDF_NUKI_RESULT_ERR_NONCE_REUSE) {
     ESP_LOGW(TAG, "Rejected replayed encrypted nonce");
     sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_SECURITY_PROTOCOL, 0);
-    sdf_app_emit_audit(SDF_APP_AUDIT_NONCE_REPLAY_BLOCKED, 0, feed_res, 0);
+    sdf_app_emit_audit(SDF_AUDIT_NONCE_REPLAY_BLOCKED, 0, feed_res, 0);
     return;
   }
 
   ESP_LOGW(TAG, "Encrypted message handling failed: %d", feed_res);
   sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_SECURITY_PROTOCOL, 0);
-  sdf_app_emit_audit(SDF_APP_AUDIT_PROTOCOL_ERROR, 0, feed_res, 0);
+  sdf_app_emit_audit(SDF_AUDIT_PROTOCOL_ERROR, 0, feed_res, 0);
 
   if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE &&
       (feed_res == SDF_NUKI_RESULT_ERR_CRC ||
@@ -937,7 +960,7 @@ void sdf_app_init(void) {
   esp_err_t err = sdf_storage_init();
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Storage init failed: %s", esp_err_to_name(err));
-    sdf_app_emit_audit(SDF_APP_AUDIT_STORAGE_POLICY_FAILED, 0, err, 0);
+    sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 0);
   }
 
   sdf_storage_security_status_t storage_security = {0};
@@ -957,9 +980,9 @@ void sdf_app_init(void) {
     }
 
     if (sdf_storage_nvs_security_ok()) {
-      sdf_app_emit_audit(SDF_APP_AUDIT_STORAGE_POLICY_OK, 0, 0, security_bits);
+      sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_OK, 0, 0, security_bits);
     } else {
-      sdf_app_emit_audit(SDF_APP_AUDIT_STORAGE_POLICY_FAILED, 0, -1,
+      sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, -1,
                          security_bits);
     }
   }
