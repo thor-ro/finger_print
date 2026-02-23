@@ -45,6 +45,7 @@ typedef struct {
   sdf_services_security_event_cb security_event_cb;
   void *security_event_ctx;
   gpio_num_t wake_gpio;
+  gpio_num_t power_en_gpio;
 } sdf_services_config_t;
 
 void sdf_services_get_default_config(sdf_services_config_t *config);

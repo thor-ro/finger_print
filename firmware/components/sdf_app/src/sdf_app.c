@@ -30,6 +30,7 @@
 #define SDF_APP_FP_MATCH_POLL_MS 400u
 #define SDF_APP_FP_MATCH_COOLDOWN_MS 3000u
 #define SDF_APP_FP_WAKE_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_WAKE_GPIO)
+#define SDF_APP_FP_POWER_EN_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_EN_GPIO)
 
 #define SDF_APP_POWER_CHECKIN_INTERVAL_MS                                      \
   ((uint32_t)CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS)
@@ -91,9 +92,8 @@ typedef struct {
 
 static sdf_app_lock_flow_t s_lock_flow;
 
-static void sdf_app_emit_audit(sdf_audit_event_type_t type,
-                               uint16_t user_id, int32_t status,
-                               uint16_t detail);
+static void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
+                               int32_t status, uint16_t detail);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
@@ -329,8 +329,7 @@ sdf_app_on_security_event(void *ctx,
     sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_LOCKOUT_CLEARED, 0, 0, 0);
     break;
   case SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED:
-    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_MATCH_SUCCESS, event->user_id, 0,
-                       0);
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_MATCH_SUCCESS, event->user_id, 0, 0);
     break;
   default:
     break;
@@ -535,9 +534,8 @@ static const char *sdf_app_audit_event_name(sdf_audit_event_type_t type) {
   }
 }
 
-static void sdf_app_emit_audit(sdf_audit_event_type_t type,
-                               uint16_t user_id, int32_t status,
-                               uint16_t detail) {
+static void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
+                               int32_t status, uint16_t detail) {
   sdf_audit_event_t event = {
       .timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000LL),
       .type = type,
@@ -982,8 +980,7 @@ void sdf_app_init(void) {
     if (sdf_storage_nvs_security_ok()) {
       sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_OK, 0, 0, security_bits);
     } else {
-      sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, -1,
-                         security_bits);
+      sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, -1, security_bits);
     }
   }
 
@@ -1017,6 +1014,7 @@ void sdf_app_init(void) {
   services_cfg.security_event_cb = sdf_app_on_security_event;
   services_cfg.security_event_ctx = NULL;
   services_cfg.wake_gpio = SDF_APP_FP_WAKE_GPIO;
+  services_cfg.power_en_gpio = SDF_APP_FP_POWER_EN_GPIO;
 
   err = sdf_services_init(&services_cfg);
   if (err != ESP_OK) {

@@ -487,6 +487,7 @@ static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
 
 static void sdf_services_task(void *arg) {
   (void)arg;
+  bool is_powered = true;
 
   while (true) {
     uint32_t poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
@@ -512,7 +513,17 @@ static void sdf_services_task(void *arg) {
     }
 
     if (should_block && s_state.config.wake_gpio >= 0) {
+      if (is_powered) {
+        sdf_fingerprint_driver_set_power(false);
+        is_powered = false;
+      }
       xSemaphoreTake(s_state.wake_sem, pdMS_TO_TICKS(poll_interval_ms));
+      if (!is_powered) {
+        sdf_fingerprint_driver_set_power(true);
+        is_powered = true;
+        vTaskDelay(
+            pdMS_TO_TICKS(200)); /* Boot delay for FP sensor after power up */
+      }
     } else {
       vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
     }
@@ -543,11 +554,11 @@ void sdf_services_get_default_config(sdf_services_config_t *config) {
   config->lockout_duration_ms = SDF_SERVICES_DEFAULT_LOCKOUT_DURATION_MS;
   config->unlock_cb = NULL;
   config->unlock_ctx = NULL;
-  config->enrollment_cb = NULL;
   config->enrollment_ctx = NULL;
   config->security_event_cb = NULL;
   config->security_event_ctx = NULL;
   config->wake_gpio = -1;
+  config->power_en_gpio = -1;
 }
 
 esp_err_t sdf_services_init(const sdf_services_config_t *config) {
@@ -577,6 +588,7 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   }
 
   s_state.config = *config;
+  s_state.config.fingerprint.power_en_pin = config->power_en_gpio;
   sdf_enrollment_sm_init(&s_state.enrollment);
   s_state.enrollment_request_pending = false;
   s_state.request_user_id = 0;
@@ -587,7 +599,7 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   s_state.lockout_until_us = 0;
   xSemaphoreGive(s_state.lock);
 
-  esp_err_t err = sdf_fingerprint_driver_init(&config->fingerprint);
+  esp_err_t err = sdf_fingerprint_driver_init(&s_state.config.fingerprint);
   if (err != ESP_OK) {
     return err;
   }

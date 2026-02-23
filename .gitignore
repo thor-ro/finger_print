@@ -4,3 +4,5 @@ doc/*.zip
 doc/*.7z
 doc/*.pxc
 ref
+firmware/.cache
+build_output.log
