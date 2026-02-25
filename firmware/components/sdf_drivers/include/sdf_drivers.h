@@ -54,13 +54,6 @@ typedef enum {
   SDF_FINGERPRINT_ENROLL_STEP_3 = 3,
 } sdf_fingerprint_enroll_step_t;
 
-/* LED command bytes are module-version specific and passed through as-is. */
-typedef struct {
-  uint8_t mode;
-  uint8_t color;
-  uint8_t cycles;
-} sdf_fingerprint_led_command_t;
-
 void sdf_fingerprint_driver_set_power(bool enabled);
 
 void sdf_drivers_init(void);
@@ -78,10 +71,11 @@ sdf_fingerprint_driver_enroll_step(sdf_fingerprint_enroll_step_t step,
                                    uint16_t user_id, uint8_t permission);
 
 sdf_fingerprint_op_result_t
-sdf_fingerprint_driver_control_led(const sdf_fingerprint_led_command_t *cmd);
-
-sdf_fingerprint_op_result_t
 sdf_fingerprint_driver_delete_user(uint16_t user_id);
 sdf_fingerprint_op_result_t sdf_fingerprint_driver_delete_all_users(void);
+
+sdf_fingerprint_op_result_t
+sdf_fingerprint_driver_query_users(uint16_t *user_ids, uint8_t *permissions,
+                                   size_t *count, size_t max_count);
 
 #endif /* SDF_DRIVERS_H */

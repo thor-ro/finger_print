@@ -6,3 +6,6 @@ doc/*.pxc
 ref
 firmware/.cache
 build_output.log
+firmware/test_runner/build
+firmware/build
+firmware/managed_components

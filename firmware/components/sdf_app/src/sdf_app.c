@@ -31,6 +31,8 @@
 #define SDF_APP_FP_MATCH_COOLDOWN_MS 3000u
 #define SDF_APP_FP_WAKE_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_WAKE_GPIO)
 #define SDF_APP_FP_POWER_EN_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_EN_GPIO)
+#define SDF_APP_ENROLLMENT_BTN_GPIO ((gpio_num_t)CONFIG_SDF_ENROLLMENT_BTN_GPIO)
+#define SDF_APP_WS2812_LED_GPIO ((gpio_num_t)CONFIG_SDF_WS2812_LED_GPIO)
 
 #define SDF_APP_POWER_CHECKIN_INTERVAL_MS                                      \
   ((uint32_t)CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS)
@@ -386,6 +388,46 @@ static int sdf_app_start_unlock_unlatch_sequence(void) {
   return res;
 }
 
+static void sdf_app_update_zigbee_user_list(void) {
+  uint16_t user_ids[SDF_FINGERPRINT_USER_ID_MAX + 1];
+  uint8_t perms[SDF_FINGERPRINT_USER_ID_MAX + 1];
+  size_t count = 0;
+
+  esp_err_t err = sdf_services_query_users(user_ids, perms, &count,
+                                           SDF_FINGERPRINT_USER_ID_MAX + 1);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to query active users for Zigbee sync: %s",
+             esp_err_to_name(err));
+    return;
+  }
+
+  /* Serialize to CSV-like bracketed list: e.g. [1:3, 5:1] meaning ID 1 (perm
+   * 3), ID 5 (perm 1) */
+  char buf[255];
+  size_t offset = 0;
+  buf[offset++] = '[';
+  for (size_t i = 0; i < count; i++) {
+    int written =
+        snprintf(&buf[offset], sizeof(buf) - offset, "%s%u:%u",
+                 i > 0 ? ", " : "", (unsigned)user_ids[i], (unsigned)perms[i]);
+    if (written > 0 && (size_t)written < sizeof(buf) - offset) {
+      offset += written;
+    } else {
+      break; // truncation
+    }
+  }
+  if (offset < sizeof(buf)) {
+    buf[offset++] = ']';
+    buf[offset] = '\0';
+  } else {
+    buf[sizeof(buf) - 2] = ']';
+    buf[sizeof(buf) - 1] = '\0';
+  }
+
+  sdf_protocol_zigbee_update_user_list(buf);
+  ESP_LOGI(TAG, "Synced active users to Zigbee: %s", buf);
+}
+
 static esp_err_t
 sdf_app_on_zigbee_command(void *ctx,
                           const sdf_protocol_zigbee_command_event_t *event) {
@@ -448,6 +490,31 @@ sdf_app_on_zigbee_command(void *ctx,
       ESP_LOGI(TAG,
                "Enrollment requested from Zigbee for user_id=%u permission=%u",
                (unsigned)pe->user_id, (unsigned)permission);
+    } else if (pe->zcl_command_id == 0x06 || pe->zcl_command_id == 0x17) {
+      if (!pe->has_user_id) {
+        ESP_LOGW(TAG, "Delete command without user_id");
+        return ESP_ERR_INVALID_ARG;
+      }
+
+      esp_err_t del_err = sdf_services_delete_user(pe->user_id);
+      if (del_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to delete user_id=%u: %s", (unsigned)pe->user_id,
+                 esp_err_to_name(del_err));
+        sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+        return del_err;
+      }
+      ESP_LOGI(TAG, "Deleted user_id=%u successfully", (unsigned)pe->user_id);
+      sdf_app_update_zigbee_user_list();
+    } else if (pe->zcl_command_id == 0x07 || pe->zcl_command_id == 0x18) {
+      esp_err_t clr_err = sdf_services_clear_all_users();
+      if (clr_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to clear all users: %s",
+                 esp_err_to_name(clr_err));
+        sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+        return clr_err;
+      }
+      ESP_LOGI(TAG, "Cleared all users successfully");
+      sdf_app_update_zigbee_user_list();
     } else {
       ESP_LOGI(TAG, "Programming command 0x%02X currently mapped as no-op",
                (unsigned)pe->zcl_command_id);
@@ -1015,6 +1082,8 @@ void sdf_app_init(void) {
   services_cfg.security_event_ctx = NULL;
   services_cfg.wake_gpio = SDF_APP_FP_WAKE_GPIO;
   services_cfg.power_en_gpio = SDF_APP_FP_POWER_EN_GPIO;
+  services_cfg.enrollment_btn_gpio = SDF_APP_ENROLLMENT_BTN_GPIO;
+  services_cfg.ws2812_led_gpio = SDF_APP_WS2812_LED_GPIO;
 
   err = sdf_services_init(&services_cfg);
   if (err != ESP_OK) {
