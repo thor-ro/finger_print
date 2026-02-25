@@ -5,6 +5,7 @@ endif()
 
 idf_component_register(
     SRCS "src/sdf_services.c"
+         "src/sdf_services_mock_linux.c"
     INCLUDE_DIRS "include"
     REQUIRES ${service_reqs}
 )

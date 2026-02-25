@@ -3,7 +3,7 @@ if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND ble_reqs bt)
 endif()
 
-set(ble_srcs "src/sdf_protocol_ble.c")
+set(ble_srcs "src/sdf_protocol_ble.c" "src/sdf_protocol_ble_mock_linux.c")
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND ble_srcs
         "src/sdf_nuki_crypto.c"

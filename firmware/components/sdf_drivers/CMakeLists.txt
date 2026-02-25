@@ -5,6 +5,7 @@ endif()
 
 idf_component_register(
     SRCS "src/sdf_drivers.c"
+         "src/sdf_drivers_mock_linux.c"
     INCLUDE_DIRS "include"
     REQUIRES ${driver_reqs}
 )

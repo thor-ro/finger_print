@@ -5,6 +5,7 @@ endif()
 
 idf_component_register(
     SRCS "src/sdf_protocol_zigbee.c"
+         "src/sdf_protocol_zigbee_mock_linux.c"
     INCLUDE_DIRS "include"
     REQUIRES sdf_common sdf_config sdf_platform
     PRIV_REQUIRES ${zg_priv_reqs}
