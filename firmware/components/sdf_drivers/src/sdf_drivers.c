@@ -6,75 +6,7 @@
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #else
-// Linux Host Mocks
-#define UART_NUM_MAX 3
-#define UART_DATA_8_BITS 0
-#define UART_PARITY_DISABLE 0
-#define UART_STOP_BITS_1 0
-#define UART_HW_FLOWCTRL_DISABLE 0
-#define UART_SCLK_DEFAULT 0
-#define UART_PIN_NO_CHANGE -1
-
-typedef int uart_port_t;
-typedef int gpio_num_t;
-typedef struct {
-  int baud_rate;
-  int data_bits;
-  int parity;
-  int stop_bits;
-  int flow_ctrl;
-  int source_clk;
-} uart_config_t;
-typedef struct {
-  uint64_t pin_bit_mask;
-  int mode;
-  int pull_up_en;
-  int pull_down_en;
-  int intr_type;
-} gpio_config_t;
-
-#define GPIO_MODE_OUTPUT 0
-#define GPIO_PULLUP_DISABLE 0
-#define GPIO_PULLDOWN_DISABLE 0
-#define GPIO_INTR_DISABLE 0
-
-static inline int uart_read_bytes(uart_port_t uart_num, void *buf,
-                                  uint32_t length, uint32_t ticks_to_wait) {
-  return -1;
-}
-static inline esp_err_t uart_flush_input(uart_port_t uart_num) {
-  return ESP_OK;
-}
-static inline int uart_write_bytes(uart_port_t uart_num, const void *src,
-                                   size_t size) {
-  return size;
-}
-static inline esp_err_t uart_driver_install(uart_port_t uart_num,
-                                            int rx_buffer_size,
-                                            int tx_buffer_size, int queue_size,
-                                            void *uart_queue,
-                                            int intr_alloc_flags) {
-  return ESP_OK;
-}
-static inline esp_err_t uart_param_config(uart_port_t uart_num,
-                                          const uart_config_t *uart_config) {
-  return ESP_OK;
-}
-static inline esp_err_t uart_set_pin(uart_port_t uart_num, int tx_io_num,
-                                     int rx_io_num, int rts_io_num,
-                                     int cts_io_num) {
-  return ESP_OK;
-}
-static inline esp_err_t uart_driver_delete(uart_port_t uart_num) {
-  return ESP_OK;
-}
-
-static inline esp_err_t gpio_config(const gpio_config_t *pGPIOConfig) {
-  return ESP_OK;
-}
-static inline esp_err_t gpio_set_level(gpio_num_t gpio_num, uint32_t level) {
-  return ESP_OK;
-}
+#include "sdf_mock_linux_drivers.h"
 #endif
 
 #include "esp_log.h"
@@ -112,7 +44,14 @@ static sdf_fingerprint_driver_state_t s_state = {
     .lock = NULL,
 };
 
-static uint8_t sdf_fingerprint_checksum(const uint8_t frame[SDF_FP_FRAME_LEN]) {
+#ifdef SDF_DRIVERS_TESTING
+#define SDF_DRIVER_STATIC
+#else
+#define SDF_DRIVER_STATIC static
+#endif
+
+SDF_DRIVER_STATIC uint8_t
+sdf_fingerprint_checksum(const uint8_t frame[SDF_FP_FRAME_LEN]) {
   uint8_t checksum = 0;
   for (size_t i = 1; i <= 5; ++i) {
     checksum ^= frame[i];
@@ -120,7 +59,7 @@ static uint8_t sdf_fingerprint_checksum(const uint8_t frame[SDF_FP_FRAME_LEN]) {
   return checksum;
 }
 
-static bool sdf_fingerprint_user_id_valid(uint16_t user_id) {
+SDF_DRIVER_STATIC bool sdf_fingerprint_user_id_valid(uint16_t user_id) {
   return user_id >= SDF_FINGERPRINT_USER_ID_MIN &&
          user_id <= SDF_FINGERPRINT_USER_ID_MAX;
 }
@@ -203,7 +142,7 @@ sdf_fingerprint_send_command_locked(uint8_t cmd, uint8_t p1, uint8_t p2,
   return ESP_OK;
 }
 
-static sdf_fingerprint_op_result_t
+SDF_DRIVER_STATIC sdf_fingerprint_op_result_t
 sdf_fingerprint_map_ack_code(uint8_t ack_code) {
   switch (ack_code) {
   case SDF_FINGERPRINT_ACK_SUCCESS:

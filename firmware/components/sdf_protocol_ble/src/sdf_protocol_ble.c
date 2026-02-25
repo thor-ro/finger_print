@@ -827,19 +827,4 @@ int sdf_nuki_parse_error_report(const sdf_nuki_message_t *msg,
   return SDF_NUKI_RESULT_OK;
 }
 
-#else
-// Linux Mocks
-#include "esp_err.h"
-#include "sdf_protocol_ble.h"
-#include <stddef.h>
-#include <stdint.h>
-void sdf_protocol_ble_init(void) {}
-esp_err_t sdf_protocol_ble_update_battery_percent(uint8_t percentage) {
-  return ESP_OK;
-}
-esp_err_t sdf_protocol_ble_update_lock_state(uint8_t state) { return ESP_OK; }
-esp_err_t sdf_protocol_ble_update_doorsensor_state(uint8_t state) {
-  return ESP_OK;
-}
-esp_err_t sdf_protocol_ble_enable_beacon(bool enable) { return ESP_OK; }
-#endif
+#endif /* !CONFIG_IDF_TARGET_LINUX */
