@@ -16,3 +16,4 @@ dependencies:
   #   public: true
   espressif/esp-zigbee-lib: =*
   espressif/esp-zboss-lib: =*
+  espressif/led_strip: =*

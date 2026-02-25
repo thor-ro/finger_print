@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_check.h"
 #include "esp_log.h"
 
@@ -192,6 +193,58 @@ static bool sdf_zigbee_set_attr_u16(uint16_t cluster_id, uint16_t attr_id,
   }
 
   return true;
+}
+
+static bool sdf_zigbee_set_attr_string(uint16_t cluster_id, uint16_t attr_id,
+                                       const char *value) {
+  if (!esp_zb_lock_acquire(pdMS_TO_TICKS(1000))) {
+    ESP_LOGW(TAG,
+             "Timeout acquiring Zigbee lock for cluster=0x%04X attr=0x%04X",
+             cluster_id, attr_id);
+    return false;
+  }
+
+  size_t len = strlen(value);
+  if (len > 254)
+    len = 254; // Zigbee char string max length is 254
+
+  // Zigbee Character String format: 1 byte length prefix + string data
+  uint8_t zcl_str[255];
+  zcl_str[0] = (uint8_t)len;
+  memcpy(&zcl_str[1], value, len);
+
+  esp_zb_zcl_status_t status = esp_zb_zcl_set_attribute_val(
+      SDF_ZIGBEE_ENDPOINT, cluster_id, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, attr_id,
+      zcl_str, false);
+  esp_zb_lock_release();
+
+  if (status != ESP_ZB_ZCL_STATUS_SUCCESS) {
+    ESP_LOGW(TAG,
+             "Failed to set Zigbee string attribute cluster=0x%04X attr=0x%04X "
+             "status=0x%02X",
+             cluster_id, attr_id, (unsigned)status);
+    return false;
+  }
+
+  return true;
+}
+
+esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array) {
+  if (json_array == NULL || s_state.lock == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  bool ok = sdf_zigbee_set_attr_string(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
+                                       SDF_ZIGBEE_ATTR_ACTIVE_USERS_LIST_ID,
+                                       json_array);
+
+  xSemaphoreGive(s_state.lock);
+
+  return ok ? ESP_OK : ESP_FAIL;
 }
 
 static void sdf_zigbee_apply_cached_attributes(void) {
@@ -856,3 +909,20 @@ uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void) {
   }
   return interval_ms;
 }
+#else
+// Linux Mocks
+#include "esp_err.h"
+#include <stddef.h>
+#include <stdint.h>
+esp_err_t sdf_protocol_zigbee_init(void) { return ESP_OK; }
+esp_err_t sdf_protocol_zigbee_report_lock_state(uint8_t state) {
+  return ESP_OK;
+}
+esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array) {
+  return ESP_OK;
+}
+esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms) {
+  return ESP_OK;
+}
+uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void) { return 0; }
+#endif

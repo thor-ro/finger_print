@@ -2,11 +2,78 @@
 
 #include <string.h>
 
+#ifdef CONFIG_IDF_TARGET_LINUX
+typedef struct {
+  uint64_t pin_bit_mask;
+  int mode;
+  int pull_up_en;
+  int pull_down_en;
+  int intr_type;
+} gpio_config_t;
+#define GPIO_MODE_INPUT 0
+#define GPIO_MODE_OUTPUT 1
+#define GPIO_PULLUP_DISABLE 0
+#define GPIO_PULLUP_ENABLE 1
+#define GPIO_PULLDOWN_DISABLE 0
+#define GPIO_INTR_DISABLE 0
+#define GPIO_INTR_ANYEDGE 3
+static inline esp_err_t gpio_config(const gpio_config_t *config) {
+  return ESP_OK;
+}
+static inline esp_err_t gpio_install_isr_service(int flags) { return ESP_OK; }
+typedef void (*gpio_isr_t)(void *);
+static inline esp_err_t gpio_isr_handler_add(int gpio, gpio_isr_t isr,
+                                             void *args) {
+  return ESP_OK;
+}
+static inline int gpio_get_level(int gpio) { return 1; }
+static inline esp_err_t gpio_set_level(int gpio, int level) { return ESP_OK; }
+#endif
+
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#ifndef CONFIG_IDF_TARGET_LINUX
+#include "led_strip.h"
+#else
+typedef void *led_strip_handle_t;
+#define LED_PIXEL_FORMAT_GRB 0
+#define LED_MODEL_WS2812 0
+typedef struct {
+  int strip_gpio_num;
+  int max_leds;
+  int led_pixel_format;
+  int led_model;
+  struct {
+    bool invert_out;
+  } flags;
+} led_strip_config_t;
+typedef struct {
+  int resolution_hz;
+  struct {
+    bool with_dma;
+  } flags;
+} led_strip_rmt_config_t;
+static inline esp_err_t
+led_strip_new_rmt_device(const led_strip_config_t *led_config,
+                         const led_strip_rmt_config_t *rmt_config,
+                         led_strip_handle_t *ret_strip) {
+  return ESP_OK;
+}
+static inline esp_err_t led_strip_set_pixel(led_strip_handle_t strip,
+                                            uint32_t index, uint32_t red,
+                                            uint32_t green, uint32_t blue) {
+  return ESP_OK;
+}
+static inline esp_err_t led_strip_refresh(led_strip_handle_t strip) {
+  return ESP_OK;
+}
+static inline esp_err_t led_strip_clear(led_strip_handle_t strip) {
+  return ESP_OK;
+}
+#endif
 #include "sdkconfig.h"
 
 #define SDF_SERVICES_TASK_NAME "sdf_fp"
@@ -59,6 +126,8 @@ typedef struct {
   uint32_t failed_attempt_count;
   int64_t failed_attempt_window_start_us;
   int64_t lockout_until_us;
+  int64_t enrollment_btn_press_start_us;
+  led_strip_handle_t led_strip;
 } sdf_services_state_t;
 
 static sdf_services_state_t s_state = {0};
@@ -163,17 +232,41 @@ sdf_services_notify_security_event(const sdf_services_security_event_t *event) {
 
 static void sdf_services_try_set_led(uint8_t mode, uint8_t color,
                                      uint8_t cycles) {
-  sdf_fingerprint_led_command_t led_cmd = {
-      .mode = mode,
-      .color = color,
-      .cycles = cycles,
-  };
+  if (s_state.led_strip == NULL) {
+    return;
+  }
 
-  sdf_fingerprint_op_result_t led_result =
-      sdf_fingerprint_driver_control_led(&led_cmd);
-  if (led_result != SDF_FINGERPRINT_OP_OK) {
-    ESP_LOGD(TAG, "LED command failed: %s",
-             sdf_services_fingerprint_result_name(led_result));
+  uint8_t r = 0, g = 0, b = 0;
+  switch (color) {
+  case SDF_SERVICES_LED_COLOR_RED:
+    r = 255;
+    break;
+  case SDF_SERVICES_LED_COLOR_GREEN:
+    g = 255;
+    break;
+  case SDF_SERVICES_LED_COLOR_BLUE:
+    b = 255;
+    break;
+  default:
+    break;
+  }
+
+  if (mode == SDF_SERVICES_LED_MODE_BREATH ||
+      mode == SDF_SERVICES_LED_MODE_FLASH) {
+    for (uint8_t i = 0; i < cycles; i++) {
+      led_strip_set_pixel(s_state.led_strip, 0, r, g, b);
+      led_strip_refresh(s_state.led_strip);
+      vTaskDelay(pdMS_TO_TICKS(500));
+      led_strip_clear(s_state.led_strip);
+      vTaskDelay(pdMS_TO_TICKS(500));
+    }
+  } else if (mode == SDF_SERVICES_LED_MODE_SOLID) {
+    if (cycles > 0) { // Using cycles as roughly half seconds to leave it on
+      led_strip_set_pixel(s_state.led_strip, 0, r, g, b);
+      led_strip_refresh(s_state.led_strip);
+      vTaskDelay(pdMS_TO_TICKS(cycles * 500));
+      led_strip_clear(s_state.led_strip);
+    }
   }
 }
 
@@ -481,7 +574,80 @@ static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
   BaseType_t higher_priority_task_woken = pdFALSE;
   xSemaphoreGiveFromISR(s_state.wake_sem, &higher_priority_task_woken);
   if (higher_priority_task_woken == pdTRUE) {
+#ifdef CONFIG_IDF_TARGET_LINUX
+    portYIELD_FROM_ISR(pdTRUE);
+#else
     portYIELD_FROM_ISR();
+#endif
+  }
+}
+
+static void sdf_services_run_wait_admin_cycle(void) {
+  sdf_fingerprint_match_t match = {0};
+  sdf_fingerprint_op_result_t match_result =
+      sdf_fingerprint_driver_match_1n(&match);
+
+  if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
+      match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
+    return;
+  }
+
+  if (match_result != SDF_FINGERPRINT_OP_OK) {
+    ESP_LOGW(TAG, "Fingerprint match error in WAIT_ADMIN: %s",
+             sdf_services_fingerprint_result_name(match_result));
+    return;
+  }
+
+  ESP_LOGI(TAG, "WAIT_ADMIN Match: user_id=%u, permission=%u",
+           (unsigned)match.user_id, (unsigned)match.permission);
+  if (match.permission == 3) {
+    uint16_t users[SDF_FINGERPRINT_USER_ID_MAX + 1];
+    uint8_t perms[SDF_FINGERPRINT_USER_ID_MAX + 1];
+    size_t count = 0;
+    uint16_t new_id = 0;
+
+    esp_err_t err = sdf_services_query_users(users, perms, &count,
+                                             SDF_FINGERPRINT_USER_ID_MAX + 1);
+    if (err == ESP_OK) {
+      bool used[SDF_FINGERPRINT_USER_ID_MAX + 1] = {false};
+      for (size_t i = 0; i < count; i++) {
+        if (users[i] <= SDF_FINGERPRINT_USER_ID_MAX)
+          used[users[i]] = true;
+      }
+      for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
+        if (!used[id]) {
+          new_id = id;
+          break;
+        }
+      }
+    }
+
+    if (new_id > 0) {
+      if (xSemaphoreTake(s_state.lock,
+                         pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+        sdf_enrollment_sm_init(&s_state.enrollment);
+        xSemaphoreGive(s_state.lock);
+      }
+      ESP_LOGI(TAG, "Authorized! Starting local enrollment for new ID %u",
+               (unsigned)new_id);
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_SOLID,
+                               SDF_SERVICES_LED_COLOR_GREEN, 1);
+      sdf_services_request_enrollment(new_id, 1);
+    } else {
+      ESP_LOGW(TAG, "No free user IDs available for local enrollment");
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                               SDF_SERVICES_LED_COLOR_RED, 3);
+      if (xSemaphoreTake(s_state.lock,
+                         pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+        sdf_enrollment_sm_init(&s_state.enrollment);
+        xSemaphoreGive(s_state.lock);
+      }
+    }
+  } else {
+    ESP_LOGW(TAG, "WAIT_ADMIN match permission %u != ADMIN(3), rejecting.",
+             (unsigned)match.permission);
+    sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                             SDF_SERVICES_LED_COLOR_RED, 2);
   }
 }
 
@@ -491,16 +657,56 @@ static void sdf_services_task(void *arg) {
 
   while (true) {
     uint32_t poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
+    int64_t now_us = esp_timer_get_time();
+    bool is_wait_admin = false;
 
     if (xSemaphoreTake(s_state.lock,
                        pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
       poll_interval_ms = s_state.config.match_poll_interval_ms;
+      if (s_state.config.enrollment_btn_gpio >= 0) {
+        int btn_level = gpio_get_level(s_state.config.enrollment_btn_gpio);
+        if (btn_level == 0) {
+          if (s_state.enrollment_btn_press_start_us == 0) {
+            s_state.enrollment_btn_press_start_us = now_us;
+          } else if ((now_us - s_state.enrollment_btn_press_start_us) >
+                         3000000LL &&
+                     s_state.enrollment.state !=
+                         SDF_ENROLLMENT_STATE_WAIT_ADMIN &&
+                     !sdf_enrollment_sm_is_active(&s_state.enrollment) &&
+                     !s_state.enrollment_request_pending) {
+            ESP_LOGI(
+                TAG,
+                "Hardware enrollment button held for 3s, entering WAIT_ADMIN");
+            sdf_enrollment_sm_init(&s_state.enrollment);
+            s_state.enrollment.state = SDF_ENROLLMENT_STATE_WAIT_ADMIN;
+            s_state.enrollment_btn_press_start_us = now_us;
+
+            xSemaphoreGive(s_state.lock);
+            sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                                     SDF_SERVICES_LED_COLOR_BLUE, 3);
+            if (xSemaphoreTake(s_state.lock,
+                               pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
+                pdTRUE) {
+              // best effort
+            }
+          }
+        } else {
+          s_state.enrollment_btn_press_start_us = 0;
+        }
+      }
+      is_wait_admin =
+          (s_state.enrollment.state == SDF_ENROLLMENT_STATE_WAIT_ADMIN);
       xSemaphoreGive(s_state.lock);
     }
 
     sdf_services_start_pending_enrollment_if_any();
-    sdf_services_run_enrollment_step();
-    sdf_services_run_match_cycle();
+
+    if (is_wait_admin) {
+      sdf_services_run_wait_admin_cycle();
+    } else {
+      sdf_services_run_enrollment_step();
+      sdf_services_run_match_cycle();
+    }
 
     bool should_block = false;
     if (xSemaphoreTake(s_state.lock,
@@ -559,6 +765,7 @@ void sdf_services_get_default_config(sdf_services_config_t *config) {
   config->security_event_ctx = NULL;
   config->wake_gpio = -1;
   config->power_en_gpio = -1;
+  config->enrollment_btn_gpio = -1;
 }
 
 esp_err_t sdf_services_init(const sdf_services_config_t *config) {
@@ -626,6 +833,21 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
       gpio_isr_handler_add(config->wake_gpio, sdf_services_wake_isr, NULL);
     } else {
       ESP_LOGW(TAG, "Failed to configure wake GPIO interrupt: %s",
+               esp_err_to_name(err));
+    }
+  }
+
+  if (config->enrollment_btn_gpio >= 0) {
+    gpio_config_t btn_config = {
+        .pin_bit_mask = (1ULL << config->enrollment_btn_gpio),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    err = gpio_config(&btn_config);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to configure enrollment btn GPIO: %s",
                esp_err_to_name(err));
     }
   }
@@ -713,4 +935,42 @@ sdf_enrollment_sm_t sdf_services_get_enrollment_state(void) {
     xSemaphoreGive(s_state.lock);
   }
   return snapshot;
+}
+
+esp_err_t sdf_services_delete_user(uint16_t user_id) {
+  if (s_state.lock == NULL)
+    return ESP_ERR_INVALID_STATE;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
+      pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  sdf_fingerprint_op_result_t res = sdf_fingerprint_driver_delete_user(user_id);
+  xSemaphoreGive(s_state.lock);
+
+  return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t sdf_services_clear_all_users(void) {
+  if (s_state.lock == NULL)
+    return ESP_ERR_INVALID_STATE;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
+      pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  sdf_fingerprint_op_result_t res = sdf_fingerprint_driver_delete_all_users();
+  xSemaphoreGive(s_state.lock);
+
+  return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
+                                   size_t *count, size_t max_count) {
+  if (s_state.lock == NULL)
+    return ESP_ERR_INVALID_STATE;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
+      pdTRUE)
+    return ESP_ERR_TIMEOUT;
+  sdf_fingerprint_op_result_t res = sdf_fingerprint_driver_query_users(
+      user_ids, permissions, count, max_count);
+  xSemaphoreGive(s_state.lock);
+
+  return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
 }

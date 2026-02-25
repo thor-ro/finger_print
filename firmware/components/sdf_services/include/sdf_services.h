@@ -1,10 +1,15 @@
 #ifndef SDF_SERVICES_H
 #define SDF_SERVICES_H
 
+#include "sdkconfig.h"
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef CONFIG_IDF_TARGET_LINUX
 #include "driver/gpio.h"
+#else
+#include "hal/gpio_types.h"
+#endif
 #include "esp_err.h"
 
 #include "sdf_drivers.h"
@@ -46,6 +51,8 @@ typedef struct {
   void *security_event_ctx;
   gpio_num_t wake_gpio;
   gpio_num_t power_en_gpio;
+  gpio_num_t enrollment_btn_gpio;
+  gpio_num_t ws2812_led_gpio;
 } sdf_services_config_t;
 
 void sdf_services_get_default_config(sdf_services_config_t *config);
@@ -56,5 +63,10 @@ bool sdf_services_is_ready(void);
 esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission);
 bool sdf_services_is_enrollment_active(void);
 sdf_enrollment_sm_t sdf_services_get_enrollment_state(void);
+
+esp_err_t sdf_services_delete_user(uint16_t user_id);
+esp_err_t sdf_services_clear_all_users(void);
+esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
+                                   size_t *count, size_t max_count);
 
 #endif /* SDF_SERVICES_H */

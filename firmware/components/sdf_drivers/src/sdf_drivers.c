@@ -2,8 +2,81 @@
 
 #include <string.h>
 
+#ifndef CONFIG_IDF_TARGET_LINUX
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#else
+// Linux Host Mocks
+#define UART_NUM_MAX 3
+#define UART_DATA_8_BITS 0
+#define UART_PARITY_DISABLE 0
+#define UART_STOP_BITS_1 0
+#define UART_HW_FLOWCTRL_DISABLE 0
+#define UART_SCLK_DEFAULT 0
+#define UART_PIN_NO_CHANGE -1
+
+typedef int uart_port_t;
+typedef int gpio_num_t;
+typedef struct {
+  int baud_rate;
+  int data_bits;
+  int parity;
+  int stop_bits;
+  int flow_ctrl;
+  int source_clk;
+} uart_config_t;
+typedef struct {
+  uint64_t pin_bit_mask;
+  int mode;
+  int pull_up_en;
+  int pull_down_en;
+  int intr_type;
+} gpio_config_t;
+
+#define GPIO_MODE_OUTPUT 0
+#define GPIO_PULLUP_DISABLE 0
+#define GPIO_PULLDOWN_DISABLE 0
+#define GPIO_INTR_DISABLE 0
+
+static inline int uart_read_bytes(uart_port_t uart_num, void *buf,
+                                  uint32_t length, uint32_t ticks_to_wait) {
+  return -1;
+}
+static inline esp_err_t uart_flush_input(uart_port_t uart_num) {
+  return ESP_OK;
+}
+static inline int uart_write_bytes(uart_port_t uart_num, const void *src,
+                                   size_t size) {
+  return size;
+}
+static inline esp_err_t uart_driver_install(uart_port_t uart_num,
+                                            int rx_buffer_size,
+                                            int tx_buffer_size, int queue_size,
+                                            void *uart_queue,
+                                            int intr_alloc_flags) {
+  return ESP_OK;
+}
+static inline esp_err_t uart_param_config(uart_port_t uart_num,
+                                          const uart_config_t *uart_config) {
+  return ESP_OK;
+}
+static inline esp_err_t uart_set_pin(uart_port_t uart_num, int tx_io_num,
+                                     int rx_io_num, int rts_io_num,
+                                     int cts_io_num) {
+  return ESP_OK;
+}
+static inline esp_err_t uart_driver_delete(uart_port_t uart_num) {
+  return ESP_OK;
+}
+
+static inline esp_err_t gpio_config(const gpio_config_t *pGPIOConfig) {
+  return ESP_OK;
+}
+static inline esp_err_t gpio_set_level(gpio_num_t gpio_num, uint32_t level) {
+  return ESP_OK;
+}
+#endif
+
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -18,7 +91,6 @@
 #define SDF_FP_CMD_DELETE_USER 0x04u
 #define SDF_FP_CMD_DELETE_ALL_USERS 0x05u
 #define SDF_FP_CMD_MATCH_1_N 0x0Cu
-#define SDF_FP_CMD_LED_CONTROL 0x3Cu
 
 #define SDF_FP_MUTEX_WAIT_MS 250u
 
@@ -369,30 +441,6 @@ sdf_fingerprint_driver_enroll_step(sdf_fingerprint_enroll_step_t step,
 }
 
 sdf_fingerprint_op_result_t
-sdf_fingerprint_driver_control_led(const sdf_fingerprint_led_command_t *cmd) {
-  if (cmd == NULL || s_state.lock == NULL) {
-    return SDF_FINGERPRINT_OP_BAD_ARG;
-  }
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_FP_MUTEX_WAIT_MS)) !=
-      pdTRUE) {
-    return SDF_FINGERPRINT_OP_IO_ERROR;
-  }
-
-  uint8_t response[SDF_FP_FRAME_LEN] = {0};
-  esp_err_t err = sdf_fingerprint_send_command_locked(
-      SDF_FP_CMD_LED_CONTROL, cmd->mode, cmd->color, cmd->cycles, response);
-  xSemaphoreGive(s_state.lock);
-
-  if (err != ESP_OK) {
-    return err == ESP_ERR_TIMEOUT ? SDF_FINGERPRINT_OP_TIMEOUT
-                                  : SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
-  }
-
-  return sdf_fingerprint_map_ack_code(response[4]);
-}
-
-sdf_fingerprint_op_result_t
 sdf_fingerprint_driver_delete_user(uint16_t user_id) {
   if (!sdf_fingerprint_user_id_valid(user_id) || s_state.lock == NULL) {
     return SDF_FINGERPRINT_OP_BAD_ARG;
@@ -438,4 +486,99 @@ sdf_fingerprint_op_result_t sdf_fingerprint_driver_delete_all_users(void) {
   }
 
   return sdf_fingerprint_map_ack_code(response[4]);
+}
+
+sdf_fingerprint_op_result_t
+sdf_fingerprint_driver_query_users(uint16_t *user_ids, uint8_t *permissions,
+                                   size_t *count, size_t max_count) {
+  if (user_ids == NULL || permissions == NULL || count == NULL ||
+      max_count == 0 || s_state.lock == NULL) {
+    return SDF_FINGERPRINT_OP_BAD_ARG;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_FP_MUTEX_WAIT_MS)) !=
+      pdTRUE) {
+    return SDF_FINGERPRINT_OP_IO_ERROR;
+  }
+
+  uint8_t response[SDF_FP_FRAME_LEN] = {0};
+  esp_err_t err =
+      sdf_fingerprint_send_command_locked(0x2B, 0x00, 0x00, 0x00, response);
+
+  if (err != ESP_OK) {
+    xSemaphoreGive(s_state.lock);
+    return err == ESP_ERR_TIMEOUT ? SDF_FINGERPRINT_OP_TIMEOUT
+                                  : SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  sdf_fingerprint_op_result_t res = sdf_fingerprint_map_ack_code(response[4]);
+  if (res != SDF_FINGERPRINT_OP_OK) {
+    xSemaphoreGive(s_state.lock);
+    return res;
+  }
+
+  /* The length of the upcoming data packet is in bytes 2 and 3 of the header */
+  uint16_t data_len = ((uint16_t)response[2] << 8) | response[3];
+  if (data_len < 2) {
+    /* Empty database */
+    *count = 0;
+    xSemaphoreGive(s_state.lock);
+    return SDF_FINGERPRINT_OP_OK;
+  }
+
+  /* Allocate buffer for the data packet: Header(2) + Data(data_len) + CRC(1) +
+   * Tail(1) */
+  size_t packet_size = 2 + data_len + 2;
+  uint8_t *packet = calloc(1, packet_size);
+  if (packet == NULL) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_FINGERPRINT_OP_IO_ERROR;
+  }
+
+  /* Read the remaining data packet */
+  err = sdf_fingerprint_uart_read_exact(s_state.uart_port, packet, packet_size,
+                                        s_state.response_timeout_ms);
+  if (err != ESP_OK) {
+    free(packet);
+    xSemaphoreGive(s_state.lock);
+    return SDF_FINGERPRINT_OP_TIMEOUT;
+  }
+
+  if (packet[0] != SDF_FP_MARKER || packet[packet_size - 1] != SDF_FP_MARKER) {
+    free(packet);
+    xSemaphoreGive(s_state.lock);
+    return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  /* Verify packet checksum (XOR of bytes 1 to length inclusive, comparing to
+   * length+1) */
+  uint8_t checksum = 0;
+  for (size_t i = 1; i <= data_len; i++) {
+    checksum ^= packet[i];
+  }
+  if (checksum != packet[data_len + 1]) {
+    free(packet);
+    xSemaphoreGive(s_state.lock);
+    return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  /* Data format: [CMD:0xF5, 0x00, User1_Hi, User1_Lo, Perm1, User2_Hi... ] */
+  /* The format is 3 bytes per user (2 for ID, 1 for Permission), starting at
+   * offset 2 */
+  size_t parsed_count = 0;
+  size_t offset = 2; // Skip Marker and padding 0x00
+  while (offset + 2 < data_len + 1 && parsed_count < max_count) {
+    uint16_t uid = ((uint16_t)packet[offset] << 8) | packet[offset + 1];
+    uint8_t perm = packet[offset + 2];
+
+    user_ids[parsed_count] = uid;
+    permissions[parsed_count] = perm;
+    parsed_count++;
+    offset += 3;
+  }
+
+  *count = parsed_count;
+  free(packet);
+  xSemaphoreGive(s_state.lock);
+  return SDF_FINGERPRINT_OP_OK;
 }

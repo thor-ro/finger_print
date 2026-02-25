@@ -1,10 +1,20 @@
-idf_component_register(
-    SRCS
-        "src/sdf_protocol_ble.c"
+set(ble_reqs sdf_common sdf_config sdf_platform)
+if(NOT IDF_TARGET STREQUAL "linux")
+    list(APPEND ble_reqs bt)
+endif()
+
+set(ble_srcs "src/sdf_protocol_ble.c")
+if(NOT IDF_TARGET STREQUAL "linux")
+    list(APPEND ble_srcs
         "src/sdf_nuki_crypto.c"
         "src/sdf_nuki_pairing.c"
         "src/sdf_nuki_ble_transport.c"
+    )
+endif()
+
+idf_component_register(
+    SRCS ${ble_srcs}
     INCLUDE_DIRS "include"
-    REQUIRES sdf_common sdf_config sdf_platform bt
+    REQUIRES ${ble_reqs}
     PRIV_REQUIRES esp_system mbedtls
 )

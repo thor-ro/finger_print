@@ -56,6 +56,20 @@ config SDF_POWER_FP_EN_GPIO
     help
         GPIO used to enable/disable power to the fingerprint sensor. Set to -1 to disable.
 
+config SDF_ENROLLMENT_BTN_GPIO
+    int "Enrollment Button GPIO"
+    range -1 30
+    default 9
+    help
+        GPIO used for the local hardware enrollment button. Set to -1 to disable.
+
+config SDF_WS2812_LED_GPIO
+    int "WS2812 RGB LED GPIO"
+    range -1 30
+    default 8
+    help
+        GPIO to drive the onboard WS2812 RGB LED. Set to -1 to disable.
+
 config SDF_POWER_ENABLE_LIGHT_SLEEP
     bool "Enable light sleep"
     default y
