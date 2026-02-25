@@ -5,6 +5,9 @@
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_timer.h"
+#ifndef CONFIG_IDF_TARGET_LINUX
+#include "esp_task_wdt.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -174,7 +177,14 @@ static void sdf_tasks_sleep_once(const sdf_power_manager_config_t *config) {
 static void sdf_tasks_task(void *arg) {
   (void)arg;
 
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_task_wdt_add(NULL);
+#endif
+
   while (true) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+    esp_task_wdt_reset();
+#endif
     sdf_power_manager_config_t config_snapshot;
     bool initialized = false;
     int64_t now_us = esp_timer_get_time();

@@ -1,0 +1,199 @@
+# SDF Project Review — Optimizations & Missing Implementations
+
+Comprehensive review of all 11 components (~5000 LOC), headers, tests, and documentation.
+
+---
+
+## Missing Implementations
+
+### 1. OTA Firmware Updates (Phase 7)
+No OTA mechanism exists. The Zigbee component includes `esp_zigbee_ota.h` but it is unused. Without OTA, every firmware update requires physical access to the device.
+
+> [!IMPORTANT]
+> For a battery-powered door lock, field-updatability is critical for security patches.
+
+**Recommendation**: Implement Zigbee OTA using `esp_zigbee_ota` APIs and add an A/B partition scheme to `partitions.csv`.
+
+---
+
+### 2. Real Battery Voltage Reading
+Battery level is currently a coarse binary signal from the Nuki lock's `critical_battery_state` field:
+
+```c
+// sdf_app.c:869-875
+if (state.critical_battery_state) {
+    sdf_app_update_battery_percent(10);  // hardcoded 10%
+} else {
+    sdf_app_update_battery_percent(100); // hardcoded 100%
+}
+```
+
+There is no ADC reading for the Smart Door device's own battery.
+
+**Recommendation**: Add an ADC driver for a battery voltage divider on a free GPIO. Map voltage → percentage using a LiPo discharge curve. Report via `sdf_tasks_set_battery_percent`.
+
+---
+
+### 3. Persistent Audit Log
+Audit events are emitted via callback and logged to console but **not persisted**. A power cycle loses all history.
+
+**Recommendation**: Store audit events in a ring buffer backed by an NVS blob or a dedicated FAT/LittleFS partition. Expose via Zigbee diagnostics attribute for remote retrieval.
+
+---
+
+### 4. Hardcoded BLE Target Address
+
+```c
+// sdf_app.c:56-58
+static const ble_addr_t SDF_NUKI_TARGET_ADDR = {
+    .type = SDF_NUKI_TARGET_ADDR_TYPE,
+    .val = {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}};
+```
+
+This is a placeholder. There is no way to set the lock's BLE address at runtime (through Zigbee, NVS, or a provisioning flow).
+
+**Recommendation**: Store the target BLE address in NVS. Add a Zigbee attribute or a BLE scan-and-pair provisioning flow to configure it once.
+
+---
+
+### 5. Empty Stub Components
+
+| Component | Lines | Status |
+|---|---|---|
+| `sdf_common` | 6 | Empty `init()` only |
+| `sdf_config` | 6 | Empty `init()` only |
+| `sdf_platform` | 6 | Empty `init()` only |
+
+These exist as dependency placeholders but contain no implementation. They add 3 components to the build with no value.
+
+**Recommendation**: Either populate them with their intended functionality (e.g., `sdf_platform` for hardware abstraction, `sdf_config` for runtime-adjustable settings) or merge their headers into `sdf_common` and remove the empty components.
+
+---
+
+### 6. Door Sensor Integration
+The `sdf_protocol_ble.h` declares `sdf_protocol_ble_update_doorsensor_state()`, but no door sensor driver or GPIO integration exists. The Zigbee Door Lock cluster supports door-state reporting, but it's never populated from a real sensor.
+
+**Recommendation**: If hardware supports a reed switch / magnetic contact, add a GPIO interrupt handler that reports door open/close through the existing API.
+
+---
+
+### 7. Incomplete Test Coverage
+
+| Component | Tests | Coverage |
+|---|---|---|
+| `sdf_state_machines` | 21 | ✅ Good |
+| `sdf_drivers` (protocol) | 20 | ✅ Good |
+| `sdf_storage` | 0 | ❌ None |
+| `sdf_services` | 0 | ❌ None |
+| `sdf_tasks` | 0 | ❌ None |
+| `sdf_app` | 0 | ❌ None |
+| `sdf_protocol_ble` | 0 | ❌ None |
+
+**Recommendation**: Prioritize unit tests for:
+- `sdf_storage`: NVS save/load/clear logic (mockable via `nvs_flash` stubs)
+- `sdf_tasks`: Wakeup reason mapping, checkin interval clamping, battery percent bounds
+- `sdf_services`: Lockout timer logic, cooldown enforcement, enrollment request queueing
+
+---
+
+## Optimizations
+
+### 8. Power: Interrupt-Driven Fingerprint Matching ⚡
+*(Previously noted in `doc/optimizations.md`)*
+
+The fingerprint service polls every 400ms even when no finger is present. The hardware already has `fingerprint_wake_gpio` used for light-sleep wakeup but **not** for the match loop.
+
+**Change**: Block `sdf_services_task` on a semaphore given by a GPIO ISR on `wake_gpio`. Only poll the sensor when the ISR fires. This eliminates ~2.5 UART transactions/second during idle.
+
+---
+
+### 9. Memory: Stack-Allocated Crypto Buffers 🧠
+*(Previously noted in `doc/optimizations.md`)*
+
+`sdf_nuki_build_encrypted_message_custom` and `sdf_nuki_client_send_unencrypted` allocate >1KB on the stack per call. On a FreeRTOS task with a 4KB stack, this leaves <3KB for the rest of the call chain.
+
+**Change**: Move transmit buffers into the `sdf_nuki_client_t` struct alongside `rx_buf` / `pd_buf`. This mirrors the receive-side pattern already in use.
+
+---
+
+### 10. Architecture: Reduce `sdf_app.c` Complexity (1150 lines)
+`sdf_app.c` is the single largest file and handles:
+- BLE transport lifecycle
+- Nuki pairing flow
+- Lock action state machine (challenge → action → status)
+- Zigbee command routing
+- Enrollment orchestration
+- Power management wiring
+- Audit event emission
+
+**Recommendation**: Extract the lock-action flow (challenge/retry/completion) into a dedicated `sdf_lock_flow.c/.h`. This reduces `sdf_app.c` by ~150 lines and makes the retry logic independently testable.
+
+---
+
+### 11. Security: Credentials Not Zeroed After Use
+In `sdf_app_init`, after loading credentials from NVS the local `shared_key[32]` buffer is **not** zeroed:
+
+```c
+// sdf_app.c:1056-1064
+uint8_t shared_key[32] = {0};
+if (sdf_storage_nuki_load(&auth_id, shared_key) == ESP_OK) {
+    memcpy(creds.shared_key, shared_key, sizeof(shared_key));
+    // shared_key stays on stack with key material until function returns
+}
+```
+
+**Change**: Add `memset(shared_key, 0, sizeof(shared_key));` after the `memcpy`. Use `mbedtls_platform_zeroize` to prevent compiler optimization.
+
+---
+
+### 12. Robustness: No Watchdog or Health Monitoring
+No task watchdog (`esp_task_wdt`) enrollment protects against a hung fingerprint service task or power manager task.
+
+**Recommendation**: Register `sdf_services_task` and `sdf_tasks_task` with `esp_task_wdt_add` and feed the watchdog each loop iteration. Configure reset on timeout.
+
+---
+
+### 13. Code: Duplicated GPIO Mock Types Across Headers
+
+`gpio_config_t`, `gpio_num_t`, and related defines are duplicated across:
+- [sdf_mock_linux_drivers.h](file:///Users/thorstenropertz/workspace/smart_door/firmware/components/sdf_drivers/include/sdf_mock_linux_drivers.h)
+- [sdf_mock_linux_services.h](file:///Users/thorstenropertz/workspace/smart_door/firmware/components/sdf_services/include/sdf_mock_linux_services.h)
+- [sdf_tasks.h](file:///Users/thorstenropertz/workspace/smart_door/firmware/components/sdf_tasks/include/sdf_tasks.h) (inline guard)
+- [sdf_services.h](file:///Users/thorstenropertz/workspace/smart_door/firmware/components/sdf_services/include/sdf_services.h) (inline guard)
+
+**Recommendation**: Create a single `sdf_mock_linux_gpio.h` in `sdf_common` defining all shared GPIO types, then include it from each mock header.
+
+---
+
+### 14. Code: `sdf_services.c` Lock Pattern Is Repetitive
+The semaphore take/give pattern is repeated 10+ times in `sdf_services.c`:
+
+```c
+if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+    // ... critical section ...
+    xSemaphoreGive(s_state.lock);
+}
+```
+
+**Recommendation**: Introduce a `SDF_LOCK_GUARD` macro or a `with_lock()`-style helper that GCC cleanup attributes can leverage, reducing boilerplate and ensuring the semaphore is always released.
+
+---
+
+## Priority Matrix
+
+| # | Item | Impact | Effort | Priority |
+|---|---|---|---|---|
+| 8 | Interrupt-driven FP matching | ⚡ Power | Low | **P0** |
+| 11 | Zero credentials after use | 🔒 Security | Trivial | **P0** |
+| 12 | Task watchdog | 🛡️ Reliability | Low | **P0** |
+| 2 | Real battery ADC | 📊 Reporting | Medium | **P1** |
+| 4 | Configurable BLE address | 🔧 Usability | Medium | **P1** |
+| 10 | Extract lock flow from app | 🏗️ Maintainability | Medium | **P1** |
+| 7 | Add tests for storage/services/tasks | ✅ Quality | Medium | **P1** |
+| 1 | OTA updates | 🔄 Maintainability | High | **P2** |
+| 3 | Persistent audit log | 📝 Compliance | Medium | **P2** |
+| 9 | Move crypto buffers off stack | 🧠 Memory | Low | **P2** |
+| 5 | Remove empty stubs | 🧹 Cleanup | Trivial | **P3** |
+| 6 | Door sensor integration | 🚪 Feature | Medium | **P3** |
+| 13 | Unified GPIO mock header | 🧹 Cleanup | Low | **P3** |
+| 14 | Lock guard macro | 🧹 Cleanup | Low | **P3** |
