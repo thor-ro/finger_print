@@ -10,6 +10,9 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#ifndef CONFIG_IDF_TARGET_LINUX
+#include "esp_task_wdt.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -597,7 +600,14 @@ static void sdf_services_task(void *arg) {
   (void)arg;
   bool is_powered = true;
 
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_task_wdt_add(NULL);
+#endif
+
   while (true) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+    esp_task_wdt_reset();
+#endif
     uint32_t poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
     int64_t now_us = esp_timer_get_time();
     bool is_wait_admin = false;

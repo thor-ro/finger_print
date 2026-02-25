@@ -5,8 +5,10 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "mbedtls/platform_util.h"
 #include "sdkconfig.h"
 
+#include "sdf_lock_flow.h"
 #include "sdf_nuki_ble_transport.h"
 #include "sdf_nuki_pairing.h"
 #include "sdf_protocol_ble.h"
@@ -78,21 +80,7 @@ static uint16_t s_zigbee_alarm_mask;
 static bool s_latch_sequence_active;
 static uint8_t s_battery_percent_cached = SDF_APP_POWER_BATTERY_DEFAULT_PERCENT;
 
-typedef enum {
-  SDF_APP_LOCK_FLOW_IDLE = 0,
-  SDF_APP_LOCK_FLOW_WAIT_CHALLENGE,
-  SDF_APP_LOCK_FLOW_WAIT_COMPLETION
-} sdf_app_lock_flow_state_t;
-
-typedef struct {
-  sdf_app_lock_flow_state_t state;
-  uint8_t requested_action;
-  uint8_t flags;
-  uint8_t retry_count;
-  uint8_t nonce_nk[SDF_NUKI_CHALLENGE_NONCE_LEN];
-} sdf_app_lock_flow_t;
-
-static sdf_app_lock_flow_t s_lock_flow;
+static sdf_lock_flow_t s_lock_flow;
 
 static void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
                                int32_t status, uint16_t detail);
@@ -277,7 +265,7 @@ static bool sdf_app_power_busy(void *ctx) {
   if (s_pairing_active || s_latch_sequence_active) {
     return true;
   }
-  if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
+  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
     return true;
   }
   return sdf_services_is_enrollment_active();
@@ -376,7 +364,7 @@ static void sdf_app_on_enrollment_state(void *ctx,
 }
 
 static int sdf_app_start_unlock_unlatch_sequence(void) {
-  if (s_latch_sequence_active || s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
+  if (s_latch_sequence_active || s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
     return SDF_NUKI_RESULT_ERR_INCOMPLETE;
   }
 
@@ -641,7 +629,7 @@ static void sdf_app_emit_lock_progress(void) {
   sdf_event_t event;
   memset(&event, 0, sizeof(event));
   event.type = SDF_EVENT_LOCK_ACTION_PROGRESS;
-  event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
+  event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
   event.lock_action = s_lock_flow.requested_action;
   event.retry_count = s_lock_flow.retry_count;
   sdf_app_emit_event(&event);
@@ -651,18 +639,15 @@ static int sdf_app_request_challenge_locked(void) {
   int res = sdf_nuki_client_send_request_data(&s_client, SDF_NUKI_CMD_CHALLENGE,
                                               NULL, 0);
   if (res == SDF_NUKI_RESULT_OK) {
-    s_lock_flow.state = SDF_APP_LOCK_FLOW_WAIT_CHALLENGE;
+    s_lock_flow.state = SDF_LOCK_FLOW_WAIT_CHALLENGE;
   }
   return res;
 }
 
-static void sdf_app_lock_flow_reset(void) {
-  memset(&s_lock_flow, 0, sizeof(s_lock_flow));
-  s_lock_flow.state = SDF_APP_LOCK_FLOW_IDLE;
-}
+static void sdf_app_lock_flow_reset(void) { sdf_lock_flow_reset(&s_lock_flow); }
 
 static int sdf_app_retry_lock_action(const char *reason) {
-  if (s_lock_flow.state == SDF_APP_LOCK_FLOW_IDLE) {
+  if (s_lock_flow.state == SDF_LOCK_FLOW_IDLE) {
     return SDF_NUKI_RESULT_OK;
   }
 
@@ -723,12 +708,12 @@ int sdf_app_lock_action(uint8_t lock_action, uint8_t flags) {
     return SDF_NUKI_RESULT_ERR_ARG;
   }
 
-  if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
+  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
     return SDF_NUKI_RESULT_ERR_INCOMPLETE;
   }
 
   memset(&s_lock_flow, 0, sizeof(s_lock_flow));
-  s_lock_flow.state = SDF_APP_LOCK_FLOW_IDLE;
+  s_lock_flow.state = SDF_LOCK_FLOW_IDLE;
   s_lock_flow.requested_action = lock_action;
   s_lock_flow.flags = flags;
 
@@ -764,7 +749,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
   sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_SECURITY_PROTOCOL);
 
   if (msg->command_id == SDF_NUKI_CMD_CHALLENGE) {
-    if (s_lock_flow.state != SDF_APP_LOCK_FLOW_WAIT_CHALLENGE) {
+    if (s_lock_flow.state != SDF_LOCK_FLOW_WAIT_CHALLENGE) {
       return;
     }
 
@@ -783,7 +768,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
       return;
     }
 
-    s_lock_flow.state = SDF_APP_LOCK_FLOW_WAIT_COMPLETION;
+    s_lock_flow.state = SDF_LOCK_FLOW_WAIT_COMPLETION;
     sdf_app_emit_lock_progress();
     return;
   }
@@ -800,12 +785,12 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     memset(&event, 0, sizeof(event));
     event.type = SDF_EVENT_STATUS;
     event.data.status = status;
-    event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
+    event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
     event.lock_action = s_lock_flow.requested_action;
     event.retry_count = s_lock_flow.retry_count;
     sdf_app_emit_event(&event);
 
-    if (s_lock_flow.state == SDF_APP_LOCK_FLOW_WAIT_COMPLETION) {
+    if (s_lock_flow.state == SDF_LOCK_FLOW_WAIT_COMPLETION) {
       if (status == SDF_STATUS_ACCEPTED) {
         return;
       }
@@ -859,7 +844,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     memset(&event, 0, sizeof(event));
     event.type = SDF_EVENT_KEYTURNER_STATE;
     event.data.keyturner_state = state;
-    event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
+    event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
     event.lock_action = s_lock_flow.requested_action;
     event.retry_count = s_lock_flow.retry_count;
     sdf_app_emit_event(&event);
@@ -890,13 +875,13 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     memset(&event, 0, sizeof(event));
     event.type = SDF_EVENT_ERROR;
     event.data.error_report = report;
-    event.lock_action_in_progress = s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE;
+    event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
     event.lock_action = s_lock_flow.requested_action;
     event.retry_count = s_lock_flow.retry_count;
     sdf_app_emit_event(&event);
     sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
 
-    if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
+    if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
       sdf_app_retry_lock_action("received error report");
     }
     return;
@@ -911,7 +896,7 @@ static void sdf_app_on_ble_ready(void *ctx) {
   sdf_tasks_mark_activity();
   ESP_LOGI(TAG, "BLE transport ready");
 
-  if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE) {
+  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
     ESP_LOGW(TAG, "Resetting stale lock action flow after reconnect");
     sdf_app_abort_latch_sequence("BLE reconnect during action");
     sdf_app_lock_flow_reset();
@@ -1010,7 +995,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
   sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_SECURITY_PROTOCOL, 0);
   sdf_app_emit_audit(SDF_AUDIT_PROTOCOL_ERROR, 0, feed_res, 0);
 
-  if (s_lock_flow.state != SDF_APP_LOCK_FLOW_IDLE &&
+  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE &&
       (feed_res == SDF_NUKI_RESULT_ERR_CRC ||
        feed_res == SDF_NUKI_RESULT_ERR_AUTH)) {
     sdf_app_retry_lock_action("encrypted frame validation failed");
@@ -1018,7 +1003,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
 }
 
 void sdf_app_init(void) {
-  sdf_app_lock_flow_reset();
+  sdf_lock_flow_init(&s_lock_flow, SDF_APP_LOCK_ACTION_MAX_RETRIES);
   s_zigbee_alarm_mask = 0;
   s_latch_sequence_active = false;
 
@@ -1062,6 +1047,7 @@ void sdf_app_init(void) {
     s_has_creds = true;
     ESP_LOGI(TAG, "Loaded stored Nuki credentials");
   }
+  mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   sdf_nuki_client_init(&s_client, &creds, sdf_app_send_encrypted, NULL,
                        sdf_app_send_unencrypted, NULL, sdf_app_on_message,
@@ -1117,7 +1103,21 @@ void sdf_app_init(void) {
 
   sdf_nuki_ble_init(&s_ble, sdf_app_on_ble_rx, NULL, sdf_app_on_ble_ready,
                     NULL);
-  sdf_nuki_ble_set_target_addr(&s_ble, &SDF_NUKI_TARGET_ADDR);
+
+  /* Load BLE target address from NVS, fall back to compile-time default */
+  ble_addr_t ble_target = SDF_NUKI_TARGET_ADDR;
+  {
+    uint8_t stored_type = 0;
+    uint8_t stored_addr[6] = {0};
+    if (sdf_storage_ble_target_load(&stored_type, stored_addr) == ESP_OK) {
+      ble_target.type = stored_type;
+      memcpy(ble_target.val, stored_addr, sizeof(ble_target.val));
+      ESP_LOGI(TAG, "Loaded BLE target address from NVS");
+    } else {
+      ESP_LOGI(TAG, "Using compile-time BLE target address");
+    }
+  }
+  sdf_nuki_ble_set_target_addr(&s_ble, &ble_target);
   ESP_LOGI(TAG, "Starting BLE scan (target address set)");
   sdf_nuki_ble_start(&s_ble);
 

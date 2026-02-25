@@ -48,6 +48,19 @@ extern void test_map_ack_fail(void);
 extern void test_map_ack_nouser(void);
 extern void test_map_ack_unknown(void);
 
+/* Lock flow tests */
+extern void test_lock_flow_init(void);
+extern void test_lock_flow_reset_preserves_max_retries(void);
+extern void test_lock_flow_is_idle_on_init(void);
+extern void test_lock_flow_is_not_idle_when_active(void);
+extern void test_lock_flow_start_success(void);
+extern void test_lock_flow_start_rejected_when_active(void);
+extern void test_lock_flow_state_transitions(void);
+extern void test_lock_flow_retries_not_exhausted(void);
+extern void test_lock_flow_advance_retry(void);
+extern void test_lock_flow_retries_exhausted_at_max(void);
+extern void test_lock_flow_zero_max_retries(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -99,6 +112,19 @@ void app_main(void) {
   RUN_TEST(test_map_ack_fail);
   RUN_TEST(test_map_ack_nouser);
   RUN_TEST(test_map_ack_unknown);
+
+  /* Lock flow */
+  RUN_TEST(test_lock_flow_init);
+  RUN_TEST(test_lock_flow_reset_preserves_max_retries);
+  RUN_TEST(test_lock_flow_is_idle_on_init);
+  RUN_TEST(test_lock_flow_is_not_idle_when_active);
+  RUN_TEST(test_lock_flow_start_success);
+  RUN_TEST(test_lock_flow_start_rejected_when_active);
+  RUN_TEST(test_lock_flow_state_transitions);
+  RUN_TEST(test_lock_flow_retries_not_exhausted);
+  RUN_TEST(test_lock_flow_advance_retry);
+  RUN_TEST(test_lock_flow_retries_exhausted_at_max);
+  RUN_TEST(test_lock_flow_zero_max_retries);
 
   UNITY_END();
 }
