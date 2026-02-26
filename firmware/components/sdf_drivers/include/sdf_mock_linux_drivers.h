@@ -11,6 +11,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* Shared GPIO mock types */
+#include "sdf_mock_linux_gpio.h"
+
 /* --------------- UART types & defines --------------- */
 
 #define UART_NUM_MAX 3
@@ -43,27 +46,5 @@ esp_err_t uart_param_config(uart_port_t uart_num,
 esp_err_t uart_set_pin(uart_port_t uart_num, int tx_io_num, int rx_io_num,
                        int rts_io_num, int cts_io_num);
 esp_err_t uart_driver_delete(uart_port_t uart_num);
-
-/* --------------- GPIO types & defines --------------- */
-
-typedef int gpio_num_t;
-typedef struct {
-  uint64_t pin_bit_mask;
-  int mode;
-  int pull_up_en;
-  int pull_down_en;
-  int intr_type;
-} gpio_config_t;
-
-#define GPIO_MODE_OUTPUT 0
-#define GPIO_PULLUP_DISABLE 0
-#define GPIO_PULLDOWN_DISABLE 0
-#define GPIO_INTR_DISABLE 0
-
-esp_err_t gpio_config_mock(const gpio_config_t *pGPIOConfig);
-esp_err_t gpio_set_level(gpio_num_t gpio_num, uint32_t level);
-
-/* Redirect gpio_config calls to mock to avoid name collision with the struct */
-#define gpio_config gpio_config_mock
 
 #endif /* SDF_MOCK_LINUX_DRIVERS_H */
