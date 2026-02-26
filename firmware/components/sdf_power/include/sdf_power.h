@@ -1,5 +1,5 @@
-#ifndef SDF_TASKS_H
-#define SDF_TASKS_H
+#ifndef SDF_POWER_H
+#define SDF_POWER_H
 
 #include "sdkconfig.h"
 #include <stdbool.h>
@@ -48,19 +48,19 @@ typedef struct {
   void *battery_ctx;
 } sdf_power_manager_config_t;
 
-void sdf_tasks_init(void);
+void sdf_power_init(void);
 
-void sdf_tasks_get_default_power_config(sdf_power_manager_config_t *config);
+void sdf_power_get_default_power_config(sdf_power_manager_config_t *config);
 esp_err_t
-sdf_tasks_init_power_manager(const sdf_power_manager_config_t *config);
+sdf_power_init_power_manager(const sdf_power_manager_config_t *config);
 
-bool sdf_tasks_power_manager_ready(void);
-void sdf_tasks_mark_activity(void);
+bool sdf_power_power_manager_ready(void);
+void sdf_power_mark_activity(void);
 
-esp_err_t sdf_tasks_set_checkin_interval_ms(uint32_t checkin_interval_ms);
-uint32_t sdf_tasks_get_checkin_interval_ms(void);
+esp_err_t sdf_power_set_checkin_interval_ms(uint32_t checkin_interval_ms);
+uint32_t sdf_power_get_checkin_interval_ms(void);
 
-esp_err_t sdf_tasks_set_battery_percent(uint8_t battery_percent);
-uint8_t sdf_tasks_get_battery_percent(void);
+esp_err_t sdf_power_set_battery_percent(uint8_t battery_percent);
+uint8_t sdf_power_get_battery_percent(void);
 
-#endif /* SDF_TASKS_H */
+#endif /* SDF_POWER_H */
