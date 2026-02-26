@@ -1,0 +1,19 @@
+menu "SDF Zigbee"
+
+config SDF_ZIGBEE_SLEEP_THRESHOLD_MS
+    int "Minimum idle time before Zigbee sleep (ms)"
+    range 10 5000
+    default 20
+    help
+        The Zigbee stack will only enter sleep if the idle window
+        is longer than this threshold. Low values save more power
+        but increase wake transitions.
+
+config SDF_ZIGBEE_SLEEP_ENABLE
+    bool "Enable Zigbee sleepy end-device mode"
+    default y
+    help
+        Enable light-sleep for the Zigbee radio between check-in polls.
+        Requires CONFIG_PM_ENABLE and CONFIG_FREERTOS_USE_TICKLESS_IDLE.
+
+endmenu
