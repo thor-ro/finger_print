@@ -1078,8 +1078,13 @@ void sdf_app_init(void) {
       ESP_LOGI(TAG, "Using compile-time BLE target address");
     }
   }
-  sdf_nuki_ble_set_target_addr(&s_ble, &ble_target);
-  ESP_LOGI(TAG, "Starting BLE scan (target address set)");
+  if (!sdf_nuki_ble_addr_is_empty(&ble_target)) {
+    sdf_nuki_ble_set_target_addr(&s_ble, &ble_target);
+    ESP_LOGI(TAG, "Starting BLE scan (target address set)");
+  } else {
+    ESP_LOGI(TAG,
+             "Starting BLE scan (advertisement discovery, no target address)");
+  }
   sdf_nuki_ble_start(&s_ble);
 
   sdf_power_manager_config_t power_cfg;

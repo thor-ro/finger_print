@@ -72,6 +72,8 @@ int sdf_nuki_ble_start(sdf_nuki_ble_transport_t *transport);
 int sdf_nuki_ble_set_enabled(sdf_nuki_ble_transport_t *transport, bool enabled);
 bool sdf_nuki_ble_is_enabled(const sdf_nuki_ble_transport_t *transport);
 
+bool sdf_nuki_ble_addr_is_empty(const ble_addr_t *addr);
+
 int sdf_nuki_ble_set_target_addr(
     sdf_nuki_ble_transport_t *transport,
     const ble_addr_t *addr);
