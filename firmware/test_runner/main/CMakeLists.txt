@@ -1,4 +1,4 @@
-set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble)
+set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage nvs_flash esp_partition)
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND test_reqs sdf_app)
 endif()
@@ -10,6 +10,7 @@ idf_component_register(
          "../../components/sdf_drivers/test/test_driver_protocol.c"
          "../../components/sdf_app/src/sdf_lock_flow.c"
          "../../components/sdf_app/test/test_lock_flow.c"
+         "../../components/sdf_storage/test/test_sdf_storage.c"
     INCLUDE_DIRS "."
                  "../../components/sdf_app/include"
     REQUIRES ${test_reqs}
