@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_check.h"
@@ -31,6 +32,14 @@
 #define SDF_ZIGBEE_CHECKIN_INTERVAL_MIN_MS 1000U
 #define SDF_ZIGBEE_CHECKIN_INTERVAL_MAX_MS 600000U
 #define SDF_ZIGBEE_PRIMARY_CHANNEL_MASK ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK
+
+/* Kconfig defaults (overridden by sdkconfig when available) */
+#ifndef CONFIG_SDF_ZIGBEE_SLEEP_ENABLE
+#define CONFIG_SDF_ZIGBEE_SLEEP_ENABLE 1
+#endif
+#ifndef CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS
+#define CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS 20
+#endif
 
 static const char *TAG = "sdf_protocol_zigbee";
 
@@ -142,6 +151,12 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
              esp_zb_zdo_signal_to_string(sig_type), sig_type,
              esp_err_to_name(err_status));
     break;
+
+#if CONFIG_SDF_ZIGBEE_SLEEP_ENABLE
+  case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP:
+    esp_zb_sleep_now();
+    break;
+#endif
   }
 }
 
@@ -666,6 +681,13 @@ static void sdf_zigbee_task(void *arg) {
     ESP_LOGE(TAG, "Failed to register Zigbee endpoint");
     goto fail;
   }
+
+#if CONFIG_SDF_ZIGBEE_SLEEP_ENABLE
+  esp_zb_sleep_enable(true);
+  esp_zb_sleep_set_threshold(CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS);
+  ESP_LOGI(TAG, "Zigbee sleep enabled (threshold=%d ms)",
+           CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS);
+#endif
 
   esp_err_t err = esp_zb_start(false);
   if (err != ESP_OK) {
