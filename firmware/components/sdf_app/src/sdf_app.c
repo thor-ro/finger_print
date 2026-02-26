@@ -625,56 +625,62 @@ static void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
   }
 }
 
-static void sdf_app_emit_lock_progress(void) {
+/* ---- Lock flow callbacks (bridge to app-level state) ---- */
+
+static int sdf_app_lf_send_challenge(void *ctx) {
+  (void)ctx;
+  return sdf_nuki_client_send_request_data(&s_client, SDF_NUKI_CMD_CHALLENGE,
+                                           NULL, 0);
+}
+
+static int sdf_app_lf_send_action(void *ctx, uint8_t action, uint8_t flags,
+                                  const uint8_t *nonce_nk) {
+  (void)ctx;
+  return sdf_nuki_client_send_lock_action(
+      &s_client, action, flags, (const uint8_t *)SDF_APP_LOCK_SUFFIX,
+      strlen(SDF_APP_LOCK_SUFFIX), nonce_nk);
+}
+
+static void sdf_app_lf_on_fail(void *ctx, const char *reason) {
+  (void)ctx;
+  sdf_app_abort_latch_sequence(reason);
+  sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+}
+
+static void sdf_app_lf_on_progress(void *ctx, bool in_progress, uint8_t action,
+                                   uint8_t retries) {
+  (void)ctx;
   sdf_event_t event;
   memset(&event, 0, sizeof(event));
   event.type = SDF_EVENT_LOCK_ACTION_PROGRESS;
-  event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
-  event.lock_action = s_lock_flow.requested_action;
-  event.retry_count = s_lock_flow.retry_count;
+  event.lock_action_in_progress = in_progress;
+  event.lock_action = action;
+  event.retry_count = retries;
   sdf_app_emit_event(&event);
 }
 
-static int sdf_app_request_challenge_locked(void) {
-  int res = sdf_nuki_client_send_request_data(&s_client, SDF_NUKI_CMD_CHALLENGE,
-                                              NULL, 0);
-  if (res == SDF_NUKI_RESULT_OK) {
-    s_lock_flow.state = SDF_LOCK_FLOW_WAIT_CHALLENGE;
-  }
-  return res;
-}
+static void sdf_app_lf_on_complete(void *ctx, uint8_t action) {
+  (void)ctx;
+  sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
+  sdf_app_update_zigbee_from_action(action);
 
-static void sdf_app_lock_flow_reset(void) { sdf_lock_flow_reset(&s_lock_flow); }
-
-static int sdf_app_retry_lock_action(const char *reason) {
-  if (s_lock_flow.state == SDF_LOCK_FLOW_IDLE) {
-    return SDF_NUKI_RESULT_OK;
-  }
-
-  if (s_lock_flow.retry_count >= SDF_APP_LOCK_ACTION_MAX_RETRIES) {
-    ESP_LOGE(TAG, "Lock action 0x%02X failed after %u retries (%s)",
-             s_lock_flow.requested_action, (unsigned)s_lock_flow.retry_count,
-             reason);
-    sdf_app_abort_latch_sequence("lock action failed");
+  if (s_latch_sequence_active && action == SDF_LOCK_ACTION_UNLOCK) {
+    int res = sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
+    if (res == SDF_NUKI_RESULT_OK) {
+      ESP_LOGI(TAG, "Latch sequence continuing with unlatch");
+      return;
+    }
+    ESP_LOGW(TAG, "Failed to start unlatch step in latch sequence: %d", res);
+    sdf_app_abort_latch_sequence("failed to start unlatch");
     sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
-    sdf_app_lock_flow_reset();
-    sdf_app_emit_lock_progress();
-    return SDF_NUKI_RESULT_ERR_AUTH;
+  } else if (s_latch_sequence_active) {
+    if (action == SDF_LOCK_ACTION_UNLATCH) {
+      ESP_LOGI(TAG, "Latch sequence finished");
+    }
+    s_latch_sequence_active = false;
   }
 
-  s_lock_flow.retry_count++;
-  ESP_LOGW(TAG, "Retrying lock action 0x%02X (%u/%u): %s",
-           s_lock_flow.requested_action, (unsigned)s_lock_flow.retry_count,
-           (unsigned)SDF_APP_LOCK_ACTION_MAX_RETRIES, reason);
-
-  int res = sdf_app_request_challenge_locked();
-  if (res != SDF_NUKI_RESULT_OK) {
-    ESP_LOGE(TAG, "Challenge retry failed: %d", res);
-    sdf_app_abort_latch_sequence("challenge retry failed");
-    sdf_app_lock_flow_reset();
-  }
-  sdf_app_emit_lock_progress();
-  return res;
+  sdf_app_request_keyturner_state();
 }
 
 static int sdf_app_send_encrypted(void *ctx, const uint8_t *data, size_t len) {
@@ -708,24 +714,7 @@ int sdf_app_lock_action(uint8_t lock_action, uint8_t flags) {
     return SDF_NUKI_RESULT_ERR_ARG;
   }
 
-  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
-    return SDF_NUKI_RESULT_ERR_INCOMPLETE;
-  }
-
-  memset(&s_lock_flow, 0, sizeof(s_lock_flow));
-  s_lock_flow.state = SDF_LOCK_FLOW_IDLE;
-  s_lock_flow.requested_action = lock_action;
-  s_lock_flow.flags = flags;
-
-  int res = sdf_app_request_challenge_locked();
-  if (res != SDF_NUKI_RESULT_OK) {
-    sdf_app_lock_flow_reset();
-    return res;
-  }
-
-  sdf_app_emit_lock_progress();
-  ESP_LOGI(TAG, "Started lock action flow for action=0x%02X", lock_action);
-  return SDF_NUKI_RESULT_OK;
+  return sdf_lock_flow_begin(&s_lock_flow, lock_action, flags);
 }
 
 void sdf_app_set_event_callback(sdf_event_cb cb, void *ctx) {
@@ -749,27 +738,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
   sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_SECURITY_PROTOCOL);
 
   if (msg->command_id == SDF_NUKI_CMD_CHALLENGE) {
-    if (s_lock_flow.state != SDF_LOCK_FLOW_WAIT_CHALLENGE) {
-      return;
-    }
-
-    int res = sdf_nuki_parse_challenge(msg, s_lock_flow.nonce_nk);
-    if (res != SDF_NUKI_RESULT_OK) {
-      sdf_app_retry_lock_action("challenge parse failed");
-      return;
-    }
-
-    res = sdf_nuki_client_send_lock_action(
-        &s_client, s_lock_flow.requested_action, s_lock_flow.flags,
-        (const uint8_t *)SDF_APP_LOCK_SUFFIX, strlen(SDF_APP_LOCK_SUFFIX),
-        s_lock_flow.nonce_nk);
-    if (res != SDF_NUKI_RESULT_OK) {
-      sdf_app_retry_lock_action("lock action write failed");
-      return;
-    }
-
-    s_lock_flow.state = SDF_LOCK_FLOW_WAIT_COMPLETION;
-    sdf_app_emit_lock_progress();
+    sdf_lock_flow_on_challenge(&s_lock_flow, msg);
     return;
   }
 
@@ -790,42 +759,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     event.retry_count = s_lock_flow.retry_count;
     sdf_app_emit_event(&event);
 
-    if (s_lock_flow.state == SDF_LOCK_FLOW_WAIT_COMPLETION) {
-      if (status == SDF_STATUS_ACCEPTED) {
-        return;
-      }
-
-      if (status == SDF_STATUS_COMPLETE) {
-        uint8_t action = s_lock_flow.requested_action;
-        sdf_app_lock_flow_reset();
-        sdf_app_emit_lock_progress();
-        ESP_LOGI(TAG, "Lock action 0x%02X completed", action);
-        sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
-        sdf_app_update_zigbee_from_action(action);
-
-        if (s_latch_sequence_active && action == SDF_LOCK_ACTION_UNLOCK) {
-          int res = sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
-          if (res == SDF_NUKI_RESULT_OK) {
-            ESP_LOGI(TAG, "Latch sequence continuing with unlatch");
-            return;
-          }
-          ESP_LOGW(TAG, "Failed to start unlatch step in latch sequence: %d",
-                   res);
-          sdf_app_abort_latch_sequence("failed to start unlatch");
-          sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
-        } else if (s_latch_sequence_active) {
-          if (action == SDF_LOCK_ACTION_UNLATCH) {
-            ESP_LOGI(TAG, "Latch sequence finished");
-          }
-          s_latch_sequence_active = false;
-        }
-
-        sdf_app_request_keyturner_state();
-        return;
-      }
-
-      sdf_app_retry_lock_action("unexpected status");
-    }
+    sdf_lock_flow_on_status(&s_lock_flow, status);
     return;
   }
 
@@ -881,9 +815,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     sdf_app_emit_event(&event);
     sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
 
-    if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
-      sdf_app_retry_lock_action("received error report");
-    }
+    sdf_lock_flow_on_error(&s_lock_flow);
     return;
   }
 
@@ -896,11 +828,11 @@ static void sdf_app_on_ble_ready(void *ctx) {
   sdf_tasks_mark_activity();
   ESP_LOGI(TAG, "BLE transport ready");
 
-  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
+  if (!sdf_lock_flow_is_idle(&s_lock_flow)) {
     ESP_LOGW(TAG, "Resetting stale lock action flow after reconnect");
     sdf_app_abort_latch_sequence("BLE reconnect during action");
-    sdf_app_lock_flow_reset();
-    sdf_app_emit_lock_progress();
+    sdf_lock_flow_reset(&s_lock_flow);
+    sdf_app_lf_on_progress(NULL, false, 0, 0);
   }
 
   if (!s_has_creds) {
@@ -995,15 +927,23 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
   sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_SECURITY_PROTOCOL, 0);
   sdf_app_emit_audit(SDF_AUDIT_PROTOCOL_ERROR, 0, feed_res, 0);
 
-  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE &&
+  if (!sdf_lock_flow_is_idle(&s_lock_flow) &&
       (feed_res == SDF_NUKI_RESULT_ERR_CRC ||
        feed_res == SDF_NUKI_RESULT_ERR_AUTH)) {
-    sdf_app_retry_lock_action("encrypted frame validation failed");
+    sdf_lock_flow_retry(&s_lock_flow, "encrypted frame validation failed");
   }
 }
 
 void sdf_app_init(void) {
-  sdf_lock_flow_init(&s_lock_flow, SDF_APP_LOCK_ACTION_MAX_RETRIES);
+  static const sdf_lock_flow_ops_t lf_ops = {
+      .send_challenge = sdf_app_lf_send_challenge,
+      .send_action = sdf_app_lf_send_action,
+      .on_fail = sdf_app_lf_on_fail,
+      .on_progress = sdf_app_lf_on_progress,
+      .on_complete = sdf_app_lf_on_complete,
+      .ctx = NULL,
+  };
+  sdf_lock_flow_init(&s_lock_flow, SDF_APP_LOCK_ACTION_MAX_RETRIES, &lf_ops);
   s_zigbee_alarm_mask = 0;
   s_latch_sequence_active = false;
 

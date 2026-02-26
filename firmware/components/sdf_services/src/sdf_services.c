@@ -675,7 +675,7 @@ static void sdf_services_task(void *arg) {
         sdf_fingerprint_driver_set_power(false);
         is_powered = false;
       }
-      xSemaphoreTake(s_state.wake_sem, pdMS_TO_TICKS(poll_interval_ms));
+      xSemaphoreTake(s_state.wake_sem, portMAX_DELAY);
       if (!is_powered) {
         sdf_fingerprint_driver_set_power(true);
         is_powered = true;
@@ -855,6 +855,11 @@ esp_err_t sdf_services_request_enrollment(uint16_t user_id,
   s_state.request_permission = permission;
   s_state.enrollment_request_pending = true;
   xSemaphoreGive(s_state.lock);
+
+  /* Wake the service task if it is blocked on the fingerprint semaphore */
+  if (s_state.wake_sem != NULL) {
+    xSemaphoreGive(s_state.wake_sem);
+  }
   return ESP_OK;
 }
 

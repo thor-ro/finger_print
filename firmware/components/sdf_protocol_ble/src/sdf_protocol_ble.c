@@ -247,28 +247,33 @@ static void sdf_nuki_nonce_remember(sdf_nuki_client_t *client,
 }
 
 static int sdf_nuki_build_encrypted_message_custom(
-    const uint8_t nonce[SDF_NUKI_NONCE_LEN], uint32_t authorization_id,
+    sdf_nuki_client_t *client, const uint8_t nonce[SDF_NUKI_NONCE_LEN],
+    uint32_t authorization_id,
     const uint8_t shared_key[SDF_NUKI_SHARED_KEY_LEN], uint16_t command,
     const uint8_t *payload, size_t payload_len, uint8_t *out, size_t out_cap,
     size_t *out_len) {
-  if (nonce == NULL || shared_key == NULL || out == NULL || out_len == NULL) {
+  if (client == NULL || nonce == NULL || shared_key == NULL || out == NULL ||
+      out_len == NULL) {
     return SDF_NUKI_RESULT_ERR_ARG;
   }
 
-  uint8_t pdata[SDF_NUKI_MAX_PDATA];
+  /* Use client->pd_buf as scratch for plaintext data assembly */
   size_t pdata_len = 0;
 
-  int res = sdf_nuki_build_pdata(authorization_id, command, payload,
-                                 payload_len, pdata, sizeof(pdata), &pdata_len);
+  int res =
+      sdf_nuki_build_pdata(authorization_id, command, payload, payload_len,
+                           client->pd_buf, sizeof(client->pd_buf), &pdata_len);
   if (res != SDF_NUKI_RESULT_OK) {
     return res;
   }
 
-  uint8_t ciphertext[SDF_NUKI_MAX_PDATA + SDF_NUKI_SECRETBOX_OVERHEAD];
+  /* Encrypt directly into the output buffer past the adata header */
+  size_t ciphertext_cap =
+      out_cap > SDF_NUKI_ADATA_LEN ? out_cap - SDF_NUKI_ADATA_LEN : 0;
   size_t ciphertext_len = 0;
 
-  res = sdf_nuki_secretbox_encrypt(pdata, pdata_len, nonce, shared_key,
-                                   ciphertext, sizeof(ciphertext),
+  res = sdf_nuki_secretbox_encrypt(client->pd_buf, pdata_len, nonce, shared_key,
+                                   out + SDF_NUKI_ADATA_LEN, ciphertext_cap,
                                    &ciphertext_len);
   if (res != SDF_NUKI_RESULT_OK) {
     return res;
@@ -282,7 +287,6 @@ static int sdf_nuki_build_encrypted_message_custom(
   memcpy(out, nonce, SDF_NUKI_NONCE_LEN);
   sdf_nuki_le32_write(out + SDF_NUKI_NONCE_LEN, authorization_id);
   sdf_nuki_le16_write(out + SDF_NUKI_NONCE_LEN + 4, (uint16_t)ciphertext_len);
-  memcpy(out + SDF_NUKI_ADATA_LEN, ciphertext, ciphertext_len);
 
   *out_len = total_len;
 
@@ -302,8 +306,8 @@ static int sdf_nuki_build_encrypted_message(sdf_nuki_client_t *client,
   sdf_nuki_next_nonce(client, nonce);
 
   return sdf_nuki_build_encrypted_message_custom(
-      nonce, client->creds.authorization_id, client->creds.shared_key, command,
-      payload, payload_len, out, out_cap, out_len);
+      client, nonce, client->creds.authorization_id, client->creds.shared_key,
+      command, payload, payload_len, out, out_cap, out_len);
 }
 
 static int sdf_nuki_process_encrypted_custom(
@@ -416,21 +420,21 @@ int sdf_nuki_client_send_unencrypted(sdf_nuki_client_t *client,
     return SDF_NUKI_RESULT_ERR_ARG;
   }
 
-  uint8_t message[2 + SDF_NUKI_MAX_PDATA + 2];
   size_t message_len = 0;
 
   int res = sdf_nuki_build_unencrypted_message(
-      command, payload, payload_len, message, sizeof(message), &message_len);
+      command, payload, payload_len, client->tx_buf, sizeof(client->tx_buf),
+      &message_len);
   if (res != SDF_NUKI_RESULT_OK) {
     return res;
   }
 
   if (client->send_unencrypted_cb != NULL) {
-    return client->send_unencrypted_cb(client->send_unencrypted_ctx, message,
-                                       message_len);
+    return client->send_unencrypted_cb(client->send_unencrypted_ctx,
+                                       client->tx_buf, message_len);
   }
 
-  return client->send_encrypted_cb(client->send_encrypted_ctx, message,
+  return client->send_encrypted_cb(client->send_encrypted_ctx, client->tx_buf,
                                    message_len);
 }
 
@@ -558,17 +562,16 @@ int sdf_nuki_client_send_encrypted_custom(
   uint8_t nonce[SDF_NUKI_NONCE_LEN];
   sdf_nuki_next_nonce(client, nonce);
 
-  uint8_t message[SDF_NUKI_MAX_MESSAGE];
   size_t message_len = 0;
 
   int res = sdf_nuki_build_encrypted_message_custom(
-      nonce, authorization_id, shared_key, command, payload, payload_len,
-      message, sizeof(message), &message_len);
+      client, nonce, authorization_id, shared_key, command, payload,
+      payload_len, client->tx_buf, sizeof(client->tx_buf), &message_len);
   if (res != SDF_NUKI_RESULT_OK) {
     return res;
   }
 
-  return client->send_encrypted_cb(client->send_encrypted_ctx, message,
+  return client->send_encrypted_cb(client->send_encrypted_ctx, client->tx_buf,
                                    message_len);
 }
 
@@ -590,17 +593,16 @@ int sdf_nuki_client_send_request_data(sdf_nuki_client_t *client,
     memcpy(payload + 2, additional_data, additional_len);
   }
 
-  uint8_t message[SDF_NUKI_MAX_MESSAGE];
   size_t message_len = 0;
 
   int res = sdf_nuki_build_encrypted_message(
-      client, SDF_NUKI_CMD_REQUEST_DATA, payload, additional_len + 2, message,
-      sizeof(message), &message_len);
+      client, SDF_NUKI_CMD_REQUEST_DATA, payload, additional_len + 2,
+      client->tx_buf, sizeof(client->tx_buf), &message_len);
   if (res != SDF_NUKI_RESULT_OK) {
     return res;
   }
 
-  return client->send_encrypted_cb(client->send_encrypted_ctx, message,
+  return client->send_encrypted_cb(client->send_encrypted_ctx, client->tx_buf,
                                    message_len);
 }
 
@@ -634,17 +636,16 @@ int sdf_nuki_client_send_lock_action(
   memcpy(payload + offset, nonce_nk, SDF_NUKI_CHALLENGE_NONCE_LEN);
   offset += SDF_NUKI_CHALLENGE_NONCE_LEN;
 
-  uint8_t message[SDF_NUKI_MAX_MESSAGE];
   size_t message_len = 0;
 
-  int res = sdf_nuki_build_encrypted_message(client, SDF_NUKI_CMD_LOCK_ACTION,
-                                             payload, offset, message,
-                                             sizeof(message), &message_len);
+  int res = sdf_nuki_build_encrypted_message(
+      client, SDF_NUKI_CMD_LOCK_ACTION, payload, offset, client->tx_buf,
+      sizeof(client->tx_buf), &message_len);
   if (res != SDF_NUKI_RESULT_OK) {
     return res;
   }
 
-  return client->send_encrypted_cb(client->send_encrypted_ctx, message,
+  return client->send_encrypted_cb(client->send_encrypted_ctx, client->tx_buf,
                                    message_len);
 }
 
@@ -674,17 +675,16 @@ int sdf_nuki_client_send_simple_lock_action(
   memcpy(payload + offset, nonce_nk, SDF_NUKI_CHALLENGE_NONCE_LEN);
   offset += SDF_NUKI_CHALLENGE_NONCE_LEN;
 
-  uint8_t message[SDF_NUKI_MAX_MESSAGE];
   size_t message_len = 0;
 
   int res = sdf_nuki_build_encrypted_message(
-      client, SDF_NUKI_CMD_SIMPLE_LOCK_ACTION, payload, offset, message,
-      sizeof(message), &message_len);
+      client, SDF_NUKI_CMD_SIMPLE_LOCK_ACTION, payload, offset, client->tx_buf,
+      sizeof(client->tx_buf), &message_len);
   if (res != SDF_NUKI_RESULT_OK) {
     return res;
   }
 
-  return client->send_encrypted_cb(client->send_encrypted_ctx, message,
+  return client->send_encrypted_cb(client->send_encrypted_ctx, client->tx_buf,
                                    message_len);
 }
 

@@ -8,6 +8,7 @@ idf_component_register(
          "../../components/sdf_state_machines/test/test_enrollment_sm.c"
          "../../components/sdf_drivers/test/test_driver_utils.c"
          "../../components/sdf_drivers/test/test_driver_protocol.c"
+         "../../components/sdf_app/src/sdf_lock_flow.c"
          "../../components/sdf_app/test/test_lock_flow.c"
     INCLUDE_DIRS "."
                  "../../components/sdf_app/include"

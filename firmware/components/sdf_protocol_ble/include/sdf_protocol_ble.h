@@ -72,6 +72,7 @@ typedef struct {
   size_t rx_len;
   size_t rx_expected;
   uint8_t pd_buf[SDF_NUKI_MAX_PDATA];
+  uint8_t tx_buf[SDF_NUKI_MAX_MESSAGE];
 
   uint64_t tx_nonce_counter;
   uint8_t tx_nonce_salt[8];
