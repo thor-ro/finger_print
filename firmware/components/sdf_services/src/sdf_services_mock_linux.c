@@ -1,41 +1,12 @@
 /**
  * @file sdf_services_mock_linux.c
- * @brief Linux host mock implementations of GPIO and LED strip functions.
+ * @brief Linux host mock implementations of LED strip functions.
+ *
+ * GPIO mocks are provided by sdf_mock_linux_gpio.c in sdf_common.
  */
 #ifdef CONFIG_IDF_TARGET_LINUX
 
 #include "sdf_mock_linux_services.h"
-
-/* --------------- GPIO mock functions --------------- */
-
-#undef gpio_config
-esp_err_t gpio_config_mock(const gpio_config_t *config) {
-  (void)config;
-  return ESP_OK;
-}
-
-esp_err_t gpio_install_isr_service(int flags) {
-  (void)flags;
-  return ESP_OK;
-}
-
-esp_err_t gpio_isr_handler_add(int gpio, gpio_isr_t isr, void *args) {
-  (void)gpio;
-  (void)isr;
-  (void)args;
-  return ESP_OK;
-}
-
-int gpio_get_level(int gpio) {
-  (void)gpio;
-  return 1;
-}
-
-esp_err_t gpio_set_level(int gpio, int level) {
-  (void)gpio;
-  (void)level;
-  return ESP_OK;
-}
 
 /* --------------- LED strip mock functions --------------- */
 

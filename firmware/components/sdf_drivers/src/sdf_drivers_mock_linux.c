@@ -1,6 +1,8 @@
 /**
  * @file sdf_drivers_mock_linux.c
- * @brief Linux host mock implementations of UART and GPIO driver functions.
+ * @brief Linux host mock implementations of UART driver functions.
+ *
+ * GPIO mocks are provided by sdf_mock_linux_gpio.c in sdf_common.
  */
 #ifdef CONFIG_IDF_TARGET_LINUX
 
@@ -59,20 +61,6 @@ esp_err_t uart_set_pin(uart_port_t uart_num, int tx_io_num, int rx_io_num,
 
 esp_err_t uart_driver_delete(uart_port_t uart_num) {
   (void)uart_num;
-  return ESP_OK;
-}
-
-/* --------------- GPIO mock functions --------------- */
-
-#undef gpio_config
-esp_err_t gpio_config_mock(const gpio_config_t *pGPIOConfig) {
-  (void)pGPIOConfig;
-  return ESP_OK;
-}
-
-esp_err_t gpio_set_level(gpio_num_t gpio_num, uint32_t level) {
-  (void)gpio_num;
-  (void)level;
   return ESP_OK;
 }
 

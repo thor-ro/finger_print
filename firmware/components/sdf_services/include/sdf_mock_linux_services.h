@@ -12,33 +12,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* --------------- GPIO types & defines --------------- */
-
-typedef struct {
-  uint64_t pin_bit_mask;
-  int mode;
-  int pull_up_en;
-  int pull_down_en;
-  int intr_type;
-} gpio_config_t;
-
-#define GPIO_MODE_INPUT 0
-#define GPIO_MODE_OUTPUT 1
-#define GPIO_PULLUP_DISABLE 0
-#define GPIO_PULLUP_ENABLE 1
-#define GPIO_PULLDOWN_DISABLE 0
-#define GPIO_INTR_DISABLE 0
-#define GPIO_INTR_ANYEDGE 3
-
-typedef void (*gpio_isr_t)(void *);
-
-esp_err_t gpio_config_mock(const gpio_config_t *config);
-esp_err_t gpio_install_isr_service(int flags);
-esp_err_t gpio_isr_handler_add(int gpio, gpio_isr_t isr, void *args);
-int gpio_get_level(int gpio);
-esp_err_t gpio_set_level(int gpio, int level);
-
-#define gpio_config gpio_config_mock
+/* Shared GPIO mock types */
+#include "sdf_mock_linux_gpio.h"
 
 /* --------------- LED strip types & defines --------------- */
 
