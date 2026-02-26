@@ -13,13 +13,17 @@
 #include "sdkconfig.h"
 
 #include "sdf_lock_flow.h"
+#ifndef CONFIG_IDF_TARGET_LINUX
 #include "sdf_nuki_ble_transport.h"
 #include "sdf_nuki_pairing.h"
+#else
+#include "sdf_app_mock_linux.inc"
+#endif
+#include "sdf_power.h"
 #include "sdf_protocol_ble.h"
 #include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
 #include "sdf_storage.h"
-#include "sdf_power.h"
 
 #define SDF_APP_ID 1u
 #define SDF_APP_NAME "SDF"
@@ -1104,3 +1108,7 @@ void sdf_app_init(void) {
 
   sdf_power_mark_activity();
 }
+
+#ifdef SDF_APP_TESTING
+#include "sdf_app_test_exports.inc"
+#endif

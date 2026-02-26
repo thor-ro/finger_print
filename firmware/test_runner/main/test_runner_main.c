@@ -75,6 +75,12 @@ extern void test_sdf_power_wakeup_reason_mapping(void);
 extern void test_sdf_power_checkin_clamping(void);
 extern void test_sdf_power_battery_bounds(void);
 
+/* SDF App tests */
+extern void test_sdf_app_string_mappers(void);
+extern void test_sdf_app_valid_lock_action_logic(void);
+extern void test_sdf_app_map_lock_state_to_zigbee_logic(void);
+extern void test_sdf_app_choose_fingerprint_permission_logic(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -153,6 +159,12 @@ void app_main(void) {
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);
   RUN_TEST(test_sdf_power_checkin_clamping);
   RUN_TEST(test_sdf_power_battery_bounds);
+
+  /* SDF App tests */
+  RUN_TEST(test_sdf_app_string_mappers);
+  RUN_TEST(test_sdf_app_valid_lock_action_logic);
+  RUN_TEST(test_sdf_app_map_lock_state_to_zigbee_logic);
+  RUN_TEST(test_sdf_app_choose_fingerprint_permission_logic);
 
   UNITY_END();
 }
