@@ -59,3 +59,4 @@ void on_usdio_indication(const uint8_t *data, size_t len)
 - Pairing starts by writing a `Request Data (0x0001)` with `Public Key (0x0003)` to GDIO.
 - The Authorization Data command is encrypted with the shared key and uses the pairing authorization id `0x7FFFFFFF`.
 - After pairing, store `authorization_id` and `shared_key` in NVS for future encrypted commands.
+- If the BLE target address is all-zeros (i.e. not configured in NVS or at compile time), the transport layer automatically discovers the Nuki lock by its advertised pairing/keyturner service UUID instead of matching a specific address.

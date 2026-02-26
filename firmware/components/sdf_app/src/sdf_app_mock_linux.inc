@@ -32,5 +32,10 @@ static inline int sdf_nuki_pairing_handle_unencrypted(sdf_nuki_pairing_t *p, con
 static inline int sdf_nuki_pairing_handle_encrypted(sdf_nuki_pairing_t *p, const uint8_t *d, size_t l) { return 0; }
 static inline int sdf_nuki_pairing_get_credentials(sdf_nuki_pairing_t *p, sdf_nuki_credentials_t *c) { return 0; }
 static inline void sdf_nuki_ble_init(sdf_nuki_ble_transport_t *t, void *rx, void *rx_ctx, void *rdy, void *rdy_ctx) {}
+static inline bool sdf_nuki_ble_addr_is_empty(const ble_addr_t *a) {
+    if (a == NULL) return true;
+    for (int i = 0; i < 6; i++) { if (a->val[i] != 0) return false; }
+    return true;
+}
 static inline void sdf_nuki_ble_set_target_addr(sdf_nuki_ble_transport_t *t, const ble_addr_t *a) {}
 static inline void sdf_nuki_ble_start(sdf_nuki_ble_transport_t *t) {}
