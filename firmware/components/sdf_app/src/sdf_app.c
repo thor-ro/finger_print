@@ -19,7 +19,7 @@
 #include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
 #include "sdf_storage.h"
-#include "sdf_tasks.h"
+#include "sdf_power.h"
 
 #define SDF_APP_ID 1u
 #define SDF_APP_NAME "SDF"
@@ -259,7 +259,7 @@ sdf_app_power_wake_reason_name(sdf_power_wake_reason_t reason) {
 
 static void sdf_app_update_battery_percent(uint8_t battery_percent) {
   s_battery_percent_cached = battery_percent;
-  esp_err_t err = sdf_tasks_set_battery_percent(battery_percent);
+  esp_err_t err = sdf_power_set_battery_percent(battery_percent);
   if (err != ESP_OK) {
     sdf_protocol_zigbee_update_battery_percent(battery_percent);
   }
@@ -278,7 +278,7 @@ static bool sdf_app_power_busy(void *ctx) {
 
 static void sdf_app_power_wakeup(void *ctx, sdf_power_wake_reason_t reason) {
   (void)ctx;
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
   ESP_LOGI(TAG, "Power wake event: %s", sdf_app_power_wake_reason_name(reason));
 
   if (reason == SDF_POWER_WAKE_REASON_TIMER && s_has_creds &&
@@ -333,7 +333,7 @@ sdf_app_on_security_event(void *ctx,
 
 static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
   (void)ctx;
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
 
   if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
     return SDF_NUKI_RESULT_ERR_NO_KEY;
@@ -347,7 +347,7 @@ static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
 static void sdf_app_on_enrollment_state(void *ctx,
                                         const sdf_enrollment_sm_t *state) {
   (void)ctx;
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
 
   if (state == NULL) {
     return;
@@ -425,7 +425,7 @@ static esp_err_t
 sdf_app_on_zigbee_command(void *ctx,
                           const sdf_protocol_zigbee_command_event_t *event) {
   (void)ctx;
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
 
   if (event == NULL) {
     return ESP_ERR_INVALID_ARG;
@@ -700,7 +700,7 @@ static int sdf_app_send_unencrypted(void *ctx, const uint8_t *data,
 }
 
 int sdf_app_request_keyturner_state(void) {
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
   if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
     return SDF_NUKI_RESULT_ERR_ARG;
   }
@@ -710,7 +710,7 @@ int sdf_app_request_keyturner_state(void) {
 }
 
 int sdf_app_lock_action(uint8_t lock_action, uint8_t flags) {
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
   if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
     return SDF_NUKI_RESULT_ERR_ARG;
   }
@@ -734,7 +734,7 @@ void sdf_app_set_audit_callback(sdf_audit_cb cb, void *ctx) {
 
 static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
   (void)ctx;
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
 
   if (msg == NULL) {
     return;
@@ -830,7 +830,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
 
 static void sdf_app_on_ble_ready(void *ctx) {
   (void)ctx;
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
   ESP_LOGI(TAG, "BLE transport ready");
 
   if (!sdf_lock_flow_is_idle(&s_lock_flow)) {
@@ -867,7 +867,7 @@ static void sdf_app_on_ble_ready(void *ctx) {
 static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
                               const uint8_t *data, size_t len) {
   (void)ctx;
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
 
   if (channel == SDF_NUKI_BLE_CHANNEL_GDIO) {
     if (s_pairing_active) {
@@ -1079,7 +1079,7 @@ void sdf_app_init(void) {
   sdf_nuki_ble_start(&s_ble);
 
   sdf_power_manager_config_t power_cfg;
-  sdf_tasks_get_default_power_config(&power_cfg);
+  sdf_power_get_default_power_config(&power_cfg);
   power_cfg.ble_transport = &s_ble;
   power_cfg.fingerprint_wake_gpio = SDF_APP_FP_WAKE_GPIO;
   power_cfg.checkin_interval_ms = SDF_APP_POWER_CHECKIN_INTERVAL_MS;
@@ -1097,10 +1097,10 @@ void sdf_app_init(void) {
   power_cfg.battery_cb = sdf_app_power_battery_percent;
   power_cfg.battery_ctx = NULL;
 
-  err = sdf_tasks_init_power_manager(&power_cfg);
+  err = sdf_power_init_power_manager(&power_cfg);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to start power manager: %s", esp_err_to_name(err));
   }
 
-  sdf_tasks_mark_activity();
+  sdf_power_mark_activity();
 }

@@ -4,7 +4,7 @@ if(NOT IDF_TARGET STREQUAL "linux")
 endif()
 
 idf_component_register(
-    SRCS "src/sdf_tasks.c"
+    SRCS "src/sdf_power.c"
     INCLUDE_DIRS "include"
     REQUIRES ${tasks_reqs}
 )

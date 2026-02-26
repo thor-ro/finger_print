@@ -1,4 +1,4 @@
-#include "sdf_tasks.h"
+#include "sdf_power.h"
 
 #include <string.h>
 
@@ -15,10 +15,10 @@
 
 #include "sdf_protocol_zigbee.h"
 
-#ifdef SDF_TASKS_TESTING
-#define SDF_TASKS_STATIC
+#ifdef SDF_POWER_TESTING
+#define SDF_POWER_STATIC
 #else
-#define SDF_TASKS_STATIC static
+#define SDF_POWER_STATIC static
 #endif
 
 #define SDF_POWER_TASK_NAME "sdf_power"
@@ -54,12 +54,12 @@ typedef struct {
 
 static sdf_power_state_t s_state = {0};
 
-static bool sdf_tasks_gpio_valid(gpio_num_t gpio) {
+static bool sdf_power_gpio_valid(gpio_num_t gpio) {
   return gpio >= 0 && gpio < GPIO_NUM_MAX;
 }
 
-SDF_TASKS_STATIC sdf_power_wake_reason_t
-sdf_tasks_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
+SDF_POWER_STATIC sdf_power_wake_reason_t
+sdf_power_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
   switch (cause) {
   case ESP_SLEEP_WAKEUP_TIMER:
     return SDF_POWER_WAKE_REASON_TIMER;
@@ -71,7 +71,7 @@ sdf_tasks_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
 }
 
 static const char *
-sdf_tasks_wakeup_reason_name(sdf_power_wake_reason_t reason) {
+sdf_power_wakeup_reason_name(sdf_power_wake_reason_t reason) {
   switch (reason) {
   case SDF_POWER_WAKE_REASON_TIMER:
     return "timer";
@@ -85,21 +85,21 @@ sdf_tasks_wakeup_reason_name(sdf_power_wake_reason_t reason) {
   }
 }
 
-static void sdf_tasks_push_battery_percent(uint8_t battery_percent) {
+static void sdf_power_push_battery_percent(uint8_t battery_percent) {
   esp_err_t err = sdf_protocol_zigbee_update_battery_percent(battery_percent);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
     ESP_LOGW(TAG, "Battery update failed: %s", esp_err_to_name(err));
   }
 }
 
-static bool sdf_tasks_busy_now(const sdf_power_manager_config_t *config) {
+static bool sdf_power_busy_now(const sdf_power_manager_config_t *config) {
   if (config == NULL || config->busy_cb == NULL) {
     return false;
   }
   return config->busy_cb(config->busy_ctx);
 }
 
-static void sdf_tasks_notify_wakeup(const sdf_power_manager_config_t *config,
+static void sdf_power_notify_wakeup(const sdf_power_manager_config_t *config,
                                     sdf_power_wake_reason_t reason) {
   if (config == NULL || config->wake_cb == NULL) {
     return;
@@ -107,8 +107,8 @@ static void sdf_tasks_notify_wakeup(const sdf_power_manager_config_t *config,
   config->wake_cb(config->wake_ctx, reason);
 }
 
-static esp_err_t sdf_tasks_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
-  if (!sdf_tasks_gpio_valid(wake_gpio)) {
+static esp_err_t sdf_power_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
+  if (!sdf_power_gpio_valid(wake_gpio)) {
     return ESP_OK;
   }
 
@@ -136,7 +136,7 @@ static esp_err_t sdf_tasks_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
 #endif
 }
 
-static void sdf_tasks_sleep_once(const sdf_power_manager_config_t *config) {
+static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
   if (config == NULL || !config->enable_light_sleep) {
     return;
   }
@@ -146,9 +146,9 @@ static void sdf_tasks_sleep_once(const sdf_power_manager_config_t *config) {
   esp_sleep_enable_timer_wakeup((uint64_t)config->checkin_interval_ms *
                                 1000ULL);
 
-  if (sdf_tasks_gpio_valid(config->fingerprint_wake_gpio)) {
+  if (sdf_power_gpio_valid(config->fingerprint_wake_gpio)) {
     esp_err_t wake_err =
-        sdf_tasks_configure_fingerprint_wakeup(config->fingerprint_wake_gpio);
+        sdf_power_configure_fingerprint_wakeup(config->fingerprint_wake_gpio);
     if (wake_err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to configure fingerprint wake GPIO: %s",
                esp_err_to_name(wake_err));
@@ -174,13 +174,13 @@ static void sdf_tasks_sleep_once(const sdf_power_manager_config_t *config) {
 #endif
 
   sdf_power_wake_reason_t reason =
-      sdf_tasks_map_wakeup_reason(esp_sleep_get_wakeup_cause());
+      sdf_power_map_wakeup_reason(esp_sleep_get_wakeup_cause());
   ESP_LOGI(TAG, "Woke from light sleep (%s)",
-           sdf_tasks_wakeup_reason_name(reason));
-  sdf_tasks_notify_wakeup(config, reason);
+           sdf_power_wakeup_reason_name(reason));
+  sdf_power_notify_wakeup(config, reason);
 }
 
-static void sdf_tasks_task(void *arg) {
+static void sdf_power_task(void *arg) {
   (void)arg;
 
 #ifndef CONFIG_IDF_TARGET_LINUX
@@ -237,7 +237,7 @@ static void sdf_tasks_task(void *arg) {
             ((int64_t)config_snapshot.battery_report_interval_ms * 1000LL);
         xSemaphoreGive(s_state.lock);
       }
-      sdf_tasks_push_battery_percent(battery_percent);
+      sdf_power_push_battery_percent(battery_percent);
     }
 
     bool allow_sleep = config_snapshot.enable_light_sleep;
@@ -249,12 +249,12 @@ static void sdf_tasks_task(void *arg) {
             ((int64_t)config_snapshot.idle_before_sleep_ms * 1000LL)) {
       allow_sleep = false;
     }
-    if (allow_sleep && sdf_tasks_busy_now(&config_snapshot)) {
+    if (allow_sleep && sdf_power_busy_now(&config_snapshot)) {
       allow_sleep = false;
     }
 
     if (allow_sleep) {
-      sdf_tasks_sleep_once(&config_snapshot);
+      sdf_power_sleep_once(&config_snapshot);
       int64_t wake_us = esp_timer_get_time();
       if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
           pdTRUE) {
@@ -269,13 +269,13 @@ static void sdf_tasks_task(void *arg) {
   }
 }
 
-void sdf_tasks_init(void) {
+void sdf_power_init(void) {
   sdf_power_manager_config_t config;
-  sdf_tasks_get_default_power_config(&config);
-  sdf_tasks_init_power_manager(&config);
+  sdf_power_get_default_power_config(&config);
+  sdf_power_init_power_manager(&config);
 }
 
-void sdf_tasks_get_default_power_config(sdf_power_manager_config_t *config) {
+void sdf_power_get_default_power_config(sdf_power_manager_config_t *config) {
   if (config == NULL) {
     return;
   }
@@ -300,7 +300,7 @@ void sdf_tasks_get_default_power_config(sdf_power_manager_config_t *config) {
 }
 
 esp_err_t
-sdf_tasks_init_power_manager(const sdf_power_manager_config_t *config) {
+sdf_power_init_power_manager(const sdf_power_manager_config_t *config) {
   if (config == NULL ||
       config->checkin_interval_ms < SDF_POWER_CHECKIN_INTERVAL_MIN_MS ||
       config->checkin_interval_ms > SDF_POWER_CHECKIN_INTERVAL_MAX_MS ||
@@ -347,7 +347,7 @@ sdf_tasks_init_power_manager(const sdf_power_manager_config_t *config) {
   }
 
   BaseType_t task_ok =
-      xTaskCreate(sdf_tasks_task, SDF_POWER_TASK_NAME, SDF_POWER_TASK_STACK,
+      xTaskCreate(sdf_power_task, SDF_POWER_TASK_NAME, SDF_POWER_TASK_STACK,
                   NULL, SDF_POWER_TASK_PRIORITY, &s_state.task);
   if (task_ok != pdPASS) {
     return ESP_FAIL;
@@ -359,7 +359,7 @@ sdf_tasks_init_power_manager(const sdf_power_manager_config_t *config) {
     xSemaphoreGive(s_state.lock);
   }
 
-  sdf_tasks_push_battery_percent(config->battery_percent_default);
+  sdf_power_push_battery_percent(config->battery_percent_default);
 
   ESP_LOGI(TAG,
            "Power manager started (checkin=%u ms, idle_sleep=%u ms, "
@@ -371,7 +371,7 @@ sdf_tasks_init_power_manager(const sdf_power_manager_config_t *config) {
   return ESP_OK;
 }
 
-bool sdf_tasks_power_manager_ready(void) {
+bool sdf_power_power_manager_ready(void) {
   if (s_state.lock == NULL) {
     return false;
   }
@@ -385,7 +385,7 @@ bool sdf_tasks_power_manager_ready(void) {
   return ready;
 }
 
-void sdf_tasks_mark_activity(void) {
+void sdf_power_mark_activity(void) {
   if (s_state.lock == NULL) {
     return;
   }
@@ -398,7 +398,7 @@ void sdf_tasks_mark_activity(void) {
   }
 }
 
-esp_err_t sdf_tasks_set_checkin_interval_ms(uint32_t checkin_interval_ms) {
+esp_err_t sdf_power_set_checkin_interval_ms(uint32_t checkin_interval_ms) {
   if (checkin_interval_ms < SDF_POWER_CHECKIN_INTERVAL_MIN_MS ||
       checkin_interval_ms > SDF_POWER_CHECKIN_INTERVAL_MAX_MS) {
     return ESP_ERR_INVALID_ARG;
@@ -420,7 +420,7 @@ esp_err_t sdf_tasks_set_checkin_interval_ms(uint32_t checkin_interval_ms) {
   return err;
 }
 
-uint32_t sdf_tasks_get_checkin_interval_ms(void) {
+uint32_t sdf_power_get_checkin_interval_ms(void) {
   if (s_state.lock != NULL &&
       xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
           pdTRUE) {
@@ -432,7 +432,7 @@ uint32_t sdf_tasks_get_checkin_interval_ms(void) {
   return sdf_protocol_zigbee_get_checkin_interval_ms();
 }
 
-esp_err_t sdf_tasks_set_battery_percent(uint8_t battery_percent) {
+esp_err_t sdf_power_set_battery_percent(uint8_t battery_percent) {
   if (battery_percent > 100U) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -444,11 +444,11 @@ esp_err_t sdf_tasks_set_battery_percent(uint8_t battery_percent) {
     xSemaphoreGive(s_state.lock);
   }
 
-  sdf_tasks_push_battery_percent(battery_percent);
+  sdf_power_push_battery_percent(battery_percent);
   return ESP_OK;
 }
 
-uint8_t sdf_tasks_get_battery_percent(void) {
+uint8_t sdf_power_get_battery_percent(void) {
   if (s_state.lock != NULL &&
       xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
           pdTRUE) {
