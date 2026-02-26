@@ -1,4 +1,5 @@
 #include "sdf_services.h"
+#include "sdf_lock_guard.h"
 
 #include <string.h>
 
@@ -140,15 +141,17 @@ static void sdf_services_notify_enrollment(void) {
     return;
   }
 
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE) {
-    return;
+  sdf_services_enrollment_cb cb = NULL;
+  void *ctx = NULL;
+  sdf_enrollment_sm_t snapshot;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE)
+      return;
+    cb = s_state.config.enrollment_cb;
+    ctx = s_state.config.enrollment_ctx;
+    snapshot = s_state.enrollment;
   }
-
-  sdf_services_enrollment_cb cb = s_state.config.enrollment_cb;
-  void *ctx = s_state.config.enrollment_ctx;
-  sdf_enrollment_sm_t snapshot = s_state.enrollment;
-  xSemaphoreGive(s_state.lock);
 
   if (cb != NULL) {
     cb(ctx, &snapshot);
@@ -161,14 +164,15 @@ sdf_services_notify_security_event(const sdf_services_security_event_t *event) {
     return;
   }
 
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE) {
-    return;
+  sdf_services_security_event_cb cb = NULL;
+  void *ctx = NULL;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE)
+      return;
+    cb = s_state.config.security_event_cb;
+    ctx = s_state.config.security_event_ctx;
   }
-
-  sdf_services_security_event_cb cb = s_state.config.security_event_cb;
-  void *ctx = s_state.config.security_event_ctx;
-  xSemaphoreGive(s_state.lock);
 
   if (cb != NULL) {
     cb(ctx, event);
@@ -869,11 +873,12 @@ bool sdf_services_is_enrollment_active(void) {
   }
 
   bool active = false;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
-      pdTRUE) {
-    active = sdf_enrollment_sm_is_active(&s_state.enrollment) ||
-             s_state.enrollment_request_pending;
-    xSemaphoreGive(s_state.lock);
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired == pdTRUE) {
+      active = sdf_enrollment_sm_is_active(&s_state.enrollment) ||
+               s_state.enrollment_request_pending;
+    }
   }
   return active;
 }
@@ -886,10 +891,11 @@ sdf_enrollment_sm_t sdf_services_get_enrollment_state(void) {
     return snapshot;
   }
 
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
-      pdTRUE) {
-    snapshot = s_state.enrollment;
-    xSemaphoreGive(s_state.lock);
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired == pdTRUE) {
+      snapshot = s_state.enrollment;
+    }
   }
   return snapshot;
 }
@@ -897,24 +903,26 @@ sdf_enrollment_sm_t sdf_services_get_enrollment_state(void) {
 esp_err_t sdf_services_delete_user(uint16_t user_id) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE)
-    return ESP_ERR_TIMEOUT;
-  sdf_fingerprint_op_result_t res = sdf_fingerprint_driver_delete_user(user_id);
-  xSemaphoreGive(s_state.lock);
-
+  sdf_fingerprint_op_result_t res;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE)
+      return ESP_ERR_TIMEOUT;
+    res = sdf_fingerprint_driver_delete_user(user_id);
+  }
   return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
 }
 
 esp_err_t sdf_services_clear_all_users(void) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE)
-    return ESP_ERR_TIMEOUT;
-  sdf_fingerprint_op_result_t res = sdf_fingerprint_driver_delete_all_users();
-  xSemaphoreGive(s_state.lock);
-
+  sdf_fingerprint_op_result_t res;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE)
+      return ESP_ERR_TIMEOUT;
+    res = sdf_fingerprint_driver_delete_all_users();
+  }
   return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
 }
 
@@ -922,12 +930,13 @@ esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
                                    size_t *count, size_t max_count) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE)
-    return ESP_ERR_TIMEOUT;
-  sdf_fingerprint_op_result_t res = sdf_fingerprint_driver_query_users(
-      user_ids, permissions, count, max_count);
-  xSemaphoreGive(s_state.lock);
-
+  sdf_fingerprint_op_result_t res;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE)
+      return ESP_ERR_TIMEOUT;
+    res = sdf_fingerprint_driver_query_users(user_ids, permissions, count,
+                                             max_count);
+  }
   return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
 }
