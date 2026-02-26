@@ -60,6 +60,16 @@ extern void test_lock_flow_retry_exhaustion(void);
 extern void test_lock_flow_on_status_complete(void);
 extern void test_lock_flow_on_status_accepted_noop(void);
 
+/* Storage tests */
+extern void test_sdf_storage_nuki_save_and_load_success(void);
+extern void test_sdf_storage_nuki_load_not_found(void);
+extern void test_sdf_storage_nuki_save_invalid_args(void);
+extern void test_sdf_storage_nuki_load_invalid_args(void);
+extern void test_sdf_storage_nuki_clear_success(void);
+extern void test_sdf_storage_nuki_clear_already_cleared(void);
+extern void test_sdf_storage_ble_target_save_and_load_success(void);
+extern void test_sdf_storage_ble_target_load_not_found(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -123,6 +133,16 @@ void app_main(void) {
   RUN_TEST(test_lock_flow_retry_exhaustion);
   RUN_TEST(test_lock_flow_on_status_complete);
   RUN_TEST(test_lock_flow_on_status_accepted_noop);
+
+  /* Storage tests */
+  RUN_TEST(test_sdf_storage_nuki_save_and_load_success);
+  RUN_TEST(test_sdf_storage_nuki_load_not_found);
+  RUN_TEST(test_sdf_storage_nuki_save_invalid_args);
+  RUN_TEST(test_sdf_storage_nuki_load_invalid_args);
+  RUN_TEST(test_sdf_storage_nuki_clear_success);
+  RUN_TEST(test_sdf_storage_nuki_clear_already_cleared);
+  RUN_TEST(test_sdf_storage_ble_target_save_and_load_success);
+  RUN_TEST(test_sdf_storage_ble_target_load_not_found);
 
   UNITY_END();
 }
