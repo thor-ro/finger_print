@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#ifndef CONFIG_IDF_TARGET_LINUX
+#if !defined(CONFIG_IDF_TARGET_LINUX) || defined(SDF_PROTOCOL_BLE_TESTING)
 
 #include "esp_random.h"
 #include "mbedtls/md.h"
@@ -827,4 +827,8 @@ int sdf_nuki_parse_error_report(const sdf_nuki_message_t *msg,
   return SDF_NUKI_RESULT_OK;
 }
 
-#endif /* !CONFIG_IDF_TARGET_LINUX */
+#ifdef SDF_PROTOCOL_BLE_TESTING
+#include "sdf_protocol_ble_test_exports.inc"
+#endif
+
+#endif /* !CONFIG_IDF_TARGET_LINUX || SDF_PROTOCOL_BLE_TESTING */
