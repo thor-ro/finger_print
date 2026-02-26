@@ -15,6 +15,12 @@
 
 #include "sdf_protocol_zigbee.h"
 
+#ifdef SDF_TASKS_TESTING
+#define SDF_TASKS_STATIC
+#else
+#define SDF_TASKS_STATIC static
+#endif
+
 #define SDF_POWER_TASK_NAME "sdf_power"
 #define SDF_POWER_TASK_STACK 4096
 #define SDF_POWER_TASK_PRIORITY 4
@@ -52,7 +58,7 @@ static bool sdf_tasks_gpio_valid(gpio_num_t gpio) {
   return gpio >= 0 && gpio < GPIO_NUM_MAX;
 }
 
-static sdf_power_wake_reason_t
+SDF_TASKS_STATIC sdf_power_wake_reason_t
 sdf_tasks_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
   switch (cause) {
   case ESP_SLEEP_WAKEUP_TIMER:

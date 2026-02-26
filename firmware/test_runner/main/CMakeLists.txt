@@ -1,4 +1,4 @@
-set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage nvs_flash esp_partition)
+set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage sdf_tasks sdf_protocol_zigbee nvs_flash esp_partition)
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND test_reqs sdf_app)
 endif()
@@ -11,10 +11,12 @@ idf_component_register(
          "../../components/sdf_app/src/sdf_lock_flow.c"
          "../../components/sdf_app/test/test_lock_flow.c"
          "../../components/sdf_storage/test/test_sdf_storage.c"
+         "../../components/sdf_tasks/test/test_sdf_tasks.c"
     INCLUDE_DIRS "."
                  "../../components/sdf_app/include"
     REQUIRES ${test_reqs}
 )
 
-target_compile_definitions(${COMPONENT_LIB} PRIVATE SDF_DRIVERS_TESTING)
+target_compile_definitions(${COMPONENT_LIB} PRIVATE SDF_DRIVERS_TESTING SDF_TASKS_TESTING)
 target_compile_definitions(__idf_sdf_drivers PRIVATE SDF_DRIVERS_TESTING)
+target_compile_definitions(__idf_sdf_tasks PRIVATE SDF_TASKS_TESTING)
