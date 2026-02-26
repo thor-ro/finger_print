@@ -1,0 +1,37 @@
+menu "SDF BLE Transport"
+
+config SDF_BLE_CONNECT_TIMEOUT_MS
+    int "BLE connection attempt timeout (ms)"
+    range 1000 30000
+    default 10000
+    help
+        Maximum duration to wait for a BLE connection to complete.
+        If the connection is not established within this time,
+        ble_gap_conn_cancel() is called and a reconnect is scheduled.
+
+config SDF_BLE_RECONNECT_BASE_DELAY_MS
+    int "Reconnect base delay (ms)"
+    range 100 10000
+    default 1000
+    help
+        Initial delay before the first reconnection attempt.
+        Each subsequent attempt doubles this delay up to the maximum.
+
+config SDF_BLE_RECONNECT_MAX_DELAY_MS
+    int "Reconnect maximum delay (ms)"
+    range 1000 120000
+    default 30000
+    help
+        Upper bound for the exponential backoff delay between
+        reconnection attempts.
+
+config SDF_BLE_RECONNECT_MAX_RETRIES
+    int "Maximum reconnect attempts (0=unlimited)"
+    range 0 100
+    default 10
+    help
+        Maximum number of consecutive reconnection attempts before
+        giving up. Set to 0 for unlimited retries. After exhaustion,
+        sdf_nuki_ble_start() must be called again to restart.
+
+endmenu

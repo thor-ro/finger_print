@@ -4,6 +4,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "sdkconfig.h"
 
 #include "host/ble_hs.h"
 #include "host/util/util.h"
@@ -17,6 +18,20 @@
 
 #define SDF_NUKI_SCAN_ITVL 0x0010
 #define SDF_NUKI_SCAN_WINDOW 0x0010
+
+/* Kconfig defaults (overridden by sdkconfig when available) */
+#ifndef CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS
+#define CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS 10000
+#endif
+#ifndef CONFIG_SDF_BLE_RECONNECT_BASE_DELAY_MS
+#define CONFIG_SDF_BLE_RECONNECT_BASE_DELAY_MS 1000
+#endif
+#ifndef CONFIG_SDF_BLE_RECONNECT_MAX_DELAY_MS
+#define CONFIG_SDF_BLE_RECONNECT_MAX_DELAY_MS 30000
+#endif
+#ifndef CONFIG_SDF_BLE_RECONNECT_MAX_RETRIES
+#define CONFIG_SDF_BLE_RECONNECT_MAX_RETRIES 10
+#endif
 
 static const char *TAG = "sdf_nuki_ble";
 
@@ -55,6 +70,7 @@ typedef enum {
 static sdf_nuki_disc_state_t s_disc_state;
 
 static void sdf_nuki_ble_start_scan(void);
+static void sdf_nuki_ble_schedule_reconnect(void);
 static int sdf_nuki_ble_gap_event(struct ble_gap_event *event, void *arg);
 static int sdf_nuki_ble_on_mtu(uint16_t conn_handle,
                                const struct ble_gatt_error *error, uint16_t mtu,
@@ -117,11 +133,89 @@ sdf_nuki_ble_adv_has_nuki_service(const struct ble_hs_adv_fields *fields) {
   return false;
 }
 
+/* ---- Reconnection backoff helpers ---- */
+
+static void sdf_nuki_ble_reconnect_timer_cb(TimerHandle_t xTimer) {
+  (void)xTimer;
+  if (s_transport != NULL && s_transport->enabled &&
+      s_transport->start_requested) {
+    ESP_LOGI(TAG, "Reconnect timer fired, starting scan (attempt %u)",
+             s_transport->reconnect_attempt);
+    sdf_nuki_ble_start_scan();
+  }
+}
+
+static void sdf_nuki_ble_connect_timeout_cb(TimerHandle_t xTimer) {
+  (void)xTimer;
+  if (s_transport == NULL) {
+    return;
+  }
+  if (s_transport->state == SDF_NUKI_BLE_STATE_CONNECTING) {
+    ESP_LOGW(TAG, "Connection attempt timed out after %d ms",
+             CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS);
+    ble_gap_conn_cancel();
+  }
+}
+
+static void sdf_nuki_ble_schedule_reconnect(void) {
+  if (s_transport == NULL || !s_transport->enabled ||
+      !s_transport->start_requested) {
+    return;
+  }
+
+  /* Check max retry limit (0 = unlimited) */
+  if (CONFIG_SDF_BLE_RECONNECT_MAX_RETRIES > 0 &&
+      s_transport->reconnect_attempt >= CONFIG_SDF_BLE_RECONNECT_MAX_RETRIES) {
+    ESP_LOGE(TAG, "Max reconnect retries (%d) exhausted, giving up",
+             CONFIG_SDF_BLE_RECONNECT_MAX_RETRIES);
+    s_transport->state = SDF_NUKI_BLE_STATE_IDLE;
+    s_transport->start_requested = false;
+    return;
+  }
+
+  /* Exponential backoff: base * 2^attempt, clamped to max */
+  uint32_t delay_ms = CONFIG_SDF_BLE_RECONNECT_BASE_DELAY_MS;
+  for (uint8_t i = 0; i < s_transport->reconnect_attempt &&
+                      delay_ms < CONFIG_SDF_BLE_RECONNECT_MAX_DELAY_MS;
+       ++i) {
+    delay_ms *= 2;
+  }
+  if (delay_ms > CONFIG_SDF_BLE_RECONNECT_MAX_DELAY_MS) {
+    delay_ms = CONFIG_SDF_BLE_RECONNECT_MAX_DELAY_MS;
+  }
+
+  s_transport->reconnect_attempt++;
+  ESP_LOGW(TAG, "Scheduling reconnect in %lu ms (attempt %u/%d)",
+           (unsigned long)delay_ms, s_transport->reconnect_attempt,
+           CONFIG_SDF_BLE_RECONNECT_MAX_RETRIES);
+
+  if (s_transport->reconnect_timer != NULL) {
+    xTimerChangePeriod(s_transport->reconnect_timer, pdMS_TO_TICKS(delay_ms),
+                       0);
+    xTimerStart(s_transport->reconnect_timer, 0);
+  }
+}
+
 static int sdf_nuki_ble_connect(const ble_addr_t *addr) {
   s_transport->state = SDF_NUKI_BLE_STATE_CONNECTING;
 
-  return ble_gap_connect(s_transport->own_addr_type, addr, BLE_HS_FOREVER, NULL,
-                         sdf_nuki_ble_gap_event, NULL);
+  /* Start connection timeout timer */
+  if (s_transport->connect_timeout_timer != NULL) {
+    xTimerChangePeriod(s_transport->connect_timeout_timer,
+                       pdMS_TO_TICKS(CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS), 0);
+    xTimerStart(s_transport->connect_timeout_timer, 0);
+  }
+
+  int rc = ble_gap_connect(s_transport->own_addr_type, addr,
+                           pdMS_TO_TICKS(CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS),
+                           NULL, sdf_nuki_ble_gap_event, NULL);
+  if (rc != 0) {
+    /* Cancel timeout timer on immediate failure */
+    if (s_transport->connect_timeout_timer != NULL) {
+      xTimerStop(s_transport->connect_timeout_timer, 0);
+    }
+  }
+  return rc;
 }
 
 static int sdf_nuki_ble_start_pairing_service_discovery(void);
@@ -309,6 +403,9 @@ static int sdf_nuki_ble_on_subscribe_usdio(uint16_t conn_handle,
   }
 
   s_transport->state = SDF_NUKI_BLE_STATE_READY;
+  /* Reset backoff on successful connection */
+  s_transport->reconnect_attempt = 0;
+  ESP_LOGI(TAG, "BLE transport ready, backoff reset");
   if (s_transport->ready_cb != NULL) {
     s_transport->ready_cb(s_transport->ready_ctx);
   }
@@ -428,11 +525,13 @@ static int sdf_nuki_ble_gap_event(struct ble_gap_event *event, void *arg) {
     }
     return 0;
   case BLE_GAP_EVENT_CONNECT:
+    /* Cancel connection timeout timer */
+    if (s_transport->connect_timeout_timer != NULL) {
+      xTimerStop(s_transport->connect_timeout_timer, 0);
+    }
     if (event->connect.status != 0) {
       ESP_LOGW(TAG, "Connect failed; status=%d", event->connect.status);
-      if (s_transport->enabled) {
-        sdf_nuki_ble_start_scan();
-      }
+      sdf_nuki_ble_schedule_reconnect();
       return 0;
     }
     s_transport->conn_handle = event->connect.conn_handle;
@@ -462,9 +561,7 @@ static int sdf_nuki_ble_gap_event(struct ble_gap_event *event, void *arg) {
     s_transport->usdio_handle = 0;
     s_transport->gdio_cccd = 0;
     s_transport->usdio_cccd = 0;
-    if (s_transport->enabled && s_transport->start_requested) {
-      sdf_nuki_ble_start_scan();
-    }
+    sdf_nuki_ble_schedule_reconnect();
     return 0;
   case BLE_GAP_EVENT_NOTIFY_RX:
     sdf_nuki_ble_handle_notify(event);
@@ -491,6 +588,17 @@ int sdf_nuki_ble_init(sdf_nuki_ble_transport_t *transport,
   transport->ready_ctx = ready_ctx;
   transport->conn_handle = BLE_HS_CONN_HANDLE_NONE;
   transport->enabled = true;
+  transport->reconnect_attempt = 0;
+
+  /* Create reconnection backoff timer (one-shot) */
+  transport->reconnect_timer =
+      xTimerCreate("ble_reconn", pdMS_TO_TICKS(1000), pdFALSE, NULL,
+                   sdf_nuki_ble_reconnect_timer_cb);
+
+  /* Create connection timeout timer (one-shot) */
+  transport->connect_timeout_timer = xTimerCreate(
+      "ble_conn_to", pdMS_TO_TICKS(CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS), pdFALSE,
+      NULL, sdf_nuki_ble_connect_timeout_cb);
 
   s_transport = transport;
 
@@ -534,13 +642,24 @@ int sdf_nuki_ble_set_enabled(sdf_nuki_ble_transport_t *transport,
   transport->enabled = enabled;
   if (!enabled) {
     s_pending_connect = false;
+    /* Cancel pending timers */
+    if (transport->reconnect_timer != NULL) {
+      xTimerStop(transport->reconnect_timer, 0);
+    }
+    if (transport->connect_timeout_timer != NULL) {
+      xTimerStop(transport->connect_timeout_timer, 0);
+    }
     if (transport->state == SDF_NUKI_BLE_STATE_SCANNING) {
       ble_gap_disc_cancel();
+    }
+    if (transport->state == SDF_NUKI_BLE_STATE_CONNECTING) {
+      ble_gap_conn_cancel();
     }
     if (transport->conn_handle != BLE_HS_CONN_HANDLE_NONE) {
       ble_gap_terminate(transport->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
     }
     transport->state = SDF_NUKI_BLE_STATE_IDLE;
+    transport->reconnect_attempt = 0;
     return 0;
   }
 
@@ -620,4 +739,11 @@ int sdf_nuki_ble_send(sdf_nuki_ble_transport_t *transport,
 
 bool sdf_nuki_ble_is_ready(const sdf_nuki_ble_transport_t *transport) {
   return transport != NULL && transport->state == SDF_NUKI_BLE_STATE_READY;
+}
+
+void sdf_nuki_ble_reset_backoff(sdf_nuki_ble_transport_t *transport) {
+  if (transport == NULL) {
+    return;
+  }
+  transport->reconnect_attempt = 0;
 }

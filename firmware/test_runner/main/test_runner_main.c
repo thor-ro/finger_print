@@ -81,6 +81,56 @@ extern void test_sdf_app_valid_lock_action_logic(void);
 extern void test_sdf_app_map_lock_state_to_zigbee_logic(void);
 extern void test_sdf_app_choose_fingerprint_permission_logic(void);
 
+/* Nuki crypto tests */
+extern void test_crypto_secretbox_round_trip(void);
+extern void test_crypto_secretbox_tampered_ciphertext(void);
+extern void test_crypto_secretbox_too_short(void);
+extern void test_crypto_secretbox_open_too_short(void);
+extern void test_crypto_core_hsalsa20_deterministic(void);
+extern void test_crypto_core_hsalsa20_different_keys(void);
+extern void test_crypto_scalarmult_basepoint(void);
+extern void test_crypto_scalarmult_null_args(void);
+extern void test_crypto_scalarmult_dh_agreement(void);
+
+/* Nuki pairing tests */
+extern void test_pairing_init_success(void);
+extern void test_pairing_init_null_args(void);
+extern void test_pairing_init_long_name_truncated(void);
+extern void test_pairing_start_sends_request(void);
+extern void test_pairing_start_null_args(void);
+extern void test_pairing_get_credentials_not_complete(void);
+extern void test_pairing_get_credentials_null_args(void);
+extern void test_pairing_get_credentials_when_complete(void);
+extern void test_pairing_handle_unencrypted_null_args(void);
+extern void test_pairing_handle_unencrypted_overflow_protection(void);
+extern void test_pairing_handle_encrypted_null_args(void);
+
+/* Protocol BLE tests */
+extern void test_client_init_success(void);
+extern void test_client_init_null_args(void);
+extern void test_client_reset_rx(void);
+extern void test_client_reset_rx_null_safety(void);
+extern void test_parse_challenge_success(void);
+extern void test_parse_challenge_wrong_command(void);
+extern void test_parse_challenge_null_args(void);
+extern void test_parse_challenge_too_short(void);
+extern void test_parse_status_success(void);
+extern void test_parse_status_wrong_command(void);
+extern void test_parse_keyturner_states_minimum(void);
+extern void test_parse_keyturner_states_extended(void);
+extern void test_parse_keyturner_states_too_short(void);
+extern void test_parse_error_report_success(void);
+extern void test_parse_error_report_too_short(void);
+extern void test_compute_authenticator_deterministic(void);
+extern void test_compute_authenticator_null_args(void);
+extern void test_compute_authenticator_different_data(void);
+extern void test_compute_shared_key_null_args(void);
+extern void test_encrypt_decrypt_round_trip(void);
+extern void test_nonce_replay_detection(void);
+extern void test_feed_encrypted_partial_data(void);
+extern void test_feed_encrypted_null_args(void);
+extern void test_send_unencrypted_sends_framed_message(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -165,6 +215,56 @@ void app_main(void) {
   RUN_TEST(test_sdf_app_valid_lock_action_logic);
   RUN_TEST(test_sdf_app_map_lock_state_to_zigbee_logic);
   RUN_TEST(test_sdf_app_choose_fingerprint_permission_logic);
+
+  /* Nuki crypto tests */
+  RUN_TEST(test_crypto_secretbox_round_trip);
+  RUN_TEST(test_crypto_secretbox_tampered_ciphertext);
+  RUN_TEST(test_crypto_secretbox_too_short);
+  RUN_TEST(test_crypto_secretbox_open_too_short);
+  RUN_TEST(test_crypto_core_hsalsa20_deterministic);
+  RUN_TEST(test_crypto_core_hsalsa20_different_keys);
+  RUN_TEST(test_crypto_scalarmult_basepoint);
+  RUN_TEST(test_crypto_scalarmult_null_args);
+  RUN_TEST(test_crypto_scalarmult_dh_agreement);
+
+  /* Nuki pairing tests */
+  RUN_TEST(test_pairing_init_success);
+  RUN_TEST(test_pairing_init_null_args);
+  RUN_TEST(test_pairing_init_long_name_truncated);
+  RUN_TEST(test_pairing_start_sends_request);
+  RUN_TEST(test_pairing_start_null_args);
+  RUN_TEST(test_pairing_get_credentials_not_complete);
+  RUN_TEST(test_pairing_get_credentials_null_args);
+  RUN_TEST(test_pairing_get_credentials_when_complete);
+  RUN_TEST(test_pairing_handle_unencrypted_null_args);
+  RUN_TEST(test_pairing_handle_unencrypted_overflow_protection);
+  RUN_TEST(test_pairing_handle_encrypted_null_args);
+
+  /* Protocol BLE tests */
+  RUN_TEST(test_client_init_success);
+  RUN_TEST(test_client_init_null_args);
+  RUN_TEST(test_client_reset_rx);
+  RUN_TEST(test_client_reset_rx_null_safety);
+  RUN_TEST(test_parse_challenge_success);
+  RUN_TEST(test_parse_challenge_wrong_command);
+  RUN_TEST(test_parse_challenge_null_args);
+  RUN_TEST(test_parse_challenge_too_short);
+  RUN_TEST(test_parse_status_success);
+  RUN_TEST(test_parse_status_wrong_command);
+  RUN_TEST(test_parse_keyturner_states_minimum);
+  RUN_TEST(test_parse_keyturner_states_extended);
+  RUN_TEST(test_parse_keyturner_states_too_short);
+  RUN_TEST(test_parse_error_report_success);
+  RUN_TEST(test_parse_error_report_too_short);
+  RUN_TEST(test_compute_authenticator_deterministic);
+  RUN_TEST(test_compute_authenticator_null_args);
+  RUN_TEST(test_compute_authenticator_different_data);
+  RUN_TEST(test_compute_shared_key_null_args);
+  RUN_TEST(test_encrypt_decrypt_round_trip);
+  RUN_TEST(test_nonce_replay_detection);
+  RUN_TEST(test_feed_encrypted_partial_data);
+  RUN_TEST(test_feed_encrypted_null_args);
+  RUN_TEST(test_send_unencrypted_sends_framed_message);
 
   UNITY_END();
 }
