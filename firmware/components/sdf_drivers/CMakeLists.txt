@@ -1,4 +1,4 @@
-set(driver_reqs sdf_common sdf_config sdf_platform esp_timer)
+set(driver_reqs sdf_common esp_timer)
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND driver_reqs driver)
 endif()
