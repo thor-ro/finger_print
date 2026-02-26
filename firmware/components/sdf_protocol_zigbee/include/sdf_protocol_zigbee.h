@@ -62,9 +62,6 @@ esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms);
 uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void);
 bool sdf_protocol_zigbee_is_ready(void);
 
-esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms);
-uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void);
-
 #define SDF_ZIGBEE_ATTR_ACTIVE_USERS_LIST_ID 0x4000
 esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array);
 

@@ -70,6 +70,11 @@ extern void test_sdf_storage_nuki_clear_already_cleared(void);
 extern void test_sdf_storage_ble_target_save_and_load_success(void);
 extern void test_sdf_storage_ble_target_load_not_found(void);
 
+/* Tasks tests */
+extern void test_sdf_tasks_wakeup_reason_mapping(void);
+extern void test_sdf_tasks_checkin_clamping(void);
+extern void test_sdf_tasks_battery_bounds(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -143,6 +148,11 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_nuki_clear_already_cleared);
   RUN_TEST(test_sdf_storage_ble_target_save_and_load_success);
   RUN_TEST(test_sdf_storage_ble_target_load_not_found);
+
+  /* Tasks tests */
+  RUN_TEST(test_sdf_tasks_wakeup_reason_mapping);
+  RUN_TEST(test_sdf_tasks_checkin_clamping);
+  RUN_TEST(test_sdf_tasks_battery_bounds);
 
   UNITY_END();
 }
