@@ -5,6 +5,10 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#ifndef CONFIG_IDF_TARGET_LINUX
+#include "esp_task_wdt.h"
+#include "freertos/FreeRTOS.h"
+#endif
 #include "mbedtls/platform_util.h"
 #include "sdkconfig.h"
 
@@ -38,6 +42,7 @@
 
 #define SDF_APP_POWER_CHECKIN_INTERVAL_MS                                      \
   ((uint32_t)CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS)
+#define SDF_APP_TWDT_TIMEOUT_MS 15000u
 #define SDF_APP_POWER_IDLE_BEFORE_SLEEP_MS                                     \
   ((uint32_t)CONFIG_SDF_POWER_IDLE_BEFORE_SLEEP_MS)
 #define SDF_APP_POWER_POST_WAKE_GUARD_MS                                       \
@@ -952,6 +957,18 @@ void sdf_app_init(void) {
     ESP_LOGE(TAG, "Storage init failed: %s", esp_err_to_name(err));
     sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 0);
   }
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_task_wdt_config_t twdt_config = {
+      .timeout_ms = SDF_APP_TWDT_TIMEOUT_MS,
+      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+      .trigger_panic = true,
+  };
+  esp_err_t twdt_err = esp_task_wdt_reconfigure(&twdt_config);
+  if (twdt_err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to reconfigure TWDT: %s", esp_err_to_name(twdt_err));
+  }
+#endif
 
   sdf_storage_security_status_t storage_security = {0};
   if (sdf_storage_get_security_status(&storage_security) == ESP_OK) {
