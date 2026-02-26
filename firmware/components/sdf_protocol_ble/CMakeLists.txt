@@ -1,4 +1,4 @@
-set(ble_reqs sdf_common sdf_config sdf_platform)
+set(ble_reqs sdf_common)
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND ble_reqs bt)
 endif()
