@@ -7,7 +7,7 @@ The following table describes the wiring of the Waveshare ESP32-C6 mini module t
 | 5V           | 5V           |                | 5V Power Input |
 | GND          | GND          | Fingerprint GND| Ground |
 | 3.3V         | 3.3V         | Fingerprint 3.3V| 3.3V Power (Output) |
-| 0            | GPIO0        |                | |
+| 0            | GPIO0        | Battery ADC    | Voltage divider (1MΩ / 1MΩ) for battery reading |
 | 1            | GPIO1        |                | |
 | 2            | GPIO2        |                | |
 | 3            | GPIO3        |                | |

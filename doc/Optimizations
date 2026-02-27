@@ -30,7 +30,7 @@ if (state.critical_battery_state) {
 
 There is no ADC reading for the Smart Door device's own battery.
 
-**Recommendation**: Add an ADC driver for a battery voltage divider on a free GPIO. Map voltage → percentage using a LiPo discharge curve. Report via `sdf_tasks_set_battery_percent`.
+**Recommendation**: Add an ADC driver for a battery over a 1MΩ/1MΩ voltage divider connected to GPIO0. Map voltage → percentage using a 2x AAA alkaline discharge curve (e.g. 3.0V = 100%, 2.0V = 0%). Report via `sdf_power_set_battery_percent`.
 
 ---
 

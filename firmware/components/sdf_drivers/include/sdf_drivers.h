@@ -58,6 +58,9 @@ void sdf_fingerprint_driver_set_power(bool enabled);
 
 void sdf_drivers_init(void);
 
+esp_err_t sdf_drivers_battery_adc_init(int adc_pin);
+int sdf_drivers_battery_get_percent(void);
+
 esp_err_t
 sdf_fingerprint_driver_init(const sdf_fingerprint_driver_config_t *config);
 void sdf_fingerprint_driver_deinit(void);
