@@ -1132,6 +1132,7 @@ void sdf_app_init(void) {
   power_cfg.battery_report_interval_ms = SDF_APP_POWER_BATTERY_REPORT_MS;
   power_cfg.enable_light_sleep = SDF_APP_POWER_ENABLE_LIGHT_SLEEP;
   power_cfg.enable_ble_radio_gating = SDF_APP_POWER_ENABLE_BLE_RADIO_GATING;
+  power_cfg.enable_deep_sleep_fallback = true;
   power_cfg.battery_percent_default = SDF_APP_POWER_BATTERY_DEFAULT_PERCENT;
   power_cfg.busy_cb = sdf_app_power_busy;
   power_cfg.busy_ctx = NULL;
