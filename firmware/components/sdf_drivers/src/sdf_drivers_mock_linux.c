@@ -64,4 +64,11 @@ esp_err_t uart_driver_delete(uart_port_t uart_num) {
   return ESP_OK;
 }
 
+esp_err_t sdf_drivers_battery_adc_init(int adc_pin) {
+  (void)adc_pin;
+  return ESP_OK;
+}
+
+int sdf_drivers_battery_get_percent(void) { return 100; }
+
 #endif /* CONFIG_IDF_TARGET_LINUX */

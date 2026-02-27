@@ -19,6 +19,7 @@
 #else
 #include "sdf_app_mock_linux.inc"
 #endif
+#include "sdf_drivers.h"
 #include "sdf_power.h"
 #include "sdf_protocol_ble.h"
 #include "sdf_protocol_zigbee.h"
@@ -43,6 +44,7 @@
 #define SDF_APP_FP_POWER_EN_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_EN_GPIO)
 #define SDF_APP_ENROLLMENT_BTN_GPIO ((gpio_num_t)CONFIG_SDF_ENROLLMENT_BTN_GPIO)
 #define SDF_APP_WS2812_LED_GPIO ((gpio_num_t)CONFIG_SDF_WS2812_LED_GPIO)
+#define SDF_APP_BATTERY_ADC_GPIO 0
 
 #define SDF_APP_POWER_CHECKIN_INTERVAL_MS                                      \
   ((uint32_t)CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS)
@@ -87,7 +89,6 @@ static bool s_has_creds;
 static bool s_pairing_active;
 static uint16_t s_zigbee_alarm_mask;
 static bool s_latch_sequence_active;
-static uint8_t s_battery_percent_cached = SDF_APP_POWER_BATTERY_DEFAULT_PERCENT;
 
 static sdf_lock_flow_t s_lock_flow;
 
@@ -262,7 +263,6 @@ sdf_app_power_wake_reason_name(sdf_power_wake_reason_t reason) {
 }
 
 static void sdf_app_update_battery_percent(uint8_t battery_percent) {
-  s_battery_percent_cached = battery_percent;
   esp_err_t err = sdf_power_set_battery_percent(battery_percent);
   if (err != ESP_OK) {
     sdf_protocol_zigbee_update_battery_percent(battery_percent);
@@ -296,7 +296,7 @@ static void sdf_app_power_wakeup(void *ctx, sdf_power_wake_reason_t reason) {
 
 static int sdf_app_power_battery_percent(void *ctx) {
   (void)ctx;
-  return (int)s_battery_percent_cached;
+  return sdf_drivers_battery_get_percent();
 }
 
 static void
@@ -839,10 +839,8 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     sdf_protocol_zigbee_update_lock_state(
         sdf_app_map_lock_state_to_zigbee(state.lock_state));
     if (state.critical_battery_state) {
-      sdf_app_update_battery_percent(10);
       sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_LOW_BATTERY, 0);
     } else {
-      sdf_app_update_battery_percent(100);
       sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_LOW_BATTERY);
     }
     return;
@@ -992,6 +990,11 @@ void sdf_app_init(void) {
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Storage init failed: %s", esp_err_to_name(err));
     sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 0);
+  }
+
+  err = sdf_drivers_battery_adc_init(SDF_APP_BATTERY_ADC_GPIO);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Battery ADC init failed: %s", esp_err_to_name(err));
   }
 
 #ifndef CONFIG_IDF_TARGET_LINUX
