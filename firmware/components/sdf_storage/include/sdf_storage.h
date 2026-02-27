@@ -25,6 +25,20 @@ esp_err_t sdf_storage_nuki_load(uint32_t *authorization_id,
                                 uint8_t shared_key[32]);
 esp_err_t sdf_storage_nuki_clear(void);
 
+typedef struct {
+  uint16_t pairing_svc_start;
+  uint16_t pairing_svc_end;
+  uint16_t keyturner_svc_start;
+  uint16_t keyturner_svc_end;
+  uint16_t gdio_handle;
+  uint16_t gdio_cccd;
+  uint16_t usdio_handle;
+  uint16_t usdio_cccd;
+} sdf_nuki_ble_handles_t;
+
+esp_err_t sdf_storage_nuki_handles_save(const sdf_nuki_ble_handles_t *handles);
+esp_err_t sdf_storage_nuki_handles_load(sdf_nuki_ble_handles_t *handles);
+
 esp_err_t sdf_storage_ble_target_save(uint8_t addr_type, const uint8_t addr[6]);
 esp_err_t sdf_storage_ble_target_load(uint8_t *addr_type, uint8_t addr[6]);
 

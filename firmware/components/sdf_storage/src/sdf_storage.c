@@ -9,6 +9,7 @@
 #define SDF_STORAGE_NAMESPACE "nuki"
 #define SDF_STORAGE_KEY_AUTH_ID "auth_id"
 #define SDF_STORAGE_KEY_SHARED "shared_key"
+#define SDF_STORAGE_KEY_BLE_HANDLES "ble_handles"
 
 static const char *TAG = "sdf_storage";
 static sdf_storage_security_status_t s_security_status = {
@@ -197,7 +198,59 @@ esp_err_t sdf_storage_nuki_clear(void) {
   }
 
   if (err == ESP_OK) {
+    esp_err_t hnd_err = nvs_erase_key(handle, SDF_STORAGE_KEY_BLE_HANDLES);
+    if (hnd_err == ESP_ERR_NVS_NOT_FOUND) {
+      hnd_err = ESP_OK;
+    }
+    if (hnd_err != ESP_OK) {
+      err = hnd_err;
+    }
+  }
+
+  if (err == ESP_OK) {
     err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_nuki_handles_save(const sdf_nuki_ble_handles_t *handles) {
+  if (handles == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_set_blob(handle, SDF_STORAGE_KEY_BLE_HANDLES, handles,
+                     sizeof(sdf_nuki_ble_handles_t));
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_nuki_handles_load(sdf_nuki_ble_handles_t *handles) {
+  if (handles == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  size_t len = sizeof(sdf_nuki_ble_handles_t);
+  err = nvs_get_blob(handle, SDF_STORAGE_KEY_BLE_HANDLES, handles, &len);
+  if (err == ESP_OK && len != sizeof(sdf_nuki_ble_handles_t)) {
+    err = ESP_ERR_NVS_INVALID_LENGTH;
   }
 
   nvs_close(handle);
