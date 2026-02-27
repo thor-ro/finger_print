@@ -254,6 +254,22 @@ static void sdf_power_task(void *arg) {
     }
 
     if (allow_sleep) {
+      if (config_snapshot.enable_deep_sleep_fallback &&
+          !sdf_protocol_zigbee_is_ready()) {
+        ESP_LOGI(TAG, "Entering deep sleep (Zigbee not joined)");
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+
+        if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio)) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+          esp_deep_sleep_enable_gpio_wakeup(
+              1ULL << config_snapshot.fingerprint_wake_gpio,
+              ESP_GPIO_WAKEUP_GPIO_HIGH);
+#endif
+        }
+        esp_deep_sleep_start();
+      }
+
       sdf_power_sleep_once(&config_snapshot);
       int64_t wake_us = esp_timer_get_time();
       if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
@@ -290,6 +306,7 @@ void sdf_power_get_default_power_config(sdf_power_manager_config_t *config) {
   config->battery_report_interval_ms = SDF_POWER_BATTERY_REPORT_DEFAULT_MS;
   config->enable_light_sleep = CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP;
   config->enable_ble_radio_gating = CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING;
+  config->enable_deep_sleep_fallback = false;
   config->battery_percent_default = SDF_POWER_BATTERY_DEFAULT_PERCENT;
   config->busy_cb = NULL;
   config->busy_ctx = NULL;

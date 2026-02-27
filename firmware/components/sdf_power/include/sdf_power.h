@@ -39,6 +39,7 @@ typedef struct {
   uint32_t battery_report_interval_ms;
   bool enable_light_sleep;
   bool enable_ble_radio_gating;
+  bool enable_deep_sleep_fallback;
   uint8_t battery_percent_default;
   sdf_power_busy_cb busy_cb;
   void *busy_ctx;
