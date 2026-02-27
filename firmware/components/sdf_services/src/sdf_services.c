@@ -56,7 +56,8 @@
 #define SDF_SERVICES_LED_MODE_SOLID 0x03u
 #define SDF_SERVICES_LED_COLOR_RED 0x01u
 #define SDF_SERVICES_LED_COLOR_GREEN 0x02u
-#define SDF_SERVICES_LED_COLOR_BLUE 0x03u
+#define SDF_SERVICES_LED_COLOR_BLUE 0x04u
+#define SDF_SERVICES_LED_COLOR_ORANGE 0x08u
 
 static const char *TAG = "sdf_services";
 
@@ -192,18 +193,19 @@ static void sdf_services_try_set_led(uint8_t mode, uint8_t color,
   }
 
   uint8_t r = 0, g = 0, b = 0;
-  switch (color) {
-  case SDF_SERVICES_LED_COLOR_RED:
+  if (color & SDF_SERVICES_LED_COLOR_RED) {
     r = 255;
-    break;
-  case SDF_SERVICES_LED_COLOR_GREEN:
+  }
+  if (color & SDF_SERVICES_LED_COLOR_GREEN) {
     g = 255;
-    break;
-  case SDF_SERVICES_LED_COLOR_BLUE:
+  }
+  if (color & SDF_SERVICES_LED_COLOR_BLUE) {
     b = 255;
-    break;
-  default:
-    break;
+  }
+  if (color == SDF_SERVICES_LED_COLOR_ORANGE) {
+    r = 255;
+    g = 165;
+    b = 0;
   }
 
   if (mode == SDF_SERVICES_LED_MODE_BREATH ||
@@ -932,6 +934,11 @@ bool sdf_services_is_ready(void) {
     xSemaphoreGive(s_state.lock);
   }
   return ready;
+}
+
+void sdf_services_trigger_low_battery_warning(void) {
+  sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                           SDF_SERVICES_LED_COLOR_ORANGE, 5);
 }
 
 esp_err_t sdf_services_request_enrollment(uint16_t user_id,
