@@ -121,13 +121,6 @@ void test_enrollment_sm_is_active_error(void) {
   TEST_ASSERT_FALSE(sdf_enrollment_sm_is_active(&sm));
 }
 
-void test_enrollment_sm_is_active_wait_admin(void) {
-  sdf_enrollment_sm_t sm;
-  sdf_enrollment_sm_init(&sm);
-  sm.state = SDF_ENROLLMENT_STATE_WAIT_ADMIN;
-  TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
-}
-
 /* ---------- current_step ---------- */
 
 void test_enrollment_sm_current_step(void) {

@@ -15,7 +15,6 @@ typedef enum {
   SDF_ENROLLMENT_STATE_STEP_3 = 3,
   SDF_ENROLLMENT_STATE_SUCCESS = 4,
   SDF_ENROLLMENT_STATE_ERROR = 5,
-  SDF_ENROLLMENT_STATE_WAIT_ADMIN = 6,
 } sdf_enrollment_state_t;
 
 typedef enum {
