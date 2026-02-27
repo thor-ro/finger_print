@@ -14,6 +14,8 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
+#include "sdf_storage.h"
+
 #include "sdf_protocol_ble.h"
 
 #define SDF_NUKI_SCAN_ITVL 0x0010
@@ -233,6 +235,31 @@ static int sdf_nuki_ble_on_mtu(uint16_t conn_handle,
     ESP_LOGI(TAG, "MTU exchange complete: %u", mtu);
   }
 
+  sdf_nuki_ble_handles_t hnds;
+  if (sdf_storage_nuki_handles_load(&hnds) == ESP_OK) {
+    ESP_LOGI(TAG, "Loaded cached Nuki GATT handles, skipping discovery");
+    s_transport->pairing_svc_start = hnds.pairing_svc_start;
+    s_transport->pairing_svc_end = hnds.pairing_svc_end;
+    s_transport->keyturner_svc_start = hnds.keyturner_svc_start;
+    s_transport->keyturner_svc_end = hnds.keyturner_svc_end;
+    s_transport->gdio_handle = hnds.gdio_handle;
+    s_transport->gdio_cccd = hnds.gdio_cccd;
+    s_transport->usdio_handle = hnds.usdio_handle;
+    s_transport->usdio_cccd = hnds.usdio_cccd;
+
+    uint8_t value[2] = {0x02, 0x00};
+    int rc = ble_gattc_write_flat(s_transport->conn_handle,
+                                  s_transport->gdio_cccd, value, sizeof(value),
+                                  sdf_nuki_ble_on_subscribe_gdio, s_transport);
+    if (rc == 0) {
+      return 0; // successfully skipped discovery
+    }
+    ESP_LOGW(TAG,
+             "Fast reconnect gdio subscription failed (rc=%d), falling back to "
+             "discovery",
+             rc);
+  }
+
   return sdf_nuki_ble_start_pairing_service_discovery();
 }
 
@@ -366,6 +393,21 @@ static int sdf_nuki_ble_disc_dsc_cb(uint16_t conn_handle,
     if (s_transport->usdio_cccd == 0) {
       ESP_LOGE(TAG, "USDIO CCCD not found");
       return BLE_HS_EAPP;
+    }
+
+    /* All handles discovered! Save to NVS for connection caching */
+    sdf_nuki_ble_handles_t hnds = {
+        .pairing_svc_start = s_transport->pairing_svc_start,
+        .pairing_svc_end = s_transport->pairing_svc_end,
+        .keyturner_svc_start = s_transport->keyturner_svc_start,
+        .keyturner_svc_end = s_transport->keyturner_svc_end,
+        .gdio_handle = s_transport->gdio_handle,
+        .gdio_cccd = s_transport->gdio_cccd,
+        .usdio_handle = s_transport->usdio_handle,
+        .usdio_cccd = s_transport->usdio_cccd,
+    };
+    if (sdf_storage_nuki_handles_save(&hnds) == ESP_OK) {
+      ESP_LOGI(TAG, "Saved discovered Nuki GATT handles for fast reconnect");
     }
 
     uint8_t value[2] = {0x02, 0x00};

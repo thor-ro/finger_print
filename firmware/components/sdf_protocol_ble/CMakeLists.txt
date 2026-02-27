@@ -16,5 +16,5 @@ idf_component_register(
     SRCS ${ble_srcs}
     INCLUDE_DIRS "include"
     REQUIRES ${ble_reqs}
-    PRIV_REQUIRES esp_system mbedtls
+    PRIV_REQUIRES esp_system mbedtls sdf_storage
 )
