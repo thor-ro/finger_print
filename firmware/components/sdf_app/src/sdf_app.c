@@ -335,6 +335,50 @@ sdf_app_on_security_event(void *ctx,
   }
 }
 
+static void sdf_app_on_admin_action(void *ctx,
+                                    sdf_services_admin_action_t action) {
+  (void)ctx;
+  switch (action) {
+  case SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR:
+    ESP_LOGI(TAG, "Admin authorized Nuki Pairing");
+    if (!s_has_creds && sdf_nuki_ble_is_ready(&s_ble) && !s_pairing_active) {
+      int res = sdf_nuki_pairing_init(&s_pairing, &s_client, 0, SDF_APP_ID,
+                                      SDF_APP_NAME);
+      if (res == SDF_NUKI_RESULT_OK) {
+        s_pairing_active = true;
+        res = sdf_nuki_pairing_start(&s_pairing);
+        if (res != SDF_NUKI_RESULT_OK) {
+          ESP_LOGE(TAG, "Pairing start failed: %d", res);
+          sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 1);
+          s_pairing_active = false;
+        }
+      } else {
+        ESP_LOGE(TAG, "Pairing init failed: %d", res);
+        sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 0);
+      }
+    } else {
+      ESP_LOGW(
+          TAG,
+          "Cannot start Nuki pairing: already have creds or BLE not ready");
+    }
+    break;
+
+  case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
+    ESP_LOGI(TAG, "Admin authorized Zigbee Join");
+    sdf_protocol_zigbee_permit_join();
+    break;
+
+  case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET:
+    ESP_LOGI(TAG, "Admin authorized Factory Reset");
+    // TODO: implement actual factory reset
+    ESP_LOGI(TAG, "Factory reset not fully implemented yet in sdf_app");
+    break;
+
+  default:
+    break;
+  }
+}
+
 static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
   (void)ctx;
   sdf_power_mark_activity();
@@ -845,20 +889,8 @@ static void sdf_app_on_ble_ready(void *ctx) {
   }
 
   if (!s_has_creds) {
-    int res = sdf_nuki_pairing_init(&s_pairing, &s_client, 0, SDF_APP_ID,
-                                    SDF_APP_NAME);
-    if (res != SDF_NUKI_RESULT_OK) {
-      ESP_LOGE(TAG, "Pairing init failed: %d", res);
-      sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 0);
-      return;
-    }
-    s_pairing_active = true;
-
-    res = sdf_nuki_pairing_start(&s_pairing);
-    if (res != SDF_NUKI_RESULT_OK) {
-      ESP_LOGE(TAG, "Pairing start failed: %d", res);
-      sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 1);
-    }
+    ESP_LOGI(TAG,
+             "No Nuki credentials found. Waiting for Admin Action to pair.");
     return;
   }
 
@@ -1025,6 +1057,8 @@ void sdf_app_init(void) {
   services_cfg.unlock_ctx = NULL;
   services_cfg.enrollment_cb = sdf_app_on_enrollment_state;
   services_cfg.enrollment_ctx = NULL;
+  services_cfg.admin_action_cb = sdf_app_on_admin_action;
+  services_cfg.admin_action_ctx = NULL;
   services_cfg.security_event_cb = sdf_app_on_security_event;
   services_cfg.security_event_ctx = NULL;
   services_cfg.wake_gpio = SDF_APP_FP_WAKE_GPIO;

@@ -20,6 +20,17 @@ typedef void (*sdf_services_enrollment_cb)(void *ctx,
                                            const sdf_enrollment_sm_t *state);
 
 typedef enum {
+  SDF_SERVICES_ADMIN_ACTION_NONE = 0,
+  SDF_SERVICES_ADMIN_ACTION_ENROLL = 1,
+  SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR = 2,
+  SDF_SERVICES_ADMIN_ACTION_ZB_JOIN = 3,
+  SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET = 4,
+} sdf_services_admin_action_t;
+
+typedef void (*sdf_services_admin_action_cb)(
+    void *ctx, sdf_services_admin_action_t action);
+
+typedef enum {
   SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED = 0,
   SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED = 1,
   SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED = 2,
@@ -47,6 +58,8 @@ typedef struct {
   void *unlock_ctx;
   sdf_services_enrollment_cb enrollment_cb;
   void *enrollment_ctx;
+  sdf_services_admin_action_cb admin_action_cb;
+  void *admin_action_ctx;
   sdf_services_security_event_cb security_event_cb;
   void *security_event_ctx;
   gpio_num_t wake_gpio;

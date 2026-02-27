@@ -1,6 +1,6 @@
 set(service_reqs sdf_common sdf_storage sdf_drivers sdf_state_machines esp_timer)
 if(NOT IDF_TARGET STREQUAL "linux")
-    list(APPEND service_reqs led_strip)
+    list(APPEND service_reqs led_strip button)
 endif()
 
 idf_component_register(

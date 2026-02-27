@@ -919,6 +919,32 @@ esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms) {
   return ESP_OK;
 }
 
+esp_err_t sdf_protocol_zigbee_permit_join(void) {
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  bool ready = false;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+    ready = s_state.stack_started;
+    xSemaphoreGive(s_state.lock);
+  }
+
+  if (!ready) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  esp_err_t err = esp_zb_bdb_start_top_level_commissioning(
+      ESP_ZB_BDB_MODE_NETWORK_STEERING);
+  if (err == ESP_OK) {
+    ESP_LOGI(TAG, "Permit Join (Network Steering) enabled");
+  } else {
+    ESP_LOGW(TAG, "Failed to enable Permit Join: %s", esp_err_to_name(err));
+  }
+
+  return err;
+}
+
 uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void) {
   if (s_state.lock == NULL) {
     return s_state.checkin_interval_ms;

@@ -81,8 +81,7 @@ bool sdf_enrollment_sm_is_active(const sdf_enrollment_sm_t *sm) {
 
   return sm->state == SDF_ENROLLMENT_STATE_STEP_1 ||
          sm->state == SDF_ENROLLMENT_STATE_STEP_2 ||
-         sm->state == SDF_ENROLLMENT_STATE_STEP_3 ||
-         sm->state == SDF_ENROLLMENT_STATE_WAIT_ADMIN;
+         sm->state == SDF_ENROLLMENT_STATE_STEP_3;
 }
 
 uint8_t sdf_enrollment_sm_current_step(const sdf_enrollment_sm_t *sm) {

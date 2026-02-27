@@ -6,7 +6,9 @@
 #ifdef CONFIG_IDF_TARGET_LINUX
 #include "sdf_mock_linux_services.h"
 #else
+#include "button_gpio.h"
 #include "driver/gpio.h"
+#include "iot_button.h"
 #endif
 
 #include "esp_log.h"
@@ -72,8 +74,12 @@ typedef struct {
   uint32_t failed_attempt_count;
   int64_t failed_attempt_window_start_us;
   int64_t lockout_until_us;
-  int64_t enrollment_btn_press_start_us;
   led_strip_handle_t led_strip;
+  sdf_services_admin_action_t pending_admin_action;
+  int64_t pending_admin_action_start_us;
+#ifndef CONFIG_IDF_TARGET_LINUX
+  button_handle_t btn_handle;
+#endif
 } sdf_services_state_t;
 
 static sdf_services_state_t s_state = {0};
@@ -247,6 +253,77 @@ sdf_services_handle_enrollment_feedback(const sdf_enrollment_sm_t *before,
                              SDF_SERVICES_LED_COLOR_GREEN, flashes);
   }
 }
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+static void sdf_services_btn_cb(void *arg, void *usr_data) {
+  sdf_services_admin_action_t action =
+      (sdf_services_admin_action_t)(uintptr_t)usr_data;
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
+      pdTRUE) {
+    return;
+  }
+
+  // If there are 0 users, a single click just goes straight to enrollment
+  // because there is no admin to authorize yet.
+  if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
+    uint16_t users[1];
+    uint8_t perms[1];
+    size_t count = 0;
+
+    // Quick query without taking lock again (nested) is tricky since
+    // sdf_services_query_users takes the lock. We are in a callback.
+    // However, the driver itself can be queried.
+    sdf_fingerprint_driver_query_users(users, perms, &count, 1);
+    if (count == 0) {
+      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+      s_state.pending_admin_action_start_us = 0;
+      xSemaphoreGive(s_state.lock);
+
+      // Trigger enrollment immediately for Admin (ID 1, Perm 3)
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_SOLID,
+                               SDF_SERVICES_LED_COLOR_GREEN, 1);
+      sdf_services_request_enrollment(1, 3);
+      return;
+    }
+  }
+
+  // Set the pending action and wait for Admin fingerprint
+  if (s_state.pending_admin_action == SDF_SERVICES_ADMIN_ACTION_NONE) {
+    s_state.pending_admin_action = action;
+    s_state.pending_admin_action_start_us = esp_timer_get_time();
+
+    switch (action) {
+    case SDF_SERVICES_ADMIN_ACTION_ENROLL:
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                               SDF_SERVICES_LED_COLOR_BLUE, 3);
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR:
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                               SDF_SERVICES_LED_COLOR_RED |
+                                   SDF_SERVICES_LED_COLOR_GREEN,
+                               3); // Yellow ~ Red+Green
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                               SDF_SERVICES_LED_COLOR_RED |
+                                   SDF_SERVICES_LED_COLOR_BLUE,
+                               3); // Purple ~ Red+Blue
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET:
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                               SDF_SERVICES_LED_COLOR_RED, 3);
+      break;
+    default:
+      break;
+    }
+    ESP_LOGI(TAG, "Hardware button pressed, pending admin action: %d",
+             (int)action);
+  }
+
+  xSemaphoreGive(s_state.lock);
+}
+#endif
 
 static void sdf_services_run_match_cycle(void) {
   sdf_services_unlock_cb unlock_cb = NULL;
@@ -531,7 +608,11 @@ static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
   }
 }
 
-static void sdf_services_run_wait_admin_cycle(void) {
+static void sdf_services_run_admin_auth_cycle(void) {
+  if (s_state.pending_admin_action == SDF_SERVICES_ADMIN_ACTION_NONE) {
+    return;
+  }
+
   sdf_fingerprint_match_t match = {0};
   sdf_fingerprint_op_result_t match_result =
       sdf_fingerprint_driver_match_1n(&match);
@@ -542,58 +623,70 @@ static void sdf_services_run_wait_admin_cycle(void) {
   }
 
   if (match_result != SDF_FINGERPRINT_OP_OK) {
-    ESP_LOGW(TAG, "Fingerprint match error in WAIT_ADMIN: %s",
+    ESP_LOGW(TAG, "Fingerprint match error in admin auth: %s",
              sdf_services_fingerprint_result_name(match_result));
     return;
   }
 
-  ESP_LOGI(TAG, "WAIT_ADMIN Match: user_id=%u, permission=%u",
+  ESP_LOGI(TAG, "Admin Auth Match: user_id=%u, permission=%u",
            (unsigned)match.user_id, (unsigned)match.permission);
   if (match.permission == 3) {
-    uint16_t users[SDF_FINGERPRINT_USER_ID_MAX + 1];
-    uint8_t perms[SDF_FINGERPRINT_USER_ID_MAX + 1];
-    size_t count = 0;
-    uint16_t new_id = 0;
+    sdf_services_admin_action_t action;
+    sdf_services_admin_action_cb action_cb = NULL;
+    void *action_ctx = NULL;
 
-    esp_err_t err = sdf_services_query_users(users, perms, &count,
-                                             SDF_FINGERPRINT_USER_ID_MAX + 1);
-    if (err == ESP_OK) {
-      bool used[SDF_FINGERPRINT_USER_ID_MAX + 1] = {false};
-      for (size_t i = 0; i < count; i++) {
-        if (users[i] <= SDF_FINGERPRINT_USER_ID_MAX)
-          used[users[i]] = true;
-      }
-      for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
-        if (!used[id]) {
-          new_id = id;
-          break;
+    if (xSemaphoreTake(s_state.lock,
+                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+      action = s_state.pending_admin_action;
+      action_cb = s_state.config.admin_action_cb;
+      action_ctx = s_state.config.admin_action_ctx;
+
+      // Clear pending action
+      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+      s_state.pending_admin_action_start_us = 0;
+      xSemaphoreGive(s_state.lock);
+
+      ESP_LOGI(TAG, "Authorized action %d!", (int)action);
+      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_SOLID,
+                               SDF_SERVICES_LED_COLOR_GREEN, 1);
+
+      if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
+        uint16_t users[SDF_FINGERPRINT_USER_ID_MAX + 1];
+        uint8_t perms[SDF_FINGERPRINT_USER_ID_MAX + 1];
+        size_t count = 0;
+        uint16_t new_id = 0;
+
+        esp_err_t err = sdf_services_query_users(
+            users, perms, &count, SDF_FINGERPRINT_USER_ID_MAX + 1);
+        if (err == ESP_OK) {
+          bool used[SDF_FINGERPRINT_USER_ID_MAX + 1] = {false};
+          for (size_t i = 0; i < count; i++) {
+            if (users[i] <= SDF_FINGERPRINT_USER_ID_MAX)
+              used[users[i]] = true;
+          }
+          for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
+            if (!used[id]) {
+              new_id = id;
+              break;
+            }
+          }
+        }
+
+        if (new_id > 0) {
+          sdf_services_request_enrollment(new_id, 1);
+        } else {
+          ESP_LOGW(TAG, "No free user IDs available for local enrollment");
+          sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                                   SDF_SERVICES_LED_COLOR_RED, 3);
+        }
+      } else {
+        if (action_cb != NULL) {
+          action_cb(action_ctx, action);
         }
       }
     }
-
-    if (new_id > 0) {
-      if (xSemaphoreTake(s_state.lock,
-                         pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-        sdf_enrollment_sm_init(&s_state.enrollment);
-        xSemaphoreGive(s_state.lock);
-      }
-      ESP_LOGI(TAG, "Authorized! Starting local enrollment for new ID %u",
-               (unsigned)new_id);
-      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_SOLID,
-                               SDF_SERVICES_LED_COLOR_GREEN, 1);
-      sdf_services_request_enrollment(new_id, 1);
-    } else {
-      ESP_LOGW(TAG, "No free user IDs available for local enrollment");
-      sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
-                               SDF_SERVICES_LED_COLOR_RED, 3);
-      if (xSemaphoreTake(s_state.lock,
-                         pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-        sdf_enrollment_sm_init(&s_state.enrollment);
-        xSemaphoreGive(s_state.lock);
-      }
-    }
   } else {
-    ESP_LOGW(TAG, "WAIT_ADMIN match permission %u != ADMIN(3), rejecting.",
+    ESP_LOGW(TAG, "Admin auth match permission %u != ADMIN(3), rejecting.",
              (unsigned)match.permission);
     sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
                              SDF_SERVICES_LED_COLOR_RED, 2);
@@ -614,51 +707,39 @@ static void sdf_services_task(void *arg) {
 #endif
     uint32_t poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
     int64_t now_us = esp_timer_get_time();
-    bool is_wait_admin = false;
+    bool is_pending_admin_action = false;
 
     if (xSemaphoreTake(s_state.lock,
                        pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
       poll_interval_ms = s_state.config.match_poll_interval_ms;
-      if (s_state.config.enrollment_btn_gpio >= 0) {
-        int btn_level = gpio_get_level(s_state.config.enrollment_btn_gpio);
-        if (btn_level == 0) {
-          if (s_state.enrollment_btn_press_start_us == 0) {
-            s_state.enrollment_btn_press_start_us = now_us;
-          } else if ((now_us - s_state.enrollment_btn_press_start_us) >
-                         3000000LL &&
-                     s_state.enrollment.state !=
-                         SDF_ENROLLMENT_STATE_WAIT_ADMIN &&
-                     !sdf_enrollment_sm_is_active(&s_state.enrollment) &&
-                     !s_state.enrollment_request_pending) {
-            ESP_LOGI(
-                TAG,
-                "Hardware enrollment button held for 3s, entering WAIT_ADMIN");
-            sdf_enrollment_sm_init(&s_state.enrollment);
-            s_state.enrollment.state = SDF_ENROLLMENT_STATE_WAIT_ADMIN;
-            s_state.enrollment_btn_press_start_us = now_us;
 
-            xSemaphoreGive(s_state.lock);
-            sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
-                                     SDF_SERVICES_LED_COLOR_BLUE, 3);
-            if (xSemaphoreTake(s_state.lock,
-                               pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-                pdTRUE) {
-              // best effort
-            }
+      // Check for config button timeout
+      if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE &&
+          s_state.pending_admin_action_start_us > 0) {
+        if ((now_us - s_state.pending_admin_action_start_us) > 10000000LL) {
+          ESP_LOGW(TAG, "Admin Action Timeout. Resetting state.");
+          s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+          s_state.pending_admin_action_start_us = 0;
+          xSemaphoreGive(s_state.lock);
+          sdf_services_try_set_led(SDF_SERVICES_LED_MODE_FLASH,
+                                   SDF_SERVICES_LED_COLOR_RED, 3);
+          if (xSemaphoreTake(s_state.lock,
+                             pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
+              pdTRUE) {
+            // best effort
           }
-        } else {
-          s_state.enrollment_btn_press_start_us = 0;
         }
       }
-      is_wait_admin =
-          (s_state.enrollment.state == SDF_ENROLLMENT_STATE_WAIT_ADMIN);
+
+      is_pending_admin_action =
+          (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE);
       xSemaphoreGive(s_state.lock);
     }
 
     sdf_services_start_pending_enrollment_if_any();
 
-    if (is_wait_admin) {
-      sdf_services_run_wait_admin_cycle();
+    if (is_pending_admin_action) {
+      sdf_services_run_admin_auth_cycle();
     } else {
       sdf_services_run_enrollment_step();
       sdf_services_run_match_cycle();
@@ -793,20 +874,41 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
     }
   }
 
+#ifndef CONFIG_IDF_TARGET_LINUX
   if (config->enrollment_btn_gpio >= 0) {
-    gpio_config_t btn_config = {
-        .pin_bit_mask = (1ULL << config->enrollment_btn_gpio),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
+    button_config_t btn_config = {
+        .long_press_time = 3000,
+        .short_press_time = 180,
     };
-    err = gpio_config(&btn_config);
-    if (err != ESP_OK) {
-      ESP_LOGW(TAG, "Failed to configure enrollment btn GPIO: %s",
-               esp_err_to_name(err));
+    button_gpio_config_t gpio_config = {
+        .gpio_num = config->enrollment_btn_gpio,
+        .active_level = 0,
+        .enable_power_save = false,
+        .disable_pull = false,
+    };
+    if (iot_button_new_gpio_device(&btn_config, &gpio_config,
+                                   &s_state.btn_handle) == ESP_OK) {
+      iot_button_register_cb(s_state.btn_handle, BUTTON_SINGLE_CLICK, NULL,
+                             sdf_services_btn_cb,
+                             (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL);
+      iot_button_register_cb(s_state.btn_handle, BUTTON_DOUBLE_CLICK, NULL,
+                             sdf_services_btn_cb,
+                             (void *)SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
+
+      button_event_args_t arg_3s = {.long_press = {.press_time = 3000}};
+      iot_button_register_cb(s_state.btn_handle, BUTTON_LONG_PRESS_START,
+                             &arg_3s, sdf_services_btn_cb,
+                             (void *)SDF_SERVICES_ADMIN_ACTION_ZB_JOIN);
+
+      button_event_args_t arg_8s = {.long_press = {.press_time = 8000}};
+      iot_button_register_cb(s_state.btn_handle, BUTTON_LONG_PRESS_START,
+                             &arg_8s, sdf_services_btn_cb,
+                             (void *)SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
+    } else {
+      ESP_LOGW(TAG, "Failed to create enrollment iot_button");
     }
   }
+#endif
 
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
       pdTRUE) {

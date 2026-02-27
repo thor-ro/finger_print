@@ -11,7 +11,7 @@ extern void test_enrollment_sm_user_occupied(void);
 extern void test_enrollment_sm_is_active_idle(void);
 extern void test_enrollment_sm_is_active_steps(void);
 extern void test_enrollment_sm_is_active_error(void);
-extern void test_enrollment_sm_is_active_wait_admin(void);
+
 extern void test_enrollment_sm_current_step(void);
 extern void test_enrollment_sm_current_command(void);
 extern void test_enrollment_sm_reset(void);
@@ -146,7 +146,7 @@ void app_main(void) {
   RUN_TEST(test_enrollment_sm_is_active_idle);
   RUN_TEST(test_enrollment_sm_is_active_steps);
   RUN_TEST(test_enrollment_sm_is_active_error);
-  RUN_TEST(test_enrollment_sm_is_active_wait_admin);
+
   RUN_TEST(test_enrollment_sm_current_step);
   RUN_TEST(test_enrollment_sm_current_command);
   RUN_TEST(test_enrollment_sm_reset);
