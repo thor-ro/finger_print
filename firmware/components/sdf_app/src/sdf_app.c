@@ -387,6 +387,11 @@ static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
     return SDF_NUKI_RESULT_ERR_NO_KEY;
   }
 
+  int percent = sdf_drivers_battery_get_percent();
+  if (percent <= 20) {
+    sdf_services_trigger_low_battery_warning();
+  }
+
   ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting unlock",
            (unsigned)user_id);
   return sdf_app_lock_action(SDF_LOCK_ACTION_UNLOCK, 0);

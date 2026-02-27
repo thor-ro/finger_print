@@ -82,4 +82,6 @@ esp_err_t sdf_services_clear_all_users(void);
 esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
                                    size_t *count, size_t max_count);
 
+void sdf_services_trigger_low_battery_warning(void);
+
 #endif /* SDF_SERVICES_H */
