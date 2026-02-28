@@ -64,3 +64,12 @@ Buttom:
 | 23 | GPIO23, SPI, I2C, I2S, PWM, UART |  |
 | 12 | GPIO12, SPI, I2C, I2S, PWM, UART |  |
 | 13 | GPIO13, SPI, I2C, I2S, PWM, UART |  |
+
+## Battery Holder
+
+Prepared for 2x AA batteries.
+Dimensions: 6,50 cm × 2,30 cm × 3,40 cm
+
+## Fingerprint Sensor
+
+Diameter: 1,92 cm

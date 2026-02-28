@@ -1,4 +1,4 @@
-set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage sdf_power sdf_protocol_zigbee nvs_flash esp_partition sdf_app mbedtls)
+set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage sdf_power sdf_protocol_zigbee nvs_flash esp_partition sdf_app sdf_cli mbedtls)
 
 idf_component_register(
     SRCS "test_runner_main.c"
@@ -15,6 +15,7 @@ idf_component_register(
          "../../components/sdf_protocol_ble/test/test_nuki_crypto.c"
          "../../components/sdf_protocol_ble/test/test_nuki_pairing.c"
          "../../components/sdf_protocol_ble/test/test_protocol_ble.c"
+         "../../components/sdf_cli/test/test_sdf_cli.c"
     INCLUDE_DIRS "."
                  "../../components/sdf_app/include"
     REQUIRES ${test_reqs}
