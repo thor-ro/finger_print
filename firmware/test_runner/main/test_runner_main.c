@@ -240,6 +240,30 @@ void app_main(void) {
   RUN_TEST(test_pairing_handle_unencrypted_overflow_protection);
   RUN_TEST(test_pairing_handle_encrypted_null_args);
 
+  // sdf_protocol_ble (Nuki) tests:
+  // (Assuming these are handled elsewhere, or were incorrectly added in my
+  // previous step, removing invalid macro)
+
+  // sdf_cli tests
+  extern void test_sdf_cli_initial_state_is_unauthenticated(void);
+  extern void test_sdf_cli_can_authenticate_and_logout(void);
+
+  // Mapped from test names in test_sdf_cli.c:
+  // TEST_CASE("sdf_cli initial state is unauthenticated", "[sdf_cli]")
+  // TEST_CASE("sdf_cli can authenticate and logout", "[sdf_cli]")
+  // Note: esp-idf unity translates TEST_CASE macro to a function name. But we
+  // can just use unity's RUN_TEST directly if we wrap them properly, or include
+  // unity_fixture.h. Actually, ESP-IDF uses `unity_run_menu()` or similar to
+  // run all `TEST_CASE`s automatically when building test apps, but this is a
+  // custom linux test runner using standard Unity. Let me just manually declare
+  // the functions for the tests I created. Wait, ESP-IDF's TEST_CASE macro in
+  // `unity.h` registers them in a linker section. Let me replace the
+  // RUN_TEST_SUITE call with a call to `unity_run_menu` to run all registered
+  // tests, or I can just rename my tests to standard void functions.
+  RUN_TEST(test_sdf_cli_initial_state_is_unauthenticated);
+  RUN_TEST(test_sdf_cli_can_authenticate_and_logout);
+
+  printf("\n-----------------------\n");
   /* Protocol BLE tests */
   RUN_TEST(test_client_init_success);
   RUN_TEST(test_client_init_null_args);

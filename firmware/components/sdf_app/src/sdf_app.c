@@ -19,6 +19,7 @@
 #else
 #include "sdf_app_mock_linux.inc"
 #endif
+#include "sdf_cli.h"
 #include "sdf_drivers.h"
 #include "sdf_power.h"
 #include "sdf_protocol_ble.h"
@@ -1152,6 +1153,11 @@ void sdf_app_init(void) {
   err = sdf_power_init_power_manager(&power_cfg);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to start power manager: %s", esp_err_to_name(err));
+  }
+
+  err = sdf_cli_init();
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to initialize CLI: %s", esp_err_to_name(err));
   }
 
   sdf_power_mark_activity();

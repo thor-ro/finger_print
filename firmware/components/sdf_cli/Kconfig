@@ -1,0 +1,9 @@
+menu "SDF CLI Configuration"
+
+    config SDF_CLI_PASSWORD
+        string "CLI Login Password"
+        default "admin123"
+        help
+            The password required to access the USB-C Command Line Interface.
+
+endmenu
