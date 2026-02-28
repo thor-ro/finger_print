@@ -3,6 +3,7 @@
 ## ESP32-C6
 
 In this project the Waveshare ESP32-C6 mini module is used.
+Wiki: https://www.waveshare.com/wiki/ESP32-C6-Zero
 
 ### Features
 - Adopts ESP32-C6FH4 chip, with RISC-V 32-bit single-core processor, support up to 160 MHz.
