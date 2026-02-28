@@ -59,7 +59,7 @@ void sdf_cli_logout(void) {
  * executes. A cleaner way for keystrokes is not strictly necessary if typing a
  * command takes < 2 mins. We will reset timer on any command execution.
  */
-static void cli_reset_timer(void) {
+static void __attribute__((unused)) cli_reset_timer(void) {
   if (s_is_authenticated && s_idle_timer) {
     xTimerReset(s_idle_timer, pdMS_TO_TICKS(10));
   }
@@ -150,7 +150,7 @@ esp_err_t sdf_cli_init(void) {
 
 #ifndef CONFIG_IDF_TARGET_LINUX
   // Start REPL task
-  esp_err_t err = esp_console_start_repl(repl);
+  err = esp_console_start_repl(repl);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to start standard REPL");
     return err;

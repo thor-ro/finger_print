@@ -11,6 +11,10 @@
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 
 #include "esp_zigbee_core.h"
 #include "esp_zigbee_ota.h"
@@ -19,6 +23,7 @@
 #include "zcl/esp_zigbee_zcl_command.h"
 #include "zcl/esp_zigbee_zcl_diagnostics.h"
 #include "zcl/esp_zigbee_zcl_door_lock.h"
+#include "zcl/esp_zigbee_zcl_ota.h"
 #include "zcl/esp_zigbee_zcl_power_config.h"
 
 #define SDF_ZIGBEE_ENDPOINT 1
@@ -71,6 +76,10 @@ static sdf_protocol_zigbee_state_t s_state = {
     .checkin_interval_ms = SDF_ZIGBEE_CHECKIN_INTERVAL_DEFAULT_MS,
 };
 
+static esp_ota_handle_t s_ota_handle = 0;
+static const esp_partition_t *s_ota_partition = NULL;
+static bool s_tagid_received = false;
+
 static void sdf_zigbee_start_commissioning_cb(uint8_t mode_mask) {
   esp_err_t err = esp_zb_bdb_start_top_level_commissioning(mode_mask);
   if (err != ESP_OK) {
@@ -113,9 +122,9 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
         ESP_LOGI(TAG, "Start network steering");
         esp_zb_bdb_start_top_level_commissioning(
             ESP_ZB_BDB_MODE_NETWORK_STEERING);
-      } else {
-        sdf_zigbee_set_network_joined(true);
         ESP_LOGI(TAG, "Device rebooted and using existing network");
+        esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
+                                                     1440); // 24 hours
       }
     } else {
       ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status=%s)",
@@ -136,6 +145,9 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
                extended_pan_id[4], extended_pan_id[3], extended_pan_id[2],
                extended_pan_id[1], extended_pan_id[0], esp_zb_get_pan_id(),
                esp_zb_get_current_channel(), esp_zb_get_short_address());
+
+      esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
+                                                   1440); // 24 hours
     } else {
       sdf_zigbee_set_network_joined(false);
       ESP_LOGW(TAG, "Network steering failed (status=%s), scheduling retry",
@@ -547,6 +559,142 @@ static void sdf_zigbee_register_privilege_commands(void) {
   }
 }
 
+static esp_err_t sdf_zigbee_parse_ota_data(uint32_t total_size,
+                                           const void *payload,
+                                           uint16_t payload_size, void **outbuf,
+                                           uint16_t *outlen) {
+  static uint16_t tagid = 0;
+  void *data_buf = NULL;
+  uint16_t data_len;
+
+  if (!s_tagid_received) {
+    uint32_t length = 0;
+    if (!payload || payload_size <= 6) { /* OTA_ELEMENT_HEADER_LEN = 6 */
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    tagid = *(const uint16_t *)payload;
+    length = *(const uint32_t *)(payload + sizeof(tagid));
+    if ((length + 6) != total_size) {
+      return ESP_ERR_INVALID_ARG;
+    }
+
+    s_tagid_received = true;
+
+    data_buf = (void *)(payload + 6);
+    data_len = payload_size - 6;
+  } else {
+    data_buf = (void *)payload;
+    data_len = payload_size;
+  }
+
+  // UPGRADE_IMAGE tag ID is 0x0000
+  if (tagid == 0x0000) {
+    *outbuf = data_buf;
+    *outlen = data_len;
+  } else {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  return ESP_OK;
+}
+
+static esp_err_t sdf_zigbee_ota_upgrade_status_handler(
+    const esp_zb_zcl_ota_upgrade_value_message_t *message) {
+  static uint32_t total_size = 0;
+  static uint32_t offset = 0;
+  static int64_t start_time = 0;
+  esp_err_t ret = ESP_OK;
+
+  if (message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS) {
+    switch (message->upgrade_status) {
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
+      ESP_LOGI(TAG, "OTA upgrade start");
+      start_time = esp_timer_get_time();
+      s_ota_partition = esp_ota_get_next_update_partition(NULL);
+      if (s_ota_partition == NULL) {
+        return ESP_FAIL;
+      }
+      ret = esp_ota_begin(s_ota_partition, 0, &s_ota_handle);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to begin OTA partition, status: %s",
+                 esp_err_to_name(ret));
+      }
+      break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE:
+      total_size = message->ota_header.image_size;
+      offset += message->payload_size;
+      if (message->payload_size && message->payload) {
+        uint16_t payload_size = 0;
+        void *payload = NULL;
+        ret = sdf_zigbee_parse_ota_data(total_size, message->payload,
+                                        message->payload_size, &payload,
+                                        &payload_size);
+        if (ret == ESP_OK) {
+          ret =
+              esp_ota_write(s_ota_handle, (const void *)payload, payload_size);
+          if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to write OTA data, status: %s",
+                     esp_err_to_name(ret));
+          }
+        }
+      }
+      break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_APPLY:
+      ESP_LOGI(TAG, "OTA upgrade apply");
+      break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
+      ret = offset == total_size ? ESP_OK : ESP_FAIL;
+      offset = 0;
+      total_size = 0;
+      s_tagid_received = false;
+      ESP_LOGI(TAG, "OTA upgrade check status: %s", esp_err_to_name(ret));
+      break;
+
+    case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
+      ESP_LOGI(TAG, "OTA Finish");
+      ESP_LOGI(TAG,
+               "OTA Information: version: 0x%lx, manufacturer code: 0x%x, "
+               "image type: 0x%x, total size: %lu bytes, cost time: %lld ms",
+               message->ota_header.file_version,
+               message->ota_header.manufacturer_code,
+               message->ota_header.image_type, message->ota_header.image_size,
+               (esp_timer_get_time() - start_time) / 1000);
+      ret = esp_ota_end(s_ota_handle);
+      if (ret == ESP_OK) {
+        ret = esp_ota_set_boot_partition(s_ota_partition);
+        if (ret == ESP_OK) {
+          ESP_LOGW(TAG, "Prepare to restart system for OTA update");
+          esp_restart();
+        }
+      }
+      break;
+
+    default:
+      ESP_LOGD(TAG, "OTA status: %d", message->upgrade_status);
+      break;
+    }
+  }
+  return ret;
+}
+
+static esp_err_t sdf_zigbee_ota_upgrade_query_image_resp_handler(
+    const esp_zb_zcl_ota_upgrade_query_image_resp_message_t *message) {
+  if (message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS) {
+    ESP_LOGI(TAG, "Queried OTA image from address: 0x%04hx, endpoint: %d",
+             message->server_addr.u.short_addr, message->server_endpoint);
+    ESP_LOGI(TAG,
+             "Approving OTA Image version: 0x%lx, manufacturer code: 0x%x, "
+             "image size: %lu",
+             message->file_version, message->manufacturer_code,
+             message->image_size);
+  }
+  return ESP_OK;
+}
+
 static esp_err_t
 sdf_zigbee_action_handler(esp_zb_core_action_callback_id_t callback_id,
                           const void *message) {
@@ -557,6 +705,12 @@ sdf_zigbee_action_handler(esp_zb_core_action_callback_id_t callback_id,
   case ESP_ZB_CORE_CMD_PRIVILEGE_COMMAND_REQ_CB_ID:
     return sdf_zigbee_handle_privilege_command(
         (const esp_zb_zcl_privilege_command_message_t *)message);
+  case ESP_ZB_CORE_OTA_UPGRADE_VALUE_CB_ID:
+    return sdf_zigbee_ota_upgrade_status_handler(
+        (const esp_zb_zcl_ota_upgrade_value_message_t *)message);
+  case ESP_ZB_CORE_OTA_UPGRADE_QUERY_IMAGE_RESP_CB_ID:
+    return sdf_zigbee_ota_upgrade_query_image_resp_handler(
+        (const esp_zb_zcl_ota_upgrade_query_image_resp_message_t *)message);
   default:
     ESP_LOGD(TAG, "Unhandled Zigbee callback id=0x%04X", (unsigned)callback_id);
     return ESP_OK;
@@ -623,7 +777,8 @@ static esp_err_t sdf_zigbee_register_endpoint(void) {
                                             ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
   ESP_RETURN_ON_ERROR(err, TAG, "Failed to add OTA cluster");
 
-  esp_zb_diagnostics_cluster_cfg_t diag_cfg = {0};
+  esp_zb_diagnostics_cluster_cfg_t diag_cfg;
+  memset(&diag_cfg, 0, sizeof(diag_cfg));
   esp_zb_attribute_list_t *diag_cluster =
       esp_zb_diagnostics_cluster_create(&diag_cfg);
   ESP_RETURN_ON_FALSE(diag_cluster != NULL, ESP_ERR_NO_MEM, TAG,

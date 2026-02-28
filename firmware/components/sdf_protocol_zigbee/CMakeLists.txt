@@ -1,6 +1,6 @@
 set(zg_priv_reqs "")
 if(NOT IDF_TARGET STREQUAL "linux")
-    list(APPEND zg_priv_reqs espressif__esp-zigbee-lib)
+    list(APPEND zg_priv_reqs espressif__esp-zigbee-lib app_update esp_timer spi_flash)
 endif()
 
 idf_component_register(
