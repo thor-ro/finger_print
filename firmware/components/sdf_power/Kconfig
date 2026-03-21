@@ -45,21 +45,21 @@ config SDF_POWER_BATTERY_DEFAULT_PERCENT
 config SDF_POWER_FP_WAKE_GPIO
     int "Fingerprint WAKE GPIO"
     range -1 30
-    default 6
+    default 3
     help
         GPIO used as fingerprint wake source. Set to -1 to disable GPIO wake.
 
 config SDF_POWER_FP_EN_GPIO
     int "Fingerprint Power Enable GPIO"
     range -1 30
-    default 7
+    default 2
     help
         GPIO used to enable/disable power to the fingerprint sensor. Set to -1 to disable.
 
 config SDF_ENROLLMENT_BTN_GPIO
     int "Enrollment Button GPIO"
     range -1 30
-    default 9
+    default 14
     help
         GPIO used for the local hardware enrollment button. Set to -1 to disable.
 

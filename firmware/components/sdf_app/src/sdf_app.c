@@ -19,8 +19,9 @@
 #else
 #include "sdf_app_mock_linux.inc"
 #endif
+#include "battery.h"
+#include "led.h"
 #include "sdf_cli.h"
-#include "sdf_drivers.h"
 #include "sdf_power.h"
 #include "sdf_protocol_ble.h"
 #include "sdf_protocol_zigbee.h"
@@ -347,25 +348,30 @@ static void sdf_app_on_admin_action(void *ctx,
                                       SDF_APP_NAME);
       if (res == SDF_NUKI_RESULT_OK) {
         s_pairing_active = true;
+        led_rapid_yellow();
         res = sdf_nuki_pairing_start(&s_pairing);
         if (res != SDF_NUKI_RESULT_OK) {
           ESP_LOGE(TAG, "Pairing start failed: %d", res);
           sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 1);
           s_pairing_active = false;
+          led_flash_red();
         }
       } else {
         ESP_LOGE(TAG, "Pairing init failed: %d", res);
         sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 0);
+        led_flash_red();
       }
     } else {
       ESP_LOGW(
           TAG,
           "Cannot start Nuki pairing: already have creds or BLE not ready");
+      led_flash_red();
     }
     break;
 
   case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
     ESP_LOGI(TAG, "Admin authorized Zigbee Join");
+    led_rapid_purple();
     sdf_protocol_zigbee_permit_join();
     break;
 
@@ -407,11 +413,14 @@ static void sdf_app_on_enrollment_state(void *ctx,
     return;
   }
 
+  uint8_t current_step = sdf_enrollment_sm_current_step(state);
+  uint8_t current_cmd = sdf_enrollment_sm_current_command(state);
   ESP_LOGI(TAG,
-           "Enrollment user_id=%u permission=%u state=%s completed_steps=%u "
-           "result=%s",
+           "Enrollment user_id=%u permission=%u state=%s current_step=%u "
+           "current_cmd=0x%02X completed_steps=%u result=%s",
            (unsigned)state->user_id, (unsigned)state->permission,
-           sdf_app_enrollment_state_name(state->state),
+           sdf_app_enrollment_state_name(state->state), (unsigned)current_step,
+           (unsigned)current_cmd,
            (unsigned)state->completed_steps,
            sdf_app_enrollment_result_name(state->result));
 
@@ -917,6 +926,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
           pairing_res != SDF_NUKI_RESULT_ERR_INCOMPLETE) {
         ESP_LOGW(TAG, "Pairing GDIO handling failed: %d", pairing_res);
         sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, pairing_res, 2);
+        led_flash_red();
       }
     }
     return;
@@ -928,6 +938,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
         pairing_res != SDF_NUKI_RESULT_ERR_INCOMPLETE) {
       ESP_LOGW(TAG, "Pairing USDIO handling failed: %d", pairing_res);
       sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, pairing_res, 3);
+      led_flash_red();
     }
 
     if (s_pairing.state == SDF_NUKI_PAIRING_COMPLETE) {
@@ -946,6 +957,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
           sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 1);
         }
         ESP_LOGI(TAG, "Pairing complete; credentials stored");
+        led_solid_green();
         int res = sdf_app_request_keyturner_state();
         if (res != SDF_NUKI_RESULT_OK) {
           ESP_LOGW(TAG, "Post-pair keyturner state request failed: %d", res);
@@ -998,10 +1010,6 @@ void sdf_app_init(void) {
     sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 0);
   }
 
-  err = sdf_drivers_battery_adc_init(SDF_APP_BATTERY_ADC_GPIO);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Battery ADC init failed: %s", esp_err_to_name(err));
-  }
 
 #ifndef CONFIG_IDF_TARGET_LINUX
   esp_task_wdt_config_t twdt_config = {
@@ -1074,6 +1082,7 @@ void sdf_app_init(void) {
   services_cfg.power_en_gpio = SDF_APP_FP_POWER_EN_GPIO;
   services_cfg.enrollment_btn_gpio = SDF_APP_ENROLLMENT_BTN_GPIO;
   services_cfg.ws2812_led_gpio = SDF_APP_WS2812_LED_GPIO;
+  services_cfg.battery_adc_pin = SDF_APP_BATTERY_ADC_GPIO;
 
   err = sdf_services_init(&services_cfg);
   if (err != ESP_OK) {

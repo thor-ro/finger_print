@@ -13,6 +13,10 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#ifndef CONFIG_IDF_TARGET_LINUX
+#include "driver/usb_serial_jtag.h"
+#endif
+
 #include "sdf_protocol_zigbee.h"
 
 #ifdef SDF_POWER_TESTING
@@ -113,19 +117,7 @@ static esp_err_t sdf_power_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
   }
 
 #ifndef CONFIG_IDF_TARGET_LINUX
-  gpio_config_t io_config = {
-      .pin_bit_mask = (1ULL << wake_gpio),
-      .mode = GPIO_MODE_INPUT,
-      .pull_up_en = GPIO_PULLUP_DISABLE,
-      .pull_down_en = GPIO_PULLDOWN_DISABLE,
-      .intr_type = GPIO_INTR_DISABLE,
-  };
-  esp_err_t err = gpio_config(&io_config);
-  if (err != ESP_OK) {
-    return err;
-  }
-
-  err = gpio_wakeup_enable(wake_gpio, GPIO_INTR_HIGH_LEVEL);
+  esp_err_t err = gpio_wakeup_enable(wake_gpio, GPIO_INTR_HIGH_LEVEL);
   if (err != ESP_OK) {
     return err;
   }
@@ -141,8 +133,7 @@ static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
     return;
   }
 
-  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_timer_wakeup((uint64_t)config->checkin_interval_ms *
                                 1000ULL);
 
@@ -253,12 +244,17 @@ static void sdf_power_task(void *arg) {
       allow_sleep = false;
     }
 
+#ifndef CONFIG_IDF_TARGET_LINUX
+    if (allow_sleep && usb_serial_jtag_is_connected()) {
+      allow_sleep = false;
+    }
+#endif
+
     if (allow_sleep) {
       if (config_snapshot.enable_deep_sleep_fallback &&
           !sdf_protocol_zigbee_is_ready()) {
         ESP_LOGI(TAG, "Entering deep sleep (Zigbee not joined)");
-        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_TIMER);
-        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
         if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio)) {
 #ifndef CONFIG_IDF_TARGET_LINUX
@@ -359,8 +355,7 @@ sdf_power_init_power_manager(const sdf_power_manager_config_t *config) {
     return zigbee_cfg_err;
   }
   if (zigbee_cfg_err == ESP_ERR_INVALID_STATE) {
-    ESP_LOGW(TAG, "Zigbee check-in update ignored because Zigbee stack is "
-                  "already running");
+    ESP_LOGD(TAG, "Zigbee check-in update ignored (stack already running)");
   }
 
   BaseType_t task_ok =

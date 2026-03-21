@@ -6,7 +6,7 @@
 
 #include "esp_err.h"
 
-#include "sdf_drivers.h"
+#include "fingerprint.h"
 
 typedef enum {
   SDF_ENROLLMENT_STATE_IDLE = 0,

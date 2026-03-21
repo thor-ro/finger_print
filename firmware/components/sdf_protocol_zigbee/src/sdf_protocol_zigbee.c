@@ -773,6 +773,18 @@ static esp_err_t sdf_zigbee_register_endpoint(void) {
   esp_zb_attribute_list_t *ota_cluster = esp_zb_ota_cluster_create(&ota_cfg);
   ESP_RETURN_ON_FALSE(ota_cluster != NULL, ESP_ERR_NO_MEM, TAG,
                       "Failed to create OTA cluster");
+  /* The ZBOSS stack requires the OTA client variable attribute
+   * (ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID) to be present.
+   * Without it, zcl_ota_upgrade_commands.c asserts during init. */
+  static esp_zb_zcl_ota_upgrade_client_variable_t s_ota_client_var = {
+      .timer_query = 24 * 60,  /* query interval in minutes (24h) */
+      .hw_version = 0x0001,
+      .max_data_size = 64,
+  };
+  err = esp_zb_ota_cluster_add_attr(
+      ota_cluster, ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID,
+      &s_ota_client_var);
+  ESP_RETURN_ON_ERROR(err, TAG, "Failed to add OTA client data attribute");
   err = esp_zb_cluster_list_add_ota_cluster(cluster_list, ota_cluster,
                                             ESP_ZB_ZCL_CLUSTER_CLIENT_ROLE);
   ESP_RETURN_ON_ERROR(err, TAG, "Failed to add OTA cluster");
