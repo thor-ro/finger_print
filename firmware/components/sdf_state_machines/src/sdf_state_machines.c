@@ -144,6 +144,14 @@ void sdf_enrollment_sm_apply_step_result(
     return;
   }
 
+  // A generic OP_FAILED (ACK_FAIL 0x01) usually means the user has not lifted
+  // their finger from the previous step, or it was a bad scan. We ignore it
+  // and keep the state machine active on the same step so the polling loop
+  // naturally retries until success or timeout.
+  if (step_result == SDF_FINGERPRINT_OP_FAILED) {
+    return;
+  }
+
   sm->state = SDF_ENROLLMENT_STATE_ERROR;
   sm->result = sdf_enrollment_result_from_driver(step_result);
 }

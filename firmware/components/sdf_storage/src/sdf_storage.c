@@ -56,8 +56,17 @@ static esp_err_t sdf_storage_validate_security_policy(void) {
   }
 
   if (read_err == ESP_ERR_NVS_KEYS_NOT_INITIALIZED ||
-      read_err == ESP_ERR_NVS_CORRUPT_KEY_PART ||
-      read_err == ESP_ERR_NVS_WRONG_ENCRYPTION) {
+      read_err == ESP_ERR_NVS_CORRUPT_KEY_PART) {
+    ESP_LOGI(TAG, "NVS key partition empty/corrupt, generating keys");
+    esp_partition_erase_range(keys_partition, 0, keys_partition->size);
+    read_err = nvs_flash_generate_keys(keys_partition, &cfg);
+    if (read_err == ESP_OK) {
+      s_security_status.nvs_keys_accessible = true;
+      return ESP_OK;
+    }
+  }
+
+  if (read_err == ESP_ERR_NVS_WRONG_ENCRYPTION) {
     ESP_LOGW(
         TAG,
         "NVS key partition present, but key config is not readable yet: %s",

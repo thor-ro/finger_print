@@ -117,7 +117,7 @@ void test_enrollment_sm_is_active_error(void) {
   sdf_enrollment_sm_t sm;
   sdf_enrollment_sm_init(&sm);
   sdf_enrollment_sm_start(&sm, 1, 1);
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_PROTOCOL_ERROR);
   TEST_ASSERT_FALSE(sdf_enrollment_sm_is_active(&sm));
 }
 
@@ -285,4 +285,15 @@ void test_enrollment_sm_finger_occupied(void) {
   sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FINGER_OCCUPIED);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_RESULT_FINGER_OCCUPIED, sm.result);
+}
+
+void test_enrollment_sm_ignore_failed(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 1, 1);
+  
+  // Apply a generic failure (should ignore and keep active on Step 1)
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_1, sm.state);
 }

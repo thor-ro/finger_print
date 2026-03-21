@@ -12,7 +12,7 @@
 #endif
 #include "esp_err.h"
 
-#include "sdf_drivers.h"
+#include "fingerprint.h"
 #include "sdf_state_machines.h"
 
 typedef int (*sdf_services_unlock_cb)(void *ctx, uint16_t user_id);
@@ -66,6 +66,7 @@ typedef struct {
   gpio_num_t power_en_gpio;
   gpio_num_t enrollment_btn_gpio;
   gpio_num_t ws2812_led_gpio;
+  int battery_adc_pin;
 } sdf_services_config_t;
 
 void sdf_services_get_default_config(sdf_services_config_t *config);

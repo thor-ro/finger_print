@@ -9,17 +9,17 @@ The following table describes the wiring of the Waveshare ESP32-C6 mini module t
 | 3.3V         | 3.3V         | Fingerprint 3.3V| 3.3V Power (Output) |
 | 0            | GPIO0        | Battery ADC    | Voltage divider (1MΩ / 1MΩ) for battery reading |
 | 1            | GPIO1        |                | |
-| 2            | GPIO2        |                | |
-| 3            | GPIO3        |                | |
+| 2            | GPIO2        | Fingerprint EN | Power Enable / High = Active, Low = Sleep |
+| 3            | GPIO3        | Fingerprint Wake| Capacitive touch wake signal |
 | 4            | GPIO4        | Fingerprint RX | UART TX (Data to sensor) |
 | 5            | GPIO5        | Fingerprint TX | UART RX (Data from sensor) |
-| 6            | GPIO6        | Fingerprint Wake| Capacitive touch wake signal |
-| 7            | GPIO7        | Fingerprint EN | Power Enable / High = Active, Low = Sleep |
+| 6            | GPIO6        |                | |
+| 7            | GPIO7        |                | |
 | 8            | GPIO8        |                | WS2812 RGB LED (onboard) |
-| 9            | GPIO9        | BOOT Button    | Local Enrollment Button (Active Low) |
+| 9            | GPIO9        |                | |
 | 12           | GPIO12       |                | |
 | 13           | GPIO13       |                | |
-| 14           | GPIO14       |                | |
+| 14           | GPIO14       | Push Button    | Local Enrollment Button (Active Low) |
 | 15           | GPIO15       |                | |
 | 18           | GPIO18       |                | |
 | 19           | GPIO19       |                | |
