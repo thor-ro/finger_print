@@ -2,6 +2,7 @@
 #include "sdf_drivers.h"
 #include "sdf_lock_guard.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #ifdef CONFIG_IDF_TARGET_LINUX
@@ -189,6 +190,62 @@ sdf_services_notify_security_event(const sdf_services_security_event_t *event) {
 
   if (cb != NULL) {
     cb(ctx, event);
+  }
+}
+
+static void sdf_services_execute_admin_action(
+    sdf_services_admin_action_t action,
+    sdf_services_admin_action_cb action_cb, void *action_ctx) {
+  ESP_LOGI(TAG, "Authorized action %d!", (int)action);
+
+  if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
+    const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
+    uint16_t *users = calloc(max_users, sizeof(*users));
+    uint8_t *perms = calloc(max_users, sizeof(*perms));
+    size_t count = 0;
+    uint16_t new_id = 0;
+    esp_err_t err = ESP_OK;
+
+    if (users == NULL || perms == NULL) {
+      ESP_LOGE(TAG, "Failed to allocate admin enrollment query buffers");
+    } else {
+      err = sdf_services_query_users(users, perms, &count, max_users);
+      if (err == ESP_OK) {
+        for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
+          bool in_use = false;
+          for (size_t i = 0; i < count; i++) {
+            if (users[i] == id) {
+              in_use = true;
+              break;
+            }
+          }
+          if (!in_use) {
+            new_id = id;
+            break;
+          }
+        }
+      } else {
+        ESP_LOGW(TAG, "Failed to query users for local enrollment: %s",
+                 esp_err_to_name(err));
+      }
+    }
+
+    free(perms);
+    free(users);
+
+    if (new_id > 0) {
+      sdf_services_request_enrollment(new_id, 1);
+    } else {
+      if (err == ESP_OK) {
+        ESP_LOGW(TAG, "No free user IDs available for local enrollment");
+      }
+      led_flash_red();
+    }
+    return;
+  }
+
+  if (action_cb != NULL) {
+    action_cb(action_ctx, action);
   }
 }
 
@@ -419,6 +476,46 @@ static void sdf_services_run_match_cycle(void) {
 
   ESP_LOGI(TAG, "Fingerprint match user_id=%u permission=%u",
            (unsigned)match.user_id, (unsigned)match.permission);
+
+  sdf_services_admin_action_t pending_action =
+      SDF_SERVICES_ADMIN_ACTION_NONE;
+  sdf_services_admin_action_cb pending_action_cb = NULL;
+  void *pending_action_ctx = NULL;
+  bool has_pending_admin_action = false;
+  bool claimed_pending_admin_action = false;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
+      pdTRUE) {
+    has_pending_admin_action =
+        (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE);
+    if (has_pending_admin_action && match.permission == 3) {
+      pending_action = s_state.pending_admin_action;
+      pending_action_cb = s_state.config.admin_action_cb;
+      pending_action_ctx = s_state.config.admin_action_ctx;
+      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+      s_state.pending_admin_action_start_us = 0;
+      claimed_pending_admin_action = true;
+    }
+    xSemaphoreGive(s_state.lock);
+  }
+
+  if (has_pending_admin_action) {
+    if (claimed_pending_admin_action) {
+      ESP_LOGI(TAG,
+               "Pending admin action %d consumed by user_id=%u permission=%u",
+               (int)pending_action, (unsigned)match.user_id,
+               (unsigned)match.permission);
+      sdf_services_execute_admin_action(pending_action, pending_action_cb,
+                                        pending_action_ctx);
+    } else {
+      ESP_LOGW(TAG,
+               "Ignoring normal unlock for user_id=%u permission=%u while "
+               "admin action is pending",
+               (unsigned)match.user_id, (unsigned)match.permission);
+      led_flash_red();
+    }
+    return;
+  }
+
   int unlock_result = unlock_cb(unlock_ctx, match.user_id);
   if (unlock_result != 0) {
     ESP_LOGW(TAG, "Unlock callback returned %d for user_id=%u", unlock_result,
@@ -652,41 +749,7 @@ static void sdf_services_run_admin_auth_cycle(void) {
       s_state.pending_admin_action_start_us = 0;
       xSemaphoreGive(s_state.lock);
 
-      ESP_LOGI(TAG, "Authorized action %d!", (int)action);
-
-      if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
-        uint16_t users[SDF_FINGERPRINT_USER_ID_MAX + 1];
-        uint8_t perms[SDF_FINGERPRINT_USER_ID_MAX + 1];
-        size_t count = 0;
-        uint16_t new_id = 0;
-
-        esp_err_t err = sdf_services_query_users(
-            users, perms, &count, SDF_FINGERPRINT_USER_ID_MAX + 1);
-        if (err == ESP_OK) {
-          bool used[SDF_FINGERPRINT_USER_ID_MAX + 1] = {false};
-          for (size_t i = 0; i < count; i++) {
-            if (users[i] <= SDF_FINGERPRINT_USER_ID_MAX)
-              used[users[i]] = true;
-          }
-          for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
-            if (!used[id]) {
-              new_id = id;
-              break;
-            }
-          }
-        }
-
-        if (new_id > 0) {
-          sdf_services_request_enrollment(new_id, 1);
-        } else {
-          ESP_LOGW(TAG, "No free user IDs available for local enrollment");
-          led_flash_red();
-        }
-      } else {
-        if (action_cb != NULL) {
-          action_cb(action_ctx, action);
-        }
-      }
+      sdf_services_execute_admin_action(action, action_cb, action_ctx);
     }
   } else {
     ESP_LOGW(TAG, "Admin auth match permission %u != ADMIN(3), rejecting.",
