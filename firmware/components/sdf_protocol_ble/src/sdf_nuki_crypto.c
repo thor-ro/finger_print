@@ -1,8 +1,11 @@
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS 1
 #include "sdf_nuki_crypto.h"
 
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include "esp_log.h"
+#include "esp_random.h"
 
 #include "mbedtls/ecdh.h"
 #include "mbedtls/ecp.h"
@@ -312,6 +315,21 @@ int crypto_secretbox_open(
     return 0;
 }
 
+static void sdf_reverse_32(uint8_t *buf) {
+    for (int i = 0; i < 16; i++) {
+        uint8_t tmp = buf[i];
+        buf[i] = buf[31 - i];
+        buf[31 - i] = tmp;
+    }
+}
+
+static int sdf_mbedtls_random(void *ctx, unsigned char *out, size_t len)
+{
+    (void)ctx;
+    esp_fill_random(out, len);
+    return 0;
+}
+
 int crypto_scalarmult(
     unsigned char *q,
     const unsigned char *n,
@@ -327,6 +345,10 @@ int crypto_scalarmult(
     scalar[31] &= 127;
     scalar[31] |= 64;
 
+    /* Curve25519 scalar is little-endian, but mbedtls_mpi_read_binary expects big-endian */
+    sdf_reverse_32(scalar);
+
+
     mbedtls_ecp_group grp;
     mbedtls_ecp_point Qp;
     mbedtls_mpi d;
@@ -339,30 +361,57 @@ int crypto_scalarmult(
 
     int ret = 0;
 
-    if (mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519) != 0) {
+    int mbed_ret;
+
+    mbed_ret = mbedtls_ecp_group_load(&grp, MBEDTLS_ECP_DP_CURVE25519);
+    if (mbed_ret != 0) {
+        ESP_LOGE("NUKI_CRYPTO", "mbedtls_ecp_group_load failed: %d", mbed_ret);
         ret = -1;
         goto cleanup;
     }
 
-    if (mbedtls_mpi_read_binary(&d, scalar, sizeof(scalar)) != 0) {
+    mbed_ret = mbedtls_mpi_read_binary(&d, scalar, sizeof(scalar));
+    if (mbed_ret != 0) {
+        ESP_LOGE("NUKI_CRYPTO", "mbedtls_mpi_read_binary failed: %d", mbed_ret);
         ret = -1;
         goto cleanup;
     }
 
-    if (mbedtls_ecp_point_read_binary(&grp, &Qp, p, 32) != 0) {
+    mbed_ret = mbedtls_ecp_point_read_binary(&grp, &Qp, p, 32);
+    if (mbed_ret != 0) {
+        ESP_LOGE("NUKI_CRYPTO", "mbedtls_ecp_point_read_binary failed: %d", mbed_ret);
         ret = -1;
         goto cleanup;
     }
 
-    if (mbedtls_ecdh_compute_shared(&grp, &z, &Qp, &d, NULL, NULL) != 0) {
+    mbedtls_ecp_point R;
+    mbedtls_ecp_point_init(&R);
+    /* ESP-IDF's mbedTLS requires an RNG callback for scalar blinding. */
+    mbed_ret = mbedtls_ecp_mul(&grp, &R, &d, &Qp, sdf_mbedtls_random, NULL);
+    if (mbed_ret != 0) {
+        ESP_LOGE("NUKI_CRYPTO", "mbedtls_ecp_mul failed: %d", mbed_ret);
+        mbedtls_ecp_point_free(&R);
+        ret = -1;
+        goto cleanup;
+    }
+    
+    mbed_ret = mbedtls_mpi_copy(&z, &R.X);
+    mbedtls_ecp_point_free(&R);
+    if (mbed_ret != 0) {
+        ESP_LOGE("NUKI_CRYPTO", "mbedtls_mpi_copy failed: %d", mbed_ret);
         ret = -1;
         goto cleanup;
     }
 
-    if (mbedtls_mpi_write_binary(&z, q, 32) != 0) {
+    mbed_ret = mbedtls_mpi_write_binary(&z, q, 32);
+    if (mbed_ret != 0) {
+        ESP_LOGE("NUKI_CRYPTO", "mbedtls_mpi_write_binary failed: %d", mbed_ret);
         ret = -1;
         goto cleanup;
     }
+
+    /* mbedtls_mpi_write_binary outputs big-endian, but Curve25519 expects little-endian */
+    sdf_reverse_32(q);
 
 cleanup:
     mbedtls_mpi_free(&z);

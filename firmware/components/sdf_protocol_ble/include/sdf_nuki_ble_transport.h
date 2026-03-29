@@ -70,6 +70,8 @@ int sdf_nuki_ble_init(sdf_nuki_ble_transport_t *transport,
 
 int sdf_nuki_ble_start(sdf_nuki_ble_transport_t *transport);
 
+int sdf_nuki_ble_stop(sdf_nuki_ble_transport_t *transport);
+
 int sdf_nuki_ble_set_enabled(sdf_nuki_ble_transport_t *transport, bool enabled);
 bool sdf_nuki_ble_is_enabled(const sdf_nuki_ble_transport_t *transport);
 

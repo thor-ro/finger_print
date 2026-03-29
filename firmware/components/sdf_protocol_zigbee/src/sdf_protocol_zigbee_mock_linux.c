@@ -10,7 +10,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-esp_err_t sdf_protocol_zigbee_init(void) { return ESP_OK; }
+#ifndef CONFIG_SDF_ZIGBEE_ENABLE
+#define CONFIG_SDF_ZIGBEE_ENABLE 1
+#endif
+
+bool sdf_protocol_zigbee_is_enabled(void) {
+  return CONFIG_SDF_ZIGBEE_ENABLE != 0;
+}
+
+esp_err_t sdf_protocol_zigbee_init(void) {
+  return sdf_protocol_zigbee_is_enabled() ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+}
 
 esp_err_t
 sdf_protocol_zigbee_set_command_handler(sdf_protocol_zigbee_command_cb cb,
@@ -48,7 +58,9 @@ esp_err_t sdf_protocol_zigbee_update_alarm_mask(uint16_t alarm_mask) {
   return ESP_OK;
 }
 
-bool sdf_protocol_zigbee_is_ready(void) { return true; }
+bool sdf_protocol_zigbee_is_ready(void) {
+  return sdf_protocol_zigbee_is_enabled();
+}
 
 esp_err_t sdf_protocol_zigbee_update_battery_percent(uint8_t battery_percent) {
   (void)battery_percent;

@@ -4,7 +4,7 @@ if(NOT IDF_TARGET STREQUAL "linux")
 endif()
 
 idf_component_register(
-    SRCS "src/sdf_services.c"
+    SRCS "src/sdf_services.c" "src/sdf_services_enrollment.c"
     INCLUDE_DIRS "include"
     REQUIRES ${service_reqs}
 )

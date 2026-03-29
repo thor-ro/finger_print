@@ -38,4 +38,7 @@ static inline bool sdf_nuki_ble_addr_is_empty(const ble_addr_t *a) {
     return true;
 }
 static inline void sdf_nuki_ble_set_target_addr(sdf_nuki_ble_transport_t *t, const ble_addr_t *a) {}
-static inline void sdf_nuki_ble_start(sdf_nuki_ble_transport_t *t) {}
+static inline int sdf_nuki_ble_start(sdf_nuki_ble_transport_t *t) { return 0; }
+static inline int sdf_nuki_ble_stop(sdf_nuki_ble_transport_t *t) { return 0; }
+static inline int sdf_nuki_ble_set_enabled(sdf_nuki_ble_transport_t *t, bool enabled) { return 0; }
+static inline void sdf_nuki_ble_reset_backoff(sdf_nuki_ble_transport_t *t) {}

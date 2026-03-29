@@ -90,6 +90,10 @@ sdf_power_wakeup_reason_name(sdf_power_wake_reason_t reason) {
 }
 
 static void sdf_power_push_battery_percent(uint8_t battery_percent) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return;
+  }
+
   esp_err_t err = sdf_protocol_zigbee_update_battery_percent(battery_percent);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
     ESP_LOGW(TAG, "Battery update failed: %s", esp_err_to_name(err));
@@ -251,9 +255,13 @@ static void sdf_power_task(void *arg) {
 #endif
 
     if (allow_sleep) {
+      bool zigbee_enabled = sdf_protocol_zigbee_is_enabled();
       if (config_snapshot.enable_deep_sleep_fallback &&
-          !sdf_protocol_zigbee_is_ready()) {
-        ESP_LOGI(TAG, "Entering deep sleep (Zigbee not joined)");
+          (!zigbee_enabled || !sdf_protocol_zigbee_is_ready())) {
+        const char *sleep_reason = zigbee_enabled
+                                       ? "Entering deep sleep (Zigbee not joined)"
+                                       : "Entering deep sleep (Zigbee disabled)";
+        ESP_LOGI(TAG, "%s", sleep_reason);
         esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
 
         if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio)) {

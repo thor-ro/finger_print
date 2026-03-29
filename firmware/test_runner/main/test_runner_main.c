@@ -103,6 +103,9 @@ extern void test_pairing_get_credentials_null_args(void);
 extern void test_pairing_get_credentials_when_complete(void);
 extern void test_pairing_handle_unencrypted_null_args(void);
 extern void test_pairing_handle_unencrypted_overflow_protection(void);
+extern void test_pairing_first_challenge_sends_only_authenticator(void);
+extern void test_pairing_second_challenge_sends_authorization_data(void);
+extern void test_pairing_authorization_id_completes_pairing(void);
 extern void test_pairing_handle_encrypted_null_args(void);
 
 /* Protocol BLE tests */
@@ -238,6 +241,9 @@ void app_main(void) {
   RUN_TEST(test_pairing_get_credentials_when_complete);
   RUN_TEST(test_pairing_handle_unencrypted_null_args);
   RUN_TEST(test_pairing_handle_unencrypted_overflow_protection);
+  RUN_TEST(test_pairing_first_challenge_sends_only_authenticator);
+  RUN_TEST(test_pairing_second_challenge_sends_authorization_data);
+  RUN_TEST(test_pairing_authorization_id_completes_pairing);
   RUN_TEST(test_pairing_handle_encrypted_null_args);
 
   // sdf_protocol_ble (Nuki) tests:

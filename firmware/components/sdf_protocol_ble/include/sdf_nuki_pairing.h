@@ -12,6 +12,7 @@ typedef enum {
     SDF_NUKI_PAIRING_IDLE = 0,
     SDF_NUKI_PAIRING_WAIT_PUBLIC_KEY,
     SDF_NUKI_PAIRING_WAIT_CHALLENGE,
+    SDF_NUKI_PAIRING_WAIT_AUTHORIZATION_DATA,
     SDF_NUKI_PAIRING_WAIT_AUTHORIZATION_ID,
     SDF_NUKI_PAIRING_COMPLETE,
     SDF_NUKI_PAIRING_ERROR
@@ -35,7 +36,7 @@ typedef struct {
     uint32_t authorization_id;
     uint8_t uuid[16];
 
-    uint8_t rx_buf[96];
+    uint8_t rx_buf[SDF_NUKI_MAX_MESSAGE];
     size_t rx_len;
     size_t rx_expected;
 } sdf_nuki_pairing_t;
