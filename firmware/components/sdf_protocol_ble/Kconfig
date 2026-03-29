@@ -1,5 +1,27 @@
 menu "SDF BLE Transport"
 
+choice SDF_BLE_CONNECTION_MODE
+    prompt "BLE connection policy"
+    default SDF_BLE_CONNECTION_MODE_ALWAYS_CONNECTED
+    help
+        Controls whether the firmware keeps the Nuki BLE link active
+        continuously or connects only when pairing or an action requires it.
+
+config SDF_BLE_CONNECTION_MODE_ALWAYS_CONNECTED
+    bool "Stay connected all the time"
+    help
+        Start scanning automatically when a target address is available and
+        reconnect automatically after disconnects.
+
+config SDF_BLE_CONNECTION_MODE_ON_DEMAND
+    bool "Connect on demand"
+    help
+        Defer scanning until pairing or a lock-state / lock-action request
+        needs the transport, then release the BLE link again once the request
+        completes.
+
+endchoice
+
 config SDF_BLE_CONNECT_TIMEOUT_MS
     int "BLE connection attempt timeout (ms)"
     range 1000 30000

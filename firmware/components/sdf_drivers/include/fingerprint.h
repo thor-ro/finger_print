@@ -9,6 +9,7 @@
 
 #define SDF_FINGERPRINT_USER_ID_MIN 1u
 #define SDF_FINGERPRINT_USER_ID_MAX 0x0FFFu
+#define SDF_FINGERPRINT_EIGENVALUE_SIZE 193u
 
 typedef struct {
   int uart_port;
@@ -71,6 +72,10 @@ fp_enroll_step(sdf_fingerprint_enroll_step_t step, uint16_t user_id,
 
 sdf_fingerprint_op_result_t fp_delete_user(uint16_t user_id);
 sdf_fingerprint_op_result_t fp_delete_all_users(void);
+sdf_fingerprint_op_result_t fp_query_user_permission(uint16_t user_id,
+                                                     uint8_t *permission);
+sdf_fingerprint_op_result_t fp_change_user_permission(uint16_t user_id,
+                                                      uint8_t permission);
 
 sdf_fingerprint_op_result_t fp_query_users(uint16_t *user_ids,
                                            uint8_t *permissions,

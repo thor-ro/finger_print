@@ -1,6 +1,7 @@
 #include "fingerprint.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "driver/gpio.h"
@@ -22,7 +23,10 @@
 #define FP_CMD_ENROLL_3 0x03u
 #define FP_CMD_DELETE_USER 0x04u
 #define FP_CMD_DELETE_ALL_USERS 0x05u
+#define FP_CMD_QUERY_PERMISSION 0x0Au
 #define FP_CMD_MATCH_1_N 0x0Cu
+#define FP_CMD_UPLOAD_EIGENVALUES 0x31u
+#define FP_CMD_SAVE_EIGENVALUES 0x41u
 #define FP_CMD_QUERY_SN 0x2Au
 #define FP_CMD_QUERY_USERS 0x2Bu
 
@@ -70,6 +74,18 @@ FP_STATIC bool fp_user_id_valid(uint16_t user_id) {
          user_id <= SDF_FINGERPRINT_USER_ID_MAX;
 }
 
+static uint8_t fp_packet_checksum(const uint8_t *payload, size_t payload_len) {
+  uint8_t checksum = 0;
+  if (payload == NULL) {
+    return checksum;
+  }
+
+  for (size_t i = 0; i < payload_len; ++i) {
+    checksum ^= payload[i];
+  }
+  return checksum;
+}
+
 static const char *fp_command_name(uint8_t cmd) {
   switch (cmd) {
   case FP_CMD_ENROLL_1:
@@ -82,8 +98,14 @@ static const char *fp_command_name(uint8_t cmd) {
     return "DELETE_USER";
   case FP_CMD_DELETE_ALL_USERS:
     return "DELETE_ALL_USERS";
+  case FP_CMD_QUERY_PERMISSION:
+    return "QUERY_PERMISSION";
   case FP_CMD_MATCH_1_N:
     return "MATCH_1_N";
+  case FP_CMD_UPLOAD_EIGENVALUES:
+    return "UPLOAD_EIGENVALUES";
+  case FP_CMD_SAVE_EIGENVALUES:
+    return "SAVE_EIGENVALUES";
   case FP_CMD_QUERY_SN:
     return "QUERY_SN";
   case FP_CMD_QUERY_USERS:
@@ -295,6 +317,128 @@ static esp_err_t fp_uart_read_exact(int uart_port, uint8_t *buffer,
   return ESP_OK;
 }
 
+static esp_err_t fp_validate_response_locked(uint8_t cmd,
+                                             const uint8_t response[FP_FRAME_LEN]) {
+  if (response[0] != FP_MARKER || response[7] != FP_MARKER) {
+    ESP_LOGE(TAG, "RX invalid marker: %02X ... %02X", response[0], response[7]);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  if (response[1] != cmd) {
+    ESP_LOGE(TAG, "RX cmd mismatch: exp %02X, got %02X", cmd, response[1]);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  uint8_t expected_checksum = fp_checksum(response);
+  if (response[6] != expected_checksum) {
+    ESP_LOGE(TAG, "RX checksum error: exp %02X, got %02X", expected_checksum,
+             response[6]);
+    return ESP_ERR_INVALID_CRC;
+  }
+
+  return ESP_OK;
+}
+
+static esp_err_t fp_read_data_packet_locked(uint8_t *payload,
+                                            uint16_t payload_len) {
+  if (payload == NULL || payload_len == 0) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  const size_t packet_size = (size_t)payload_len + 3u;
+  uint8_t *packet = malloc(packet_size);
+  if (packet == NULL) {
+    return ESP_ERR_NO_MEM;
+  }
+
+  esp_err_t err = fp_uart_read_exact(s_state.uart_port, packet, packet_size,
+                                     s_state.response_timeout_ms);
+  if (err != ESP_OK) {
+    free(packet);
+    return err;
+  }
+
+  if (packet[0] != FP_MARKER || packet[packet_size - 1] != FP_MARKER) {
+    free(packet);
+    return ESP_ERR_INVALID_RESPONSE;
+  }
+
+  uint8_t expected_checksum = fp_packet_checksum(packet + 1, payload_len);
+  if (packet[payload_len + 1u] != expected_checksum) {
+    free(packet);
+    return ESP_ERR_INVALID_CRC;
+  }
+
+  memcpy(payload, packet + 1, payload_len);
+  free(packet);
+  return ESP_OK;
+}
+
+static esp_err_t fp_send_large_command_locked(uint8_t cmd,
+                                              const uint8_t *payload,
+                                              uint16_t payload_len,
+                                              uint8_t response[FP_FRAME_LEN]) {
+  if (!s_state.initialized || payload == NULL || payload_len == 0 ||
+      response == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  uint8_t head[FP_FRAME_LEN] = {
+      FP_MARKER, cmd, (uint8_t)((payload_len >> 8) & 0xFFu),
+      (uint8_t)(payload_len & 0xFFu), 0x00, 0x00, 0x00, FP_MARKER,
+  };
+  head[6] = fp_checksum(head);
+
+  const size_t packet_size = (size_t)payload_len + 3u;
+  uint8_t *packet = malloc(packet_size);
+  if (packet == NULL) {
+    return ESP_ERR_NO_MEM;
+  }
+
+  packet[0] = FP_MARKER;
+  memcpy(packet + 1, payload, payload_len);
+  packet[payload_len + 1u] = fp_packet_checksum(payload, payload_len);
+  packet[payload_len + 2u] = FP_MARKER;
+
+  uart_flush_input((uart_port_t)s_state.uart_port);
+
+  int written = uart_write_bytes((uart_port_t)s_state.uart_port, head,
+                                 sizeof(head));
+  if (written != (int)sizeof(head)) {
+    free(packet);
+    return ESP_FAIL;
+  }
+
+  written = uart_write_bytes((uart_port_t)s_state.uart_port, packet,
+                             packet_size);
+  free(packet);
+  if (written != (int)packet_size) {
+    return ESP_FAIL;
+  }
+
+  esp_err_t err = fp_uart_read_exact(s_state.uart_port, response, FP_FRAME_LEN,
+                                     s_state.response_timeout_ms);
+  ESP_LOGI(TAG, "TX %s cmd=0x%02X payload_len=%u", fp_command_name(cmd), cmd,
+           (unsigned)payload_len);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "RX timeout/error on %s (cmd=0x%02X): %s",
+             fp_command_name(cmd), cmd, esp_err_to_name(err));
+    return err;
+  }
+
+  ESP_LOGI(TAG,
+           "RX %s cmd=0x%02X frame=%02X %02X %02X %02X %02X %02X %02X %02X",
+           fp_command_name(response[1]), response[1], response[0], response[1],
+           response[2], response[3], response[4], response[5], response[6],
+           response[7]);
+  return fp_validate_response_locked(cmd, response);
+}
+
+static sdf_fingerprint_op_result_t fp_transport_err_to_result(esp_err_t err) {
+  return err == ESP_ERR_TIMEOUT ? SDF_FINGERPRINT_OP_TIMEOUT
+                                : SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+}
+
 static esp_err_t fp_send_command_locked(uint8_t cmd, uint8_t p1, uint8_t p2,
                                         uint8_t p3,
                                         uint8_t response[FP_FRAME_LEN]) {
@@ -340,23 +484,7 @@ static esp_err_t fp_send_command_locked(uint8_t cmd, uint8_t p1, uint8_t p2,
            fp_command_name(response[1]), response[1], response[0], response[1],
            response[2], response[3], response[4], response[5], response[6],
            response[7]);
-
-  if (response[0] != FP_MARKER || response[7] != FP_MARKER) {
-    ESP_LOGE(TAG, "RX invalid marker: %02X ... %02X", response[0], response[7]);
-    return ESP_ERR_INVALID_RESPONSE;
-  }
-
-  if (response[1] != cmd) {
-    ESP_LOGE(TAG, "RX cmd mismatch: exp %02X, got %02X", cmd, response[1]);
-    return ESP_ERR_INVALID_RESPONSE;
-  }
-
-  if (response[6] != fp_checksum(response)) {
-    ESP_LOGE(TAG, "RX checksum error: exp %02X, got %02X", fp_checksum(response), response[6]);
-    return ESP_ERR_INVALID_CRC;
-  }
-
-  return ESP_OK;
+  return fp_validate_response_locked(cmd, response);
 }
 
 FP_STATIC sdf_fingerprint_op_result_t fp_map_ack_code(uint8_t ack_code) {
@@ -376,6 +504,107 @@ FP_STATIC sdf_fingerprint_op_result_t fp_map_ack_code(uint8_t ack_code) {
   default:
     return SDF_FINGERPRINT_OP_FAILED;
   }
+}
+
+static sdf_fingerprint_op_result_t
+fp_query_user_permission_locked(uint16_t user_id, uint8_t *permission) {
+  uint8_t response[FP_FRAME_LEN] = {0};
+  esp_err_t err = fp_send_command_locked(FP_CMD_QUERY_PERMISSION,
+                                         (uint8_t)((user_id >> 8) & 0xFFu),
+                                         (uint8_t)(user_id & 0xFFu), 0x00,
+                                         response);
+  if (err != ESP_OK) {
+    return fp_transport_err_to_result(err);
+  }
+
+  if (response[4] >= 1u && response[4] <= 3u) {
+    if (permission != NULL) {
+      *permission = response[4];
+    }
+    return SDF_FINGERPRINT_OP_OK;
+  }
+
+  if (response[4] == SDF_FINGERPRINT_ACK_SUCCESS) {
+    if (permission != NULL) {
+      *permission = 0;
+    }
+    return SDF_FINGERPRINT_OP_OK;
+  }
+
+  return fp_map_ack_code(response[4]);
+}
+
+static sdf_fingerprint_op_result_t fp_delete_user_locked(uint16_t user_id) {
+  uint8_t response[FP_FRAME_LEN] = {0};
+  esp_err_t err = fp_send_command_locked(FP_CMD_DELETE_USER,
+                                         (uint8_t)((user_id >> 8) & 0xFFu),
+                                         (uint8_t)(user_id & 0xFFu), 0x00,
+                                         response);
+  if (err != ESP_OK) {
+    return fp_transport_err_to_result(err);
+  }
+
+  return fp_map_ack_code(response[4]);
+}
+
+static sdf_fingerprint_op_result_t
+fp_upload_eigenvalues_locked(uint16_t user_id, uint8_t *permission,
+                             uint8_t eigenvalues[SDF_FINGERPRINT_EIGENVALUE_SIZE]) {
+  uint8_t response[FP_FRAME_LEN] = {0};
+  esp_err_t err = fp_send_command_locked(FP_CMD_UPLOAD_EIGENVALUES,
+                                         (uint8_t)((user_id >> 8) & 0xFFu),
+                                         (uint8_t)(user_id & 0xFFu), 0x00,
+                                         response);
+  if (err != ESP_OK) {
+    return fp_transport_err_to_result(err);
+  }
+
+  sdf_fingerprint_op_result_t result = fp_map_ack_code(response[4]);
+  if (result != SDF_FINGERPRINT_OP_OK) {
+    return result;
+  }
+
+  const uint16_t data_len = ((uint16_t)response[2] << 8) | response[3];
+  if (data_len != (uint16_t)(3u + SDF_FINGERPRINT_EIGENVALUE_SIZE)) {
+    return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  uint8_t payload[3u + SDF_FINGERPRINT_EIGENVALUE_SIZE] = {0};
+  err = fp_read_data_packet_locked(payload, data_len);
+  if (err != ESP_OK) {
+    return fp_transport_err_to_result(err);
+  }
+
+  uint16_t payload_user_id = ((uint16_t)payload[0] << 8) | payload[1];
+  if (payload_user_id != user_id) {
+    return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  if (permission != NULL) {
+    *permission = payload[2];
+  }
+  memcpy(eigenvalues, &payload[3], SDF_FINGERPRINT_EIGENVALUE_SIZE);
+  return SDF_FINGERPRINT_OP_OK;
+}
+
+static sdf_fingerprint_op_result_t
+fp_save_eigenvalues_locked(uint16_t user_id, uint8_t permission,
+                           const uint8_t eigenvalues[SDF_FINGERPRINT_EIGENVALUE_SIZE]) {
+  uint8_t payload[3u + SDF_FINGERPRINT_EIGENVALUE_SIZE] = {0};
+  payload[0] = (uint8_t)((user_id >> 8) & 0xFFu);
+  payload[1] = (uint8_t)(user_id & 0xFFu);
+  payload[2] = permission;
+  memcpy(&payload[3], eigenvalues, SDF_FINGERPRINT_EIGENVALUE_SIZE);
+
+  uint8_t response[FP_FRAME_LEN] = {0};
+  esp_err_t err =
+      fp_send_large_command_locked(FP_CMD_SAVE_EIGENVALUES, payload,
+                                   sizeof(payload), response);
+  if (err != ESP_OK) {
+    return fp_transport_err_to_result(err);
+  }
+
+  return fp_map_ack_code(response[4]);
 }
 
 void fp_set_power(bool enabled) {
@@ -677,19 +906,81 @@ sdf_fingerprint_op_result_t fp_delete_user(uint16_t user_id) {
     return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
   }
 
-  uint8_t response[FP_FRAME_LEN] = {0};
-  err = fp_send_command_locked(FP_CMD_DELETE_USER,
-                               (uint8_t)((user_id >> 8) & 0xFF),
-                               (uint8_t)(user_id & 0xFF), 0x00, response);
+  sdf_fingerprint_op_result_t result = fp_delete_user_locked(user_id);
   fp_end_uart_access_locked();
   xSemaphoreGive(s_state.lock);
+  return result;
+}
 
-  if (err != ESP_OK) {
-    return err == ESP_ERR_TIMEOUT ? SDF_FINGERPRINT_OP_TIMEOUT
-                                  : SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+sdf_fingerprint_op_result_t fp_query_user_permission(uint16_t user_id,
+                                                     uint8_t *permission) {
+  if (!fp_user_id_valid(user_id) || permission == NULL || s_state.lock == NULL) {
+    return SDF_FINGERPRINT_OP_BAD_ARG;
   }
 
-  return fp_map_ack_code(response[4]);
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(FP_MUTEX_WAIT_MS)) != pdTRUE) {
+    return SDF_FINGERPRINT_OP_IO_ERROR;
+  }
+
+  esp_err_t err = fp_begin_uart_access_locked();
+  if (err != ESP_OK) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  sdf_fingerprint_op_result_t result =
+      fp_query_user_permission_locked(user_id, permission);
+  fp_end_uart_access_locked();
+  xSemaphoreGive(s_state.lock);
+  return result;
+}
+
+sdf_fingerprint_op_result_t fp_change_user_permission(uint16_t user_id,
+                                                      uint8_t permission) {
+  if (!fp_user_id_valid(user_id) || permission < 1u || permission > 3u ||
+      s_state.lock == NULL) {
+    return SDF_FINGERPRINT_OP_BAD_ARG;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(FP_MUTEX_WAIT_MS)) != pdTRUE) {
+    return SDF_FINGERPRINT_OP_IO_ERROR;
+  }
+
+  esp_err_t err = fp_begin_uart_access_locked();
+  if (err != ESP_OK) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  uint8_t current_permission = 0;
+  uint8_t eigenvalues[SDF_FINGERPRINT_EIGENVALUE_SIZE] = {0};
+  sdf_fingerprint_op_result_t result =
+      fp_upload_eigenvalues_locked(user_id, &current_permission, eigenvalues);
+  if (result == SDF_FINGERPRINT_OP_OK && current_permission != permission) {
+    result = fp_delete_user_locked(user_id);
+    if (result == SDF_FINGERPRINT_OP_OK) {
+      result = fp_save_eigenvalues_locked(user_id, permission, eigenvalues);
+      if (result != SDF_FINGERPRINT_OP_OK) {
+        sdf_fingerprint_op_result_t rollback_result =
+            fp_save_eigenvalues_locked(user_id, current_permission,
+                                       eigenvalues);
+        if (rollback_result == SDF_FINGERPRINT_OP_OK) {
+          ESP_LOGW(TAG,
+                   "Permission change rollback restored user_id=%u "
+                   "permission=%u after failure",
+                   (unsigned)user_id, (unsigned)current_permission);
+        } else {
+          ESP_LOGE(TAG,
+                   "Permission change rollback failed for user_id=%u: %s",
+                   (unsigned)user_id, fp_result_name(rollback_result));
+        }
+      }
+    }
+  }
+
+  fp_end_uart_access_locked();
+  xSemaphoreGive(s_state.lock);
+  return result;
 }
 
 sdf_fingerprint_op_result_t fp_delete_all_users(void) {

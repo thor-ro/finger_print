@@ -2,8 +2,13 @@
 
 #include <string.h>
 
+#include "esp_log.h"
 #include "esp_random.h"
 #include "sdf_nuki_crypto.h"
+
+static const char *TAG = "sdf_nuki_pairing";
+
+static void sdf_nuki_pairing_on_message(void *ctx, const sdf_nuki_message_t *msg);
 
 static uint16_t sdf_nuki_le16_read(const uint8_t *src)
 {
@@ -62,6 +67,10 @@ static size_t sdf_nuki_unencrypted_expected_length(uint16_t command)
         return 2 + 32 + 2;
     case SDF_NUKI_CMD_CHALLENGE:
         return 2 + 32 + 2;
+    case SDF_NUKI_CMD_AUTHORIZATION_ID:
+        return 2 + 32 + 4 + 16 + 32 + 2;
+    case SDF_NUKI_CMD_STATUS:
+        return 2 + 1 + 2;
     case SDF_NUKI_CMD_AUTHORIZATION_INFO:
         return 2 + 1 + 2;
     default:
@@ -124,15 +133,11 @@ static int sdf_nuki_pairing_send_authorization_authenticator(sdf_nuki_pairing_t 
         return res;
     }
 
-    uint8_t payload[64];
-    memcpy(payload, authenticator, 32);
-    memcpy(payload + 32, pairing->public_key, 32);
-
     return sdf_nuki_client_send_unencrypted(
         pairing->client,
         SDF_NUKI_CMD_AUTHORIZATION_AUTHENTICATOR,
-        payload,
-        sizeof(payload));
+        authenticator,
+        sizeof(authenticator));
 }
 
 static int sdf_nuki_pairing_send_authorization_data(sdf_nuki_pairing_t *pairing)
@@ -157,7 +162,7 @@ static int sdf_nuki_pairing_send_authorization_data(sdf_nuki_pairing_t *pairing)
         return res;
     }
 
-    uint8_t payload[32 + 1 + 4 + 32 + 32 + 32];
+    uint8_t payload[32 + 1 + 4 + 32 + 32];
     offset = 0;
     memcpy(payload + offset, authenticator, 32);
     offset += 32;
@@ -168,13 +173,9 @@ static int sdf_nuki_pairing_send_authorization_data(sdf_nuki_pairing_t *pairing)
     offset += sizeof(pairing->name);
     memcpy(payload + offset, pairing->nonce_na, sizeof(pairing->nonce_na));
     offset += sizeof(pairing->nonce_na);
-    memcpy(payload + offset, pairing->nonce_nk, sizeof(pairing->nonce_nk));
-    offset += sizeof(pairing->nonce_nk);
 
-    return sdf_nuki_client_send_encrypted_custom(
+    return sdf_nuki_client_send_unencrypted(
         pairing->client,
-        SDF_NUKI_PAIRING_AUTH_ID,
-        pairing->shared_key,
         SDF_NUKI_CMD_AUTHORIZATION_DATA,
         payload,
         offset);
@@ -192,15 +193,12 @@ static int sdf_nuki_pairing_send_authorization_id_confirmation(sdf_nuki_pairing_
         return res;
     }
 
-    uint8_t payload[32 + 4 + 32];
+    uint8_t payload[32 + 4];
     memcpy(payload, authenticator, 32);
     sdf_nuki_le32_write(payload + 32, pairing->authorization_id);
-    memcpy(payload + 36, pairing->nonce_nk, sizeof(pairing->nonce_nk));
 
-    return sdf_nuki_client_send_encrypted_custom(
+    return sdf_nuki_client_send_unencrypted(
         pairing->client,
-        SDF_NUKI_PAIRING_AUTH_ID,
-        pairing->shared_key,
         SDF_NUKI_CMD_AUTHORIZATION_ID_CONFIRMATION,
         payload,
         sizeof(payload));
@@ -299,6 +297,11 @@ int sdf_nuki_pairing_handle_unencrypted(
     }
 
     if (msg.command_id == SDF_NUKI_CMD_PUBLIC_KEY && msg.payload_len == 32) {
+        if (pairing->state != SDF_NUKI_PAIRING_WAIT_PUBLIC_KEY) {
+            ESP_LOGW(TAG, "Unexpected public key in state=%d", pairing->state);
+            return SDF_NUKI_RESULT_ERR_ARG;
+        }
+
         memcpy(pairing->smartlock_public_key, msg.payload, 32);
         res = sdf_nuki_compute_shared_key(
             pairing->private_key,
@@ -319,6 +322,7 @@ int sdf_nuki_pairing_handle_unencrypted(
             return res;
         }
 
+        ESP_LOGI(TAG, "Smart Lock public key received; sending local public key");
         pairing->state = SDF_NUKI_PAIRING_WAIT_CHALLENGE;
         return SDF_NUKI_RESULT_OK;
     }
@@ -326,23 +330,49 @@ int sdf_nuki_pairing_handle_unencrypted(
     if (msg.command_id == SDF_NUKI_CMD_CHALLENGE && msg.payload_len == 32) {
         memcpy(pairing->nonce_nk, msg.payload, 32);
 
-        res = sdf_nuki_pairing_send_authorization_authenticator(pairing);
-        if (res != SDF_NUKI_RESULT_OK) {
-            pairing->state = SDF_NUKI_PAIRING_ERROR;
-            return res;
+        if (pairing->state == SDF_NUKI_PAIRING_WAIT_CHALLENGE) {
+            ESP_LOGI(TAG, "Pairing challenge received; sending authorization authenticator");
+            res = sdf_nuki_pairing_send_authorization_authenticator(pairing);
+            if (res != SDF_NUKI_RESULT_OK) {
+                pairing->state = SDF_NUKI_PAIRING_ERROR;
+                return res;
+            }
+
+            pairing->state = SDF_NUKI_PAIRING_WAIT_AUTHORIZATION_DATA;
+            return SDF_NUKI_RESULT_OK;
         }
 
-        res = sdf_nuki_pairing_send_authorization_data(pairing);
-        if (res != SDF_NUKI_RESULT_OK) {
-            pairing->state = SDF_NUKI_PAIRING_ERROR;
-            return res;
+        if (pairing->state == SDF_NUKI_PAIRING_WAIT_AUTHORIZATION_DATA) {
+            ESP_LOGI(TAG, "Authorization challenge received; sending authorization data");
+            res = sdf_nuki_pairing_send_authorization_data(pairing);
+            if (res != SDF_NUKI_RESULT_OK) {
+                pairing->state = SDF_NUKI_PAIRING_ERROR;
+                return res;
+            }
+
+            pairing->state = SDF_NUKI_PAIRING_WAIT_AUTHORIZATION_ID;
+            return SDF_NUKI_RESULT_OK;
         }
 
-        pairing->state = SDF_NUKI_PAIRING_WAIT_AUTHORIZATION_ID;
-        return SDF_NUKI_RESULT_OK;
+        ESP_LOGW(TAG, "Unexpected challenge in state=%d", pairing->state);
+        return SDF_NUKI_RESULT_ERR_ARG;
     }
 
     if (msg.command_id == SDF_NUKI_CMD_AUTHORIZATION_INFO) {
+        ESP_LOGW(TAG, "Authorization Info received, but only 1st-4th gen pairing is implemented");
+        return SDF_NUKI_RESULT_ERR_ARG;
+    }
+
+    if (msg.command_id == SDF_NUKI_CMD_AUTHORIZATION_ID) {
+        if (pairing->state != SDF_NUKI_PAIRING_WAIT_AUTHORIZATION_ID) {
+            ESP_LOGW(TAG, "Unexpected authorization id in state=%d", pairing->state);
+            return SDF_NUKI_RESULT_ERR_ARG;
+        }
+
+        sdf_nuki_pairing_on_message(pairing, &msg);
+        if (pairing->state == SDF_NUKI_PAIRING_ERROR) {
+            return SDF_NUKI_RESULT_ERR_AUTH;
+        }
         return SDF_NUKI_RESULT_OK;
     }
 
@@ -359,6 +389,8 @@ static void sdf_nuki_pairing_on_message(void *ctx, const sdf_nuki_message_t *msg
     if (msg->command_id != SDF_NUKI_CMD_AUTHORIZATION_ID) {
         return;
     }
+
+    ESP_LOGI(TAG, "Authorization ID received");
 
     if (msg->payload_len >= 32 + 4 + 16 + 32 + 32) {
         const uint8_t *auth = msg->payload;
@@ -386,6 +418,34 @@ static void sdf_nuki_pairing_on_message(void *ctx, const sdf_nuki_message_t *msg
 
         pairing->authorization_id = auth_id;
         memcpy(pairing->uuid, uuid, sizeof(pairing->uuid));
+    } else if (msg->payload_len >= 32 + 4 + 16 + 32) {
+        const uint8_t *auth = msg->payload;
+        uint32_t auth_id = sdf_nuki_le32_read(msg->payload + 32);
+        const uint8_t *uuid = msg->payload + 36;
+        const uint8_t *returned_nonce = msg->payload + 52;
+
+        uint8_t auth_input[4 + 16 + 32 + 32];
+        sdf_nuki_le32_write(auth_input, auth_id);
+        memcpy(auth_input + 4, uuid, 16);
+        memcpy(auth_input + 20, returned_nonce, 32);
+        memcpy(auth_input + 52, pairing->nonce_na, 32);
+
+        uint8_t expected[32];
+        if (sdf_nuki_compute_authenticator(auth_input, sizeof(auth_input),
+                                           pairing->shared_key, expected) !=
+            SDF_NUKI_RESULT_OK) {
+            pairing->state = SDF_NUKI_PAIRING_ERROR;
+            return;
+        }
+
+        if (memcmp(expected, auth, 32) != 0) {
+            pairing->state = SDF_NUKI_PAIRING_ERROR;
+            return;
+        }
+
+        pairing->authorization_id = auth_id;
+        memcpy(pairing->uuid, uuid, sizeof(pairing->uuid));
+        memcpy(pairing->nonce_nk, returned_nonce, sizeof(pairing->nonce_nk));
     } else if (msg->payload_len >= 4 + 16) {
         pairing->authorization_id = sdf_nuki_le32_read(msg->payload);
         memcpy(pairing->uuid, msg->payload + 4, sizeof(pairing->uuid));
@@ -395,6 +455,7 @@ static void sdf_nuki_pairing_on_message(void *ctx, const sdf_nuki_message_t *msg
     }
 
     if (sdf_nuki_pairing_send_authorization_id_confirmation(pairing) == SDF_NUKI_RESULT_OK) {
+        ESP_LOGI(TAG, "Authorization ID confirmed");
         pairing->state = SDF_NUKI_PAIRING_COMPLETE;
     } else {
         pairing->state = SDF_NUKI_PAIRING_ERROR;

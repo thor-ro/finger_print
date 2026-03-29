@@ -39,6 +39,9 @@
 #define SDF_ZIGBEE_PRIMARY_CHANNEL_MASK ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK
 
 /* Kconfig defaults (overridden by sdkconfig when available) */
+#ifndef CONFIG_SDF_ZIGBEE_ENABLE
+#define CONFIG_SDF_ZIGBEE_ENABLE 1
+#endif
 #ifndef CONFIG_SDF_ZIGBEE_SLEEP_ENABLE
 #define CONFIG_SDF_ZIGBEE_SLEEP_ENABLE 1
 #endif
@@ -47,6 +50,10 @@
 #endif
 
 static const char *TAG = "sdf_protocol_zigbee";
+
+bool sdf_protocol_zigbee_is_enabled(void) {
+  return CONFIG_SDF_ZIGBEE_ENABLE != 0;
+}
 
 typedef struct {
   SemaphoreHandle_t lock;
@@ -257,6 +264,10 @@ static bool sdf_zigbee_set_attr_string(uint16_t cluster_id, uint16_t attr_id,
 }
 
 esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return ESP_OK;
+  }
+
   if (json_array == NULL || s_state.lock == NULL) {
     return ESP_ERR_INVALID_ARG;
   }
@@ -886,7 +897,10 @@ fail:
 }
 
 esp_err_t sdf_protocol_zigbee_init(void) {
-#if !defined(CONFIG_ZB_ENABLED) || (CONFIG_ZB_ENABLED == 0)
+#if !CONFIG_SDF_ZIGBEE_ENABLE
+  ESP_LOGI(TAG, "Zigbee disabled by SDF configuration");
+  return ESP_ERR_NOT_SUPPORTED;
+#elif !defined(CONFIG_ZB_ENABLED) || (CONFIG_ZB_ENABLED == 0)
   ESP_LOGW(TAG, "Zigbee disabled in sdkconfig");
   return ESP_ERR_NOT_SUPPORTED;
 #else
@@ -949,6 +963,10 @@ esp_err_t sdf_protocol_zigbee_init(void) {
 esp_err_t
 sdf_protocol_zigbee_set_command_handler(sdf_protocol_zigbee_command_cb cb,
                                         void *ctx) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return ESP_OK;
+  }
+
   if (s_state.lock == NULL) {
     s_state.lock = xSemaphoreCreateMutex();
     if (s_state.lock == NULL) {
@@ -972,6 +990,10 @@ esp_err_t sdf_protocol_zigbee_update_lock_state(
       lock_state != SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNLOCKED &&
       lock_state != SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED) {
     return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return ESP_OK;
   }
 
   if (s_state.lock == NULL) {
@@ -1001,6 +1023,10 @@ esp_err_t sdf_protocol_zigbee_update_battery_percent(uint8_t battery_percent) {
     return ESP_ERR_INVALID_ARG;
   }
 
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return ESP_OK;
+  }
+
   if (s_state.lock == NULL) {
     return ESP_ERR_INVALID_STATE;
   }
@@ -1026,6 +1052,10 @@ esp_err_t sdf_protocol_zigbee_update_battery_percent(uint8_t battery_percent) {
 }
 
 esp_err_t sdf_protocol_zigbee_update_alarm_mask(uint16_t alarm_mask) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return ESP_OK;
+  }
+
   if (s_state.lock == NULL) {
     return ESP_ERR_INVALID_STATE;
   }
@@ -1049,6 +1079,10 @@ esp_err_t sdf_protocol_zigbee_update_alarm_mask(uint16_t alarm_mask) {
 }
 
 bool sdf_protocol_zigbee_is_ready(void) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return false;
+  }
+
   if (s_state.lock == NULL) {
     return false;
   }
@@ -1065,6 +1099,11 @@ esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms) {
   if (interval_ms < SDF_ZIGBEE_CHECKIN_INTERVAL_MIN_MS ||
       interval_ms > SDF_ZIGBEE_CHECKIN_INTERVAL_MAX_MS) {
     return ESP_ERR_INVALID_ARG;
+  }
+
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    s_state.checkin_interval_ms = interval_ms;
+    return ESP_OK;
   }
 
   if (s_state.lock == NULL) {
@@ -1087,6 +1126,10 @@ esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms) {
 }
 
 esp_err_t sdf_protocol_zigbee_permit_join(void) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return ESP_ERR_NOT_SUPPORTED;
+  }
+
   if (s_state.lock == NULL) {
     return ESP_ERR_INVALID_STATE;
   }

@@ -37,21 +37,25 @@
 
 static const char *TAG = "sdf_nuki_ble";
 
+/* Nuki Pairing Service: a92ee100-5501-11e4-916c-0800200c9a66 (LE byte order) */
 static const ble_uuid_t *SDF_NUKI_PAIRING_SVC_UUID =
-    BLE_UUID128_DECLARE(0xa9, 0x2e, 0xe1, 0x00, 0x55, 0x01, 0x11, 0xe4, 0x91,
-                        0x6c, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66);
+    BLE_UUID128_DECLARE(0x66, 0x9a, 0x0c, 0x20, 0x00, 0x08, 0x6c, 0x91, 0xe4,
+                        0x11, 0x01, 0x55, 0x00, 0xe1, 0x2e, 0xa9);
 
+/* Nuki Keyturner Service: a92ee200-5501-11e4-916c-0800200c9a66 (LE byte order) */
 static const ble_uuid_t *SDF_NUKI_KEYTURNER_SVC_UUID =
-    BLE_UUID128_DECLARE(0xa9, 0x2e, 0xe2, 0x00, 0x55, 0x01, 0x11, 0xe4, 0x91,
-                        0x6c, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66);
+    BLE_UUID128_DECLARE(0x66, 0x9a, 0x0c, 0x20, 0x00, 0x08, 0x6c, 0x91, 0xe4,
+                        0x11, 0x01, 0x55, 0x00, 0xe2, 0x2e, 0xa9);
 
+/* Nuki GDIO Characteristic: a92ee101-5501-11e4-916c-0800200c9a66 (LE byte order) */
 static const ble_uuid_t *SDF_NUKI_GDIO_UUID =
-    BLE_UUID128_DECLARE(0xa9, 0x2e, 0xe1, 0x01, 0x55, 0x01, 0x11, 0xe4, 0x91,
-                        0x6c, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66);
+    BLE_UUID128_DECLARE(0x66, 0x9a, 0x0c, 0x20, 0x00, 0x08, 0x6c, 0x91, 0xe4,
+                        0x11, 0x01, 0x55, 0x01, 0xe1, 0x2e, 0xa9);
 
+/* Nuki USDIO Characteristic: a92ee202-5501-11e4-916c-0800200c9a66 (LE byte order) */
 static const ble_uuid_t *SDF_NUKI_USDIO_UUID =
-    BLE_UUID128_DECLARE(0xa9, 0x2e, 0xe2, 0x02, 0x55, 0x01, 0x11, 0xe4, 0x91,
-                        0x6c, 0x08, 0x00, 0x20, 0x0c, 0x9a, 0x66);
+    BLE_UUID128_DECLARE(0x66, 0x9a, 0x0c, 0x20, 0x00, 0x08, 0x6c, 0x91, 0xe4,
+                        0x11, 0x01, 0x55, 0x02, 0xe2, 0x2e, 0xa9);
 
 static sdf_nuki_ble_transport_t *s_transport;
 static ble_addr_t s_pending_addr;
@@ -84,10 +88,6 @@ static int sdf_nuki_ble_disc_svc_cb(uint16_t conn_handle,
 static int sdf_nuki_ble_disc_chr_cb(uint16_t conn_handle,
                                     const struct ble_gatt_error *error,
                                     const struct ble_gatt_chr *chr, void *arg);
-static int sdf_nuki_ble_disc_dsc_cb(uint16_t conn_handle,
-                                    const struct ble_gatt_error *error,
-                                    uint16_t chr_val_handle,
-                                    const struct ble_gatt_dsc *dsc, void *arg);
 static int sdf_nuki_ble_on_subscribe_gdio(uint16_t conn_handle,
                                           const struct ble_gatt_error *error,
                                           struct ble_gatt_attr *attr,
@@ -209,7 +209,7 @@ static int sdf_nuki_ble_connect(const ble_addr_t *addr) {
   }
 
   int rc = ble_gap_connect(s_transport->own_addr_type, addr,
-                           pdMS_TO_TICKS(CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS),
+                           CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS,
                            NULL, sdf_nuki_ble_gap_event, NULL);
   if (rc != 0) {
     /* Cancel timeout timer on immediate failure */
@@ -271,9 +271,13 @@ static int sdf_nuki_ble_disc_svc_cb(uint16_t conn_handle,
     if (s_disc_state == SDF_NUKI_DISC_PAIRING_SVC) {
       s_transport->pairing_svc_start = service->start_handle;
       s_transport->pairing_svc_end = service->end_handle;
+      ESP_LOGI(TAG, "Pairing service found: handles %d-%d",
+               service->start_handle, service->end_handle);
     } else if (s_disc_state == SDF_NUKI_DISC_KEYTURNER_SVC) {
       s_transport->keyturner_svc_start = service->start_handle;
       s_transport->keyturner_svc_end = service->end_handle;
+      ESP_LOGI(TAG, "Keyturner service found: handles %d-%d",
+               service->start_handle, service->end_handle);
     }
     return 0;
   }
@@ -317,10 +321,14 @@ static int sdf_nuki_ble_disc_chr_cb(uint16_t conn_handle,
     if (s_disc_state == SDF_NUKI_DISC_PAIRING_CHR) {
       if (ble_uuid_cmp(&chr->uuid.u, SDF_NUKI_GDIO_UUID) == 0) {
         s_transport->gdio_handle = chr->val_handle;
+        ESP_LOGI(TAG, "GDIO characteristic found: val_handle=%d",
+                 chr->val_handle);
       }
     } else if (s_disc_state == SDF_NUKI_DISC_KEYTURNER_CHR) {
       if (ble_uuid_cmp(&chr->uuid.u, SDF_NUKI_USDIO_UUID) == 0) {
         s_transport->usdio_handle = chr->val_handle;
+        ESP_LOGI(TAG, "USDIO characteristic found: val_handle=%d",
+                 chr->val_handle);
       }
     }
     return 0;
@@ -337,10 +345,10 @@ static int sdf_nuki_ble_disc_chr_cb(uint16_t conn_handle,
       return BLE_HS_EAPP;
     }
 
-    s_disc_state = SDF_NUKI_DISC_PAIRING_DSC;
-    return ble_gattc_disc_all_dscs(
-        s_transport->conn_handle, (uint16_t)(s_transport->gdio_handle + 1),
-        s_transport->pairing_svc_end, sdf_nuki_ble_disc_dsc_cb, arg);
+    ESP_LOGI(TAG, "Inferring GDIO CCCD handle (Nuki descriptor discovery bypass)");
+    s_transport->gdio_cccd = (uint16_t)(s_transport->gdio_handle + 1);
+    
+    return sdf_nuki_ble_start_keyturner_service_discovery();
   }
 
   if (s_disc_state == SDF_NUKI_DISC_KEYTURNER_CHR) {
@@ -349,51 +357,8 @@ static int sdf_nuki_ble_disc_chr_cb(uint16_t conn_handle,
       return BLE_HS_EAPP;
     }
 
-    s_disc_state = SDF_NUKI_DISC_KEYTURNER_DSC;
-    return ble_gattc_disc_all_dscs(
-        s_transport->conn_handle, (uint16_t)(s_transport->usdio_handle + 1),
-        s_transport->keyturner_svc_end, sdf_nuki_ble_disc_dsc_cb, arg);
-  }
-
-  return 0;
-}
-
-static int sdf_nuki_ble_disc_dsc_cb(uint16_t conn_handle,
-                                    const struct ble_gatt_error *error,
-                                    uint16_t chr_val_handle,
-                                    const struct ble_gatt_dsc *dsc, void *arg) {
-  (void)chr_val_handle;
-
-  if (error->status == 0 && dsc != NULL) {
-    if (ble_uuid_u16(&dsc->uuid.u) == BLE_GATT_DSC_CLT_CFG_UUID16) {
-      if (s_disc_state == SDF_NUKI_DISC_PAIRING_DSC) {
-        s_transport->gdio_cccd = dsc->handle;
-      } else if (s_disc_state == SDF_NUKI_DISC_KEYTURNER_DSC) {
-        s_transport->usdio_cccd = dsc->handle;
-      }
-    }
-    return 0;
-  }
-
-  if (error->status != BLE_HS_EDONE) {
-    ESP_LOGE(TAG, "Descriptor discovery failed; status=%d", error->status);
-    return error->status;
-  }
-
-  if (s_disc_state == SDF_NUKI_DISC_PAIRING_DSC) {
-    if (s_transport->gdio_cccd == 0) {
-      ESP_LOGE(TAG, "GDIO CCCD not found");
-      return BLE_HS_EAPP;
-    }
-
-    return sdf_nuki_ble_start_keyturner_service_discovery();
-  }
-
-  if (s_disc_state == SDF_NUKI_DISC_KEYTURNER_DSC) {
-    if (s_transport->usdio_cccd == 0) {
-      ESP_LOGE(TAG, "USDIO CCCD not found");
-      return BLE_HS_EAPP;
-    }
+    ESP_LOGI(TAG, "Inferring USDIO CCCD handle (Nuki descriptor discovery bypass)");
+    s_transport->usdio_cccd = (uint16_t)(s_transport->usdio_handle + 1);
 
     /* All handles discovered! Save to NVS for connection caching */
     sdf_nuki_ble_handles_t hnds = {
@@ -419,6 +384,7 @@ static int sdf_nuki_ble_disc_dsc_cb(uint16_t conn_handle,
   return 0;
 }
 
+
 static int sdf_nuki_ble_on_subscribe_gdio(uint16_t conn_handle,
                                           const struct ble_gatt_error *error,
                                           struct ble_gatt_attr *attr,
@@ -427,6 +393,7 @@ static int sdf_nuki_ble_on_subscribe_gdio(uint16_t conn_handle,
     ESP_LOGE(TAG, "GDIO subscribe failed; status=%d", error->status);
     return error->status;
   }
+  ESP_LOGI(TAG, "GDIO subscribed OK, subscribing USDIO...");
 
   uint8_t value[2] = {0x02, 0x00};
   s_disc_state = SDF_NUKI_DISC_SUBSCRIBE_USDIO;
@@ -447,7 +414,8 @@ static int sdf_nuki_ble_on_subscribe_usdio(uint16_t conn_handle,
   s_transport->state = SDF_NUKI_BLE_STATE_READY;
   /* Reset backoff on successful connection */
   s_transport->reconnect_attempt = 0;
-  ESP_LOGI(TAG, "BLE transport ready, backoff reset");
+  ESP_LOGI(TAG, "USDIO subscribed OK");
+  ESP_LOGI(TAG, "BLE transport READY (all GATT handles discovered & subscribed)");
   if (s_transport->ready_cb != NULL) {
     s_transport->ready_cb(s_transport->ready_ctx);
   }
@@ -474,6 +442,15 @@ static void sdf_nuki_ble_start_scan(void) {
     return;
   }
 
+  /* Cancel any existing scan to clear the duplicate filter cache */
+  if (s_transport->state == SDF_NUKI_BLE_STATE_SCANNING) {
+    ESP_LOGI(TAG, "Restarting scan (clearing duplicate filter)");
+    ble_gap_disc_cancel();
+    s_transport->state = SDF_NUKI_BLE_STATE_IDLE;
+  } else if (s_transport->state != SDF_NUKI_BLE_STATE_IDLE) {
+    return;
+  }
+
   struct ble_gap_disc_params params;
   memset(&params, 0, sizeof(params));
   params.itvl = SDF_NUKI_SCAN_ITVL;
@@ -488,7 +465,34 @@ static void sdf_nuki_ble_start_scan(void) {
 
   if (rc != 0) {
     ESP_LOGE(TAG, "Failed to start scan; rc=%d", rc);
+    s_transport->state = SDF_NUKI_BLE_STATE_IDLE;
   }
+}
+
+/* Nuki Home Solutions GmbH OUI prefix */
+static const uint8_t SDF_NUKI_OUI[3] = {0x54, 0xD2, 0x72};
+
+static bool sdf_nuki_ble_addr_is_nuki_oui(const ble_addr_t *addr) {
+  /* Public address type only; OUI is in bytes [5:3] (big-endian) */
+  if (addr->type != BLE_ADDR_PUBLIC) {
+    return false;
+  }
+  return addr->val[5] == SDF_NUKI_OUI[0] &&
+         addr->val[4] == SDF_NUKI_OUI[1] &&
+         addr->val[3] == SDF_NUKI_OUI[2];
+}
+
+static bool sdf_nuki_ble_adv_has_nuki_name(const struct ble_hs_adv_fields *fields) {
+  if (fields->name == NULL || fields->name_len < 5) {
+    return false;
+  }
+  return memcmp(fields->name, "Nuki_", 5) == 0;
+}
+
+static void sdf_nuki_ble_initiate_connect(const ble_addr_t *addr) {
+  ble_gap_disc_cancel();
+  s_pending_connect = false;
+  sdf_nuki_ble_connect(addr);
 }
 
 static void sdf_nuki_ble_handle_adv(const struct ble_gap_event *event) {
@@ -499,10 +503,20 @@ static void sdf_nuki_ble_handle_adv(const struct ble_gap_event *event) {
 
   if (s_transport->has_target) {
     if (sdf_nuki_ble_addr_match(&event->disc.addr, &s_transport->target_addr)) {
-      s_pending_addr = event->disc.addr;
-      s_pending_connect = true;
-      ble_gap_disc_cancel();
+      ESP_LOGI(TAG, "Found target Nuki lock, connecting...");
+      sdf_nuki_ble_initiate_connect(&event->disc.addr);
     }
+    return;
+  }
+
+  /* Check Nuki OUI first (fastest check, no parsing needed) */
+  if (sdf_nuki_ble_addr_is_nuki_oui(&event->disc.addr)) {
+    ESP_LOGI(TAG, "Found Nuki device %02X:%02X:%02X:%02X:%02X:%02X (OUI match), "
+                  "connecting...",
+             event->disc.addr.val[5], event->disc.addr.val[4],
+             event->disc.addr.val[3], event->disc.addr.val[2],
+             event->disc.addr.val[1], event->disc.addr.val[0]);
+    sdf_nuki_ble_initiate_connect(&event->disc.addr);
     return;
   }
 
@@ -513,10 +527,17 @@ static void sdf_nuki_ble_handle_adv(const struct ble_gap_event *event) {
     return;
   }
 
+  /* Check for Nuki service UUID in advertisement */
   if (sdf_nuki_ble_adv_has_nuki_service(&fields)) {
-    s_pending_addr = event->disc.addr;
-    s_pending_connect = true;
-    ble_gap_disc_cancel();
+    ESP_LOGI(TAG, "Found Nuki lock via service UUID, connecting...");
+    sdf_nuki_ble_initiate_connect(&event->disc.addr);
+    return;
+  }
+
+  /* Check for Nuki device name (e.g. "Nuki_1A2B3C4D") */
+  if (sdf_nuki_ble_adv_has_nuki_name(&fields)) {
+    ESP_LOGI(TAG, "Found Nuki lock via device name, connecting...");
+    sdf_nuki_ble_initiate_connect(&event->disc.addr);
   }
 }
 
@@ -668,6 +689,37 @@ int sdf_nuki_ble_start(sdf_nuki_ble_transport_t *transport) {
     sdf_nuki_ble_start_scan();
   }
 
+  return 0;
+}
+
+int sdf_nuki_ble_stop(sdf_nuki_ble_transport_t *transport) {
+  if (transport == NULL) {
+    return -1;
+  }
+
+  transport->start_requested = false;
+  s_pending_connect = false;
+
+  if (transport->reconnect_timer != NULL) {
+    xTimerStop(transport->reconnect_timer, 0);
+  }
+  if (transport->connect_timeout_timer != NULL) {
+    xTimerStop(transport->connect_timeout_timer, 0);
+  }
+
+  if (transport->state == SDF_NUKI_BLE_STATE_SCANNING) {
+    ble_gap_disc_cancel();
+  }
+  if (transport->state == SDF_NUKI_BLE_STATE_CONNECTING) {
+    ble_gap_conn_cancel();
+  }
+  if (transport->conn_handle != BLE_HS_CONN_HANDLE_NONE) {
+    ble_gap_terminate(transport->conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+  } else {
+    transport->state = SDF_NUKI_BLE_STATE_IDLE;
+  }
+
+  transport->reconnect_attempt = 0;
   return 0;
 }
 

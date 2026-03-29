@@ -65,13 +65,18 @@
 #define SDF_APP_POWER_ENABLE_LIGHT_SLEEP CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP
 #define SDF_APP_POWER_ENABLE_BLE_RADIO_GATING                                  \
   CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING
-// Set this to your lock's BLE address to avoid accidental pairing.
+#ifndef CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND
+#define CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND 0
+#endif
+#define SDF_APP_BLE_CONNECT_ON_DEMAND CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND
+// Leave this all-zero to discover a Nuki by advertisement during pairing.
+// Set it to your lock's BLE address to force matching a specific device.
 // Example for lock address AA:BB:CC:DD:EE:FF (LSB first for NimBLE):
 // {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}
 #define SDF_NUKI_TARGET_ADDR_TYPE BLE_ADDR_RANDOM
 static const ble_addr_t SDF_NUKI_TARGET_ADDR = {
     .type = SDF_NUKI_TARGET_ADDR_TYPE,
-    .val = {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}};
+    .val = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
 
 static const char *TAG = "sdf_app";
 
@@ -90,13 +95,23 @@ static uint32_t s_app_audit_err_nonce_replay = 0;
 static uint32_t s_app_audit_err_protocol = 0;
 static bool s_has_creds;
 static bool s_pairing_active;
+static bool s_pairing_requested;
 static uint16_t s_zigbee_alarm_mask;
 static bool s_latch_sequence_active;
+static bool s_lock_action_pending;
+static uint8_t s_pending_lock_action;
+static uint8_t s_pending_lock_flags;
 
 static sdf_lock_flow_t s_lock_flow;
 
 static void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
                                int32_t status, uint16_t detail);
+static void sdf_app_start_requested_nuki_pairing(void);
+static void sdf_app_resume_ble_transport(const char *reason);
+static void sdf_app_release_ble_transport(const char *reason);
+static int sdf_app_queue_lock_action(uint8_t lock_action, uint8_t flags);
+static int sdf_app_dispatch_pending_lock_action(void);
+static int sdf_app_start_unlock_unlatch_sequence(void);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
@@ -113,7 +128,9 @@ static void sdf_app_set_alarm_mask_bits(uint16_t set_bits,
                                         uint16_t clear_bits) {
   s_zigbee_alarm_mask |= set_bits;
   s_zigbee_alarm_mask &= (uint16_t)(~clear_bits);
-  sdf_protocol_zigbee_update_alarm_mask(s_zigbee_alarm_mask);
+  if (sdf_protocol_zigbee_is_enabled()) {
+    sdf_protocol_zigbee_update_alarm_mask(s_zigbee_alarm_mask);
+  }
 }
 
 static void sdf_app_abort_latch_sequence(const char *reason) {
@@ -123,6 +140,94 @@ static void sdf_app_abort_latch_sequence(const char *reason) {
 
   s_latch_sequence_active = false;
   ESP_LOGW(TAG, "Aborted latch sequence: %s", reason);
+}
+
+static void sdf_app_resume_ble_transport(const char *reason) {
+  int res = sdf_nuki_ble_set_enabled(&s_ble, true);
+  if (res != 0) {
+    ESP_LOGW(TAG, "Failed to enable BLE transport for resume: %d", res);
+  }
+
+  sdf_nuki_ble_reset_backoff(&s_ble);
+
+  res = sdf_nuki_ble_start(&s_ble);
+  if (res != 0) {
+    ESP_LOGW(TAG, "Failed to start BLE transport for resume: %d", res);
+  }
+
+  if (reason != NULL) {
+    ESP_LOGI(TAG, "Requested BLE transport resume: %s", reason);
+  }
+}
+
+static void sdf_app_release_ble_transport(const char *reason) {
+  if (!SDF_APP_BLE_CONNECT_ON_DEMAND) {
+    return;
+  }
+  if (s_pairing_active || s_pairing_requested || s_lock_action_pending ||
+      s_latch_sequence_active || !sdf_lock_flow_is_idle(&s_lock_flow)) {
+    return;
+  }
+
+  int res = sdf_nuki_ble_stop(&s_ble);
+  if (res != 0) {
+    ESP_LOGW(TAG, "Failed to release BLE transport: %d", res);
+    return;
+  }
+
+  if (reason != NULL) {
+    ESP_LOGI(TAG, "Released BLE transport: %s", reason);
+  }
+}
+
+static int sdf_app_queue_lock_action(uint8_t lock_action, uint8_t flags) {
+  if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
+    return SDF_NUKI_RESULT_ERR_INCOMPLETE;
+  }
+
+  if (s_lock_action_pending) {
+    if (s_pending_lock_action == lock_action && s_pending_lock_flags == flags) {
+      sdf_app_resume_ble_transport("queued lock action retry");
+      return SDF_NUKI_RESULT_OK;
+    }
+    return SDF_NUKI_RESULT_ERR_INCOMPLETE;
+  }
+
+  s_lock_action_pending = true;
+  s_pending_lock_action = lock_action;
+  s_pending_lock_flags = flags;
+
+  ESP_LOGI(TAG,
+           "BLE transport not ready; queued lock action 0x%02X until reconnect",
+           (unsigned)lock_action);
+  sdf_app_resume_ble_transport("queued lock action");
+  return SDF_NUKI_RESULT_OK;
+}
+
+static int sdf_app_dispatch_pending_lock_action(void) {
+  if (!s_lock_action_pending) {
+    return SDF_NUKI_RESULT_OK;
+  }
+
+  if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
+    return SDF_NUKI_RESULT_ERR_INCOMPLETE;
+  }
+
+  int res =
+      sdf_lock_flow_begin(&s_lock_flow, s_pending_lock_action, s_pending_lock_flags);
+  if (res != SDF_NUKI_RESULT_OK) {
+    ESP_LOGW(TAG,
+             "Queued lock action 0x%02X could not start after BLE ready: %d",
+             (unsigned)s_pending_lock_action, res);
+    return res;
+  }
+
+  ESP_LOGI(TAG, "Started queued lock action 0x%02X after BLE ready",
+           (unsigned)s_pending_lock_action);
+  s_lock_action_pending = false;
+  s_pending_lock_action = 0;
+  s_pending_lock_flags = 0;
+  return SDF_NUKI_RESULT_OK;
 }
 
 static sdf_protocol_zigbee_lock_state_t
@@ -144,6 +249,10 @@ sdf_app_map_lock_state_to_zigbee(uint8_t nuki_lock_state) {
 }
 
 static void sdf_app_update_zigbee_from_action(uint8_t lock_action) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return;
+  }
+
   switch (lock_action) {
   case SDF_LOCK_ACTION_LOCK:
   case SDF_LOCK_ACTION_LOCK_N_GO:
@@ -267,14 +376,17 @@ sdf_app_power_wake_reason_name(sdf_power_wake_reason_t reason) {
 
 static void sdf_app_update_battery_percent(uint8_t battery_percent) {
   esp_err_t err = sdf_power_set_battery_percent(battery_percent);
-  if (err != ESP_OK) {
+  if (err != ESP_OK && sdf_protocol_zigbee_is_enabled()) {
     sdf_protocol_zigbee_update_battery_percent(battery_percent);
   }
 }
 
 static bool sdf_app_power_busy(void *ctx) {
   (void)ctx;
-  if (s_pairing_active || s_latch_sequence_active) {
+  if (s_pairing_active || s_pairing_requested || s_latch_sequence_active) {
+    return true;
+  }
+  if (s_lock_action_pending) {
     return true;
   }
   if (s_lock_flow.state != SDF_LOCK_FLOW_IDLE) {
@@ -344,36 +456,31 @@ static void sdf_app_on_admin_action(void *ctx,
   switch (action) {
   case SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR:
     ESP_LOGI(TAG, "Admin authorized Nuki Pairing");
-    if (!s_has_creds && sdf_nuki_ble_is_ready(&s_ble) && !s_pairing_active) {
-      int res = sdf_nuki_pairing_init(&s_pairing, &s_client, 0, SDF_APP_ID,
-                                      SDF_APP_NAME);
-      if (res == SDF_NUKI_RESULT_OK) {
-        s_pairing_active = true;
-        led_rapid_yellow();
-        res = sdf_nuki_pairing_start(&s_pairing);
-        if (res != SDF_NUKI_RESULT_OK) {
-          ESP_LOGE(TAG, "Pairing start failed: %d", res);
-          sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 1);
-          s_pairing_active = false;
-          led_flash_red();
-        }
-      } else {
-        ESP_LOGE(TAG, "Pairing init failed: %d", res);
-        sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 0);
-        led_flash_red();
-      }
-    } else {
-      ESP_LOGW(
-          TAG,
-          "Cannot start Nuki pairing: already have creds or BLE not ready");
+    sdf_power_mark_activity();
+    if (s_pairing_active || s_pairing_requested) {
+      ESP_LOGW(TAG, "Cannot start Nuki pairing: pairing already active");
       led_flash_red();
+      break;
     }
+
+    s_pairing_requested = true;
+    led_rapid_yellow();
+    sdf_nuki_ble_set_enabled(&s_ble, true);
+    sdf_nuki_ble_start(&s_ble);
+    if (!sdf_nuki_ble_is_ready(&s_ble)) {
+      ESP_LOGI(TAG,
+               "Nuki pairing requested; waiting for BLE transport ready");
+    }
+    sdf_app_start_requested_nuki_pairing();
     break;
 
   case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
     ESP_LOGI(TAG, "Admin authorized Zigbee Join");
     led_rapid_purple();
-    sdf_protocol_zigbee_permit_join();
+    esp_err_t err = sdf_protocol_zigbee_permit_join();
+    if (err == ESP_ERR_NOT_SUPPORTED) {
+      ESP_LOGI(TAG, "Ignoring Zigbee Join request because Zigbee is disabled");
+    }
     break;
 
   case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET:
@@ -391,7 +498,7 @@ static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
   (void)ctx;
   sdf_power_mark_activity();
 
-  if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
+  if (!s_has_creds || s_pairing_active) {
     return SDF_NUKI_RESULT_ERR_NO_KEY;
   }
 
@@ -400,9 +507,9 @@ static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
     sdf_services_trigger_low_battery_warning();
   }
 
-  ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting unlock",
+  ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting direct unlatch",
            (unsigned)user_id);
-  return sdf_app_lock_action(SDF_LOCK_ACTION_UNLOCK, 0);
+  return sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
 }
 
 static void sdf_app_on_enrollment_state(void *ctx,
@@ -446,6 +553,11 @@ static int sdf_app_start_unlock_unlatch_sequence(void) {
 }
 
 static void sdf_app_update_zigbee_user_list(void) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    ESP_LOGI(TAG, "Skipping Zigbee user sync because Zigbee is disabled");
+    return;
+  }
+
   const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
   uint16_t *user_ids = calloc(max_users, sizeof(*user_ids));
   uint8_t *perms = calloc(max_users, sizeof(*perms));
@@ -725,6 +837,7 @@ static void sdf_app_lf_on_fail(void *ctx, const char *reason) {
   (void)ctx;
   sdf_app_abort_latch_sequence(reason);
   sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+  sdf_app_release_ble_transport("lock action failed");
 }
 
 static void sdf_app_lf_on_progress(void *ctx, bool in_progress, uint8_t action,
@@ -776,8 +889,12 @@ static int sdf_app_send_unencrypted(void *ctx, const uint8_t *data,
 
 int sdf_app_request_keyturner_state(void) {
   sdf_power_mark_activity();
-  if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
+  if (!s_has_creds || s_pairing_active) {
     return SDF_NUKI_RESULT_ERR_ARG;
+  }
+  if (!sdf_nuki_ble_is_ready(&s_ble)) {
+    sdf_app_resume_ble_transport("keyturner state request while disconnected");
+    return SDF_NUKI_RESULT_ERR_INCOMPLETE;
   }
 
   return sdf_nuki_client_send_request_data(
@@ -786,12 +903,16 @@ int sdf_app_request_keyturner_state(void) {
 
 int sdf_app_lock_action(uint8_t lock_action, uint8_t flags) {
   sdf_power_mark_activity();
-  if (!s_has_creds || s_pairing_active || !sdf_nuki_ble_is_ready(&s_ble)) {
+  if (!s_has_creds || s_pairing_active) {
     return SDF_NUKI_RESULT_ERR_ARG;
   }
 
   if (!sdf_app_valid_lock_action(lock_action)) {
     return SDF_NUKI_RESULT_ERR_ARG;
+  }
+
+  if (!sdf_nuki_ble_is_ready(&s_ble)) {
+    return sdf_app_queue_lock_action(lock_action, flags);
   }
 
   return sdf_lock_flow_begin(&s_lock_flow, lock_action, flags);
@@ -870,6 +991,7 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
     } else {
       sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_LOW_BATTERY);
     }
+    sdf_app_release_ble_transport("keyturner state synchronized");
     return;
   }
 
@@ -901,6 +1023,42 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
            (unsigned)msg->payload_len);
 }
 
+static void sdf_app_start_requested_nuki_pairing(void) {
+  if (!s_pairing_requested || s_pairing_active) {
+    return;
+  }
+
+  if (!sdf_nuki_ble_is_ready(&s_ble)) {
+    return;
+  }
+
+  if (s_has_creds) {
+    ESP_LOGW(TAG,
+             "Starting Nuki pairing with existing stored credentials; "
+             "successful pairing will replace them");
+  }
+
+  int res = sdf_nuki_pairing_init(&s_pairing, &s_client, 1 /* Bridge */, SDF_APP_ID,
+                                  SDF_APP_NAME);
+  if (res != SDF_NUKI_RESULT_OK) {
+    ESP_LOGE(TAG, "Pairing init failed: %d", res);
+    sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 0);
+    s_pairing_requested = false;
+    led_flash_red();
+    return;
+  }
+
+  s_pairing_active = true;
+  s_pairing_requested = false;
+  res = sdf_nuki_pairing_start(&s_pairing);
+  if (res != SDF_NUKI_RESULT_OK) {
+    ESP_LOGE(TAG, "Pairing start failed: %d", res);
+    sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, res, 1);
+    s_pairing_active = false;
+    led_flash_red();
+  }
+}
+
 static void sdf_app_on_ble_ready(void *ctx) {
   (void)ctx;
   sdf_power_mark_activity();
@@ -913,15 +1071,60 @@ static void sdf_app_on_ble_ready(void *ctx) {
     sdf_app_lf_on_progress(NULL, false, 0, 0);
   }
 
+  if (s_pairing_requested) {
+    ESP_LOGI(TAG, "BLE transport ready; starting requested Nuki pairing");
+    sdf_app_start_requested_nuki_pairing();
+    if (s_pairing_active) {
+      return;
+    }
+  }
+
   if (!s_has_creds) {
     ESP_LOGI(TAG,
              "No Nuki credentials found. Waiting for Admin Action to pair.");
     return;
   }
 
+  if (s_lock_action_pending) {
+    int res = sdf_app_dispatch_pending_lock_action();
+    if (res != SDF_NUKI_RESULT_OK) {
+      ESP_LOGW(TAG, "Queued lock action still waiting after BLE ready: %d", res);
+    }
+    return;
+  }
+
   int res = sdf_app_request_keyturner_state();
   if (res != SDF_NUKI_RESULT_OK) {
     ESP_LOGW(TAG, "Initial keyturner state request failed: %d", res);
+  }
+}
+
+static void sdf_app_check_pairing_complete(void) {
+  if (!s_pairing_active || s_pairing.state != SDF_NUKI_PAIRING_COMPLETE) {
+    return;
+  }
+
+  sdf_nuki_credentials_t creds;
+  if (sdf_nuki_pairing_get_credentials(&s_pairing, &creds) !=
+      SDF_NUKI_RESULT_OK) {
+    return;
+  }
+
+  s_client.creds = creds;
+  s_has_creds = true;
+  s_pairing_active = false;
+  sdf_app_emit_audit(SDF_AUDIT_PAIRING_COMPLETE, 0,
+                     (int32_t)creds.authorization_id, 0);
+  esp_err_t err = sdf_storage_nuki_save(creds.authorization_id, creds.shared_key);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to save credentials: %s", esp_err_to_name(err));
+    sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 1);
+  }
+  ESP_LOGI(TAG, "Pairing complete; credentials stored");
+  led_solid_green();
+  int res = sdf_app_request_keyturner_state();
+  if (res != SDF_NUKI_RESULT_OK) {
+    ESP_LOGW(TAG, "Post-pair keyturner state request failed: %d", res);
   }
 }
 
@@ -940,6 +1143,8 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
         sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, pairing_res, 2);
         led_flash_red();
       }
+
+      sdf_app_check_pairing_complete();
     }
     return;
   }
@@ -953,29 +1158,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
       led_flash_red();
     }
 
-    if (s_pairing.state == SDF_NUKI_PAIRING_COMPLETE) {
-      sdf_nuki_credentials_t creds;
-      if (sdf_nuki_pairing_get_credentials(&s_pairing, &creds) ==
-          SDF_NUKI_RESULT_OK) {
-        s_client.creds = creds;
-        s_has_creds = true;
-        s_pairing_active = false;
-        sdf_app_emit_audit(SDF_AUDIT_PAIRING_COMPLETE, 0,
-                           (int32_t)creds.authorization_id, 0);
-        esp_err_t err =
-            sdf_storage_nuki_save(creds.authorization_id, creds.shared_key);
-        if (err != ESP_OK) {
-          ESP_LOGE(TAG, "Failed to save credentials: %s", esp_err_to_name(err));
-          sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 1);
-        }
-        ESP_LOGI(TAG, "Pairing complete; credentials stored");
-        led_solid_green();
-        int res = sdf_app_request_keyturner_state();
-        if (res != SDF_NUKI_RESULT_OK) {
-          ESP_LOGW(TAG, "Post-pair keyturner state request failed: %d", res);
-        }
-      }
-    }
+    sdf_app_check_pairing_complete();
     return;
   }
 
@@ -1015,6 +1198,9 @@ void sdf_app_init(void) {
   sdf_lock_flow_init(&s_lock_flow, SDF_APP_LOCK_ACTION_MAX_RETRIES, &lf_ops);
   s_zigbee_alarm_mask = 0;
   s_latch_sequence_active = false;
+  s_lock_action_pending = false;
+  s_pending_lock_action = 0;
+  s_pending_lock_flags = 0;
 
   esp_err_t err = sdf_storage_init();
   if (err != ESP_OK) {
@@ -1102,28 +1288,33 @@ void sdf_app_init(void) {
              esp_err_to_name(err));
   }
 
-  err = sdf_protocol_zigbee_set_checkin_interval_ms(
-      SDF_APP_POWER_CHECKIN_INTERVAL_MS);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to set Zigbee check-in interval: %s",
-             esp_err_to_name(err));
-  }
+  if (sdf_protocol_zigbee_is_enabled()) {
+    err = sdf_protocol_zigbee_set_checkin_interval_ms(
+        SDF_APP_POWER_CHECKIN_INTERVAL_MS);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to set Zigbee check-in interval: %s",
+               esp_err_to_name(err));
+    }
 
-  err =
-      sdf_protocol_zigbee_set_command_handler(sdf_app_on_zigbee_command, NULL);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to set Zigbee command handler: %s",
-             esp_err_to_name(err));
-  }
+    err = sdf_protocol_zigbee_set_command_handler(sdf_app_on_zigbee_command,
+                                                  NULL);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to set Zigbee command handler: %s",
+               esp_err_to_name(err));
+    }
 
-  err = sdf_protocol_zigbee_init();
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to start Zigbee protocol: %s", esp_err_to_name(err));
+    err = sdf_protocol_zigbee_init();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to start Zigbee protocol: %s",
+               esp_err_to_name(err));
+    } else {
+      sdf_protocol_zigbee_update_lock_state(
+          SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED);
+      sdf_app_update_battery_percent(SDF_APP_POWER_BATTERY_DEFAULT_PERCENT);
+      sdf_protocol_zigbee_update_alarm_mask(0);
+    }
   } else {
-    sdf_protocol_zigbee_update_lock_state(
-        SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED);
-    sdf_app_update_battery_percent(SDF_APP_POWER_BATTERY_DEFAULT_PERCENT);
-    sdf_protocol_zigbee_update_alarm_mask(0);
+    ESP_LOGI(TAG, "Zigbee functionality disabled by configuration");
   }
 
   sdf_nuki_ble_init(&s_ble, sdf_app_on_ble_rx, NULL, sdf_app_on_ble_ready,
@@ -1139,17 +1330,29 @@ void sdf_app_init(void) {
       memcpy(ble_target.val, stored_addr, sizeof(ble_target.val));
       ESP_LOGI(TAG, "Loaded BLE target address from NVS");
     } else {
-      ESP_LOGI(TAG, "Using compile-time BLE target address");
+      if (sdf_nuki_ble_addr_is_empty(&ble_target)) {
+        ESP_LOGI(TAG,
+                 "No BLE target address configured; using advertisement "
+                 "discovery");
+      } else {
+        ESP_LOGI(TAG, "Using compile-time BLE target address");
+      }
     }
   }
   if (!sdf_nuki_ble_addr_is_empty(&ble_target)) {
     sdf_nuki_ble_set_target_addr(&s_ble, &ble_target);
-    ESP_LOGI(TAG, "Starting BLE scan (target address set)");
+    if (SDF_APP_BLE_CONNECT_ON_DEMAND) {
+      ESP_LOGI(TAG,
+               "BLE target address configured; connect-on-demand mode defers "
+               "initial scan");
+    } else {
+      ESP_LOGI(TAG, "Starting BLE scan (target address set)");
+      sdf_nuki_ble_start(&s_ble);
+    }
   } else {
     ESP_LOGI(TAG,
-             "Starting BLE scan (advertisement discovery, no target address)");
+             "No BLE target address; scan deferred until pairing requested");
   }
-  sdf_nuki_ble_start(&s_ble);
 
   sdf_power_manager_config_t power_cfg;
   sdf_power_get_default_power_config(&power_cfg);

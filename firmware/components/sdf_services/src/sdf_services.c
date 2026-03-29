@@ -1,6 +1,5 @@
-#include "sdf_services.h"
+#include "sdf_services_internal.h"
 #include "sdf_drivers.h"
-#include "sdf_lock_guard.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -27,8 +26,6 @@
 #define SDF_SERVICES_TASK_STACK 4096
 #define SDF_SERVICES_TASK_PRIORITY 5
 
-#define SDF_SERVICES_LOCK_WAIT_MS 250u
-
 #define SDF_SERVICES_DEFAULT_UART_PORT 1
 #define SDF_SERVICES_DEFAULT_UART_TX_PIN 4
 #define SDF_SERVICES_DEFAULT_UART_RX_PIN 5
@@ -45,85 +42,19 @@
   ((uint32_t)CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_WINDOW_MS)
 #define SDF_SERVICES_DEFAULT_LOCKOUT_DURATION_MS                               \
   ((uint32_t)CONFIG_SDF_SECURITY_BIOMETRIC_LOCKOUT_MS)
+#define SDF_SERVICES_ADMIN_ACTION_TIMEOUT_MS 10000u
+#define SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS 15000u
 
 static const char *TAG = "sdf_services";
 
-typedef struct {
-  SemaphoreHandle_t lock;
-  SemaphoreHandle_t wake_sem;
-  TaskHandle_t task;
-  bool initialized;
-  sdf_services_config_t config;
-  sdf_enrollment_sm_t enrollment;
-  bool enrollment_request_pending;
-  uint16_t request_user_id;
-  uint8_t request_permission;
-  int64_t match_cooldown_until_us;
-  uint32_t failed_attempt_count;
-  int64_t failed_attempt_window_start_us;
-  int64_t lockout_until_us;
-  sdf_services_admin_action_t pending_admin_action;
-  int64_t pending_admin_action_start_us;
-  size_t enrolled_user_count;
-#ifndef CONFIG_IDF_TARGET_LINUX
-  button_handle_t btn_handle;
-#endif
-} sdf_services_state_t;
-
 static sdf_services_state_t s_state = {0};
 
-static const char *
-sdf_services_enrollment_state_name(sdf_enrollment_state_t state) {
-  switch (state) {
-  case SDF_ENROLLMENT_STATE_IDLE:
-    return "IDLE";
-  case SDF_ENROLLMENT_STATE_STEP_1:
-    return "STEP_1";
-  case SDF_ENROLLMENT_STATE_STEP_2:
-    return "STEP_2";
-  case SDF_ENROLLMENT_STATE_STEP_3:
-    return "STEP_3";
-  case SDF_ENROLLMENT_STATE_SUCCESS:
-    return "SUCCESS";
-  case SDF_ENROLLMENT_STATE_ERROR:
-    return "ERROR";
-  default:
-    return "UNKNOWN";
-  }
+sdf_services_state_t *sdf_services_state(void) {
+  return &s_state;
 }
 
-static const char *
-sdf_services_enrollment_result_name(sdf_enrollment_result_t result) {
-  switch (result) {
-  case SDF_ENROLLMENT_RESULT_NONE:
-    return "NONE";
-  case SDF_ENROLLMENT_RESULT_SUCCESS:
-    return "SUCCESS";
-  case SDF_ENROLLMENT_RESULT_FAILED:
-    return "FAILED";
-  case SDF_ENROLLMENT_RESULT_TIMEOUT:
-    return "TIMEOUT";
-  case SDF_ENROLLMENT_RESULT_FULL:
-    return "FULL";
-  case SDF_ENROLLMENT_RESULT_USER_OCCUPIED:
-    return "USER_OCCUPIED";
-  case SDF_ENROLLMENT_RESULT_FINGER_OCCUPIED:
-    return "FINGER_OCCUPIED";
-  case SDF_ENROLLMENT_RESULT_PROTOCOL_ERROR:
-    return "PROTOCOL_ERROR";
-  case SDF_ENROLLMENT_RESULT_IO_ERROR:
-    return "IO_ERROR";
-  case SDF_ENROLLMENT_RESULT_BAD_ARG:
-    return "BAD_ARG";
-  case SDF_ENROLLMENT_RESULT_BUSY:
-    return "BUSY";
-  default:
-    return "UNKNOWN";
-  }
-}
-
-static const char *
-sdf_services_fingerprint_result_name(sdf_fingerprint_op_result_t result) {
+const char *sdf_services_fingerprint_result_name(
+    sdf_fingerprint_op_result_t result) {
   switch (result) {
   case SDF_FINGERPRINT_OP_OK:
     return "OK";
@@ -150,25 +81,50 @@ sdf_services_fingerprint_result_name(sdf_fingerprint_op_result_t result) {
   }
 }
 
-static void sdf_services_notify_enrollment(void) {
+static esp_err_t sdf_services_fingerprint_result_to_err(
+    sdf_fingerprint_op_result_t result) {
+  switch (result) {
+  case SDF_FINGERPRINT_OP_OK:
+    return ESP_OK;
+  case SDF_FINGERPRINT_OP_TIMEOUT:
+    return ESP_ERR_TIMEOUT;
+  case SDF_FINGERPRINT_OP_BAD_ARG:
+    return ESP_ERR_INVALID_ARG;
+  case SDF_FINGERPRINT_OP_PROTOCOL_ERROR:
+    return ESP_ERR_INVALID_RESPONSE;
+  default:
+    return ESP_FAIL;
+  }
+}
+
+static void sdf_services_complete_permission_change(esp_err_t result) {
+  SemaphoreHandle_t done_sem = NULL;
+  bool should_signal = false;
+
   if (s_state.lock == NULL) {
     return;
   }
 
-  sdf_services_enrollment_cb cb = NULL;
-  void *ctx = NULL;
-  sdf_enrollment_sm_t snapshot;
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired != pdTRUE)
+    if (guard.acquired != pdTRUE) {
       return;
-    cb = s_state.config.enrollment_cb;
-    ctx = s_state.config.enrollment_ctx;
-    snapshot = s_state.enrollment;
+    }
+
+    if (!s_state.permission_change_pending) {
+      return;
+    }
+
+    s_state.permission_change_result = result;
+    s_state.permission_change_pending = false;
+    s_state.permission_change_user_id = 0;
+    s_state.permission_change_permission = 0;
+    done_sem = s_state.admin_action_done_sem;
+    should_signal = (done_sem != NULL);
   }
 
-  if (cb != NULL) {
-    cb(ctx, &snapshot);
+  if (should_signal) {
+    xSemaphoreGive(done_sem);
   }
 }
 
@@ -244,30 +200,44 @@ static void sdf_services_execute_admin_action(
     return;
   }
 
+  if (action == SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION) {
+    uint16_t user_id = 0;
+    uint8_t permission = 0;
+    {
+      SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+      if (guard.acquired != pdTRUE) {
+        sdf_services_complete_permission_change(ESP_ERR_TIMEOUT);
+        led_flash_red();
+        return;
+      }
+
+      user_id = s_state.permission_change_user_id;
+      permission = s_state.permission_change_permission;
+    }
+
+    sdf_fingerprint_op_result_t fp_result =
+        fp_change_user_permission(user_id, permission);
+    esp_err_t err = sdf_services_fingerprint_result_to_err(fp_result);
+
+    if (err == ESP_OK) {
+      ESP_LOGI(TAG, "Changed fingerprint permission for user_id=%u to %u",
+               (unsigned)user_id, (unsigned)permission);
+      led_flash_green();
+    } else {
+      ESP_LOGW(TAG,
+               "Failed to change fingerprint permission for user_id=%u to %u: "
+               "%s",
+               (unsigned)user_id, (unsigned)permission,
+               sdf_services_fingerprint_result_name(fp_result));
+      led_flash_red();
+    }
+
+    sdf_services_complete_permission_change(err);
+    return;
+  }
+
   if (action_cb != NULL) {
     action_cb(action_ctx, action);
-  }
-}
-
-static void
-sdf_services_handle_enrollment_feedback(const sdf_enrollment_sm_t *before,
-                                        const sdf_enrollment_sm_t *after) {
-  if (before == NULL || after == NULL) {
-    return;
-  }
-
-  if (after->state == SDF_ENROLLMENT_STATE_SUCCESS) {
-    led_enrollment_success_green();
-    return;
-  }
-
-  if (after->state == SDF_ENROLLMENT_STATE_ERROR) {
-    led_flash_red();
-    return;
-  }
-
-  if (after->completed_steps > before->completed_steps) {
-    led_enrollment_step_green();
   }
 }
 
@@ -539,165 +509,6 @@ static void sdf_services_run_match_cycle(void) {
   sdf_services_notify_security_event(&event);
 }
 
-static void sdf_services_run_enrollment_step(void) {
-  while (true) {
-    if (xSemaphoreTake(s_state.lock,
-                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
-      return;
-    }
-
-    if (!sdf_enrollment_sm_is_active(&s_state.enrollment)) {
-      xSemaphoreGive(s_state.lock);
-      return;
-    }
-
-    sdf_enrollment_sm_t before = s_state.enrollment;
-    uint8_t step = sdf_enrollment_sm_current_step(&s_state.enrollment);
-    uint8_t cmd = sdf_enrollment_sm_current_command(&s_state.enrollment);
-    uint16_t user_id = s_state.enrollment.user_id;
-    uint8_t permission = s_state.enrollment.permission;
-    xSemaphoreGive(s_state.lock);
-
-    sdf_fingerprint_enroll_step_t driver_step = SDF_FINGERPRINT_ENROLL_STEP_1;
-    switch (step) {
-    case 1:
-      driver_step = SDF_FINGERPRINT_ENROLL_STEP_1;
-      break;
-    case 2:
-      driver_step = SDF_FINGERPRINT_ENROLL_STEP_2;
-      break;
-    case 3:
-      driver_step = SDF_FINGERPRINT_ENROLL_STEP_3;
-      break;
-    default:
-      return;
-    }
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
-    sdf_fingerprint_op_result_t step_result =
-        fp_enroll_step(driver_step, user_id, permission);
-
-    if (xSemaphoreTake(s_state.lock,
-                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
-      return;
-    }
-
-    sdf_enrollment_sm_apply_step_result(&s_state.enrollment, step_result);
-    sdf_enrollment_sm_t after = s_state.enrollment;
-    xSemaphoreGive(s_state.lock);
-
-    bool retry_same_step = step_result == SDF_FINGERPRINT_OP_FAILED &&
-                           after.state == before.state &&
-                           after.completed_steps == before.completed_steps;
-    ESP_LOGI(TAG,
-             "Enrollment step=%u cmd=0x%02X user_id=%u permission=%u "
-             "before=%s completed=%u driver=%s after=%s result=%s "
-             "completed=%u%s",
-             (unsigned)step, (unsigned)cmd, (unsigned)user_id,
-             (unsigned)permission,
-             sdf_services_enrollment_state_name(before.state),
-             (unsigned)before.completed_steps,
-             sdf_services_fingerprint_result_name(step_result),
-             sdf_services_enrollment_state_name(after.state),
-             sdf_services_enrollment_result_name(after.result),
-             (unsigned)after.completed_steps,
-             retry_same_step ? " (retrying same step after ACK_FAIL)" : "");
-
-    if (!retry_same_step && after.state != before.state &&
-        sdf_enrollment_sm_is_active(&after)) {
-      ESP_LOGI(TAG,
-               "Enrollment advancing immediately to step=%u cmd=0x%02X after "
-               "ACK success",
-               (unsigned)sdf_enrollment_sm_current_step(&after),
-               (unsigned)sdf_enrollment_sm_current_command(&after));
-    }
-
-    sdf_services_handle_enrollment_feedback(&before, &after);
-    sdf_services_notify_enrollment();
-
-    if (after.state == SDF_ENROLLMENT_STATE_SUCCESS ||
-        after.state == SDF_ENROLLMENT_STATE_ERROR) {
-      ESP_LOGI(TAG,
-               "Enrollment finished user_id=%u permission=%u state=%s "
-               "result=%s completed=%u/3",
-               (unsigned)after.user_id, (unsigned)after.permission,
-               sdf_services_enrollment_state_name(after.state),
-               sdf_services_enrollment_result_name(after.result),
-               (unsigned)after.completed_steps);
-
-      if (xSemaphoreTake(s_state.lock,
-                         pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-        s_state.match_cooldown_until_us =
-            esp_timer_get_time() +
-            ((int64_t)s_state.config.match_cooldown_ms * 1000LL);
-
-        if (after.state == SDF_ENROLLMENT_STATE_SUCCESS) {
-          s_state.enrolled_user_count++;
-        }
-        xSemaphoreGive(s_state.lock);
-      }
-      fp_set_keep_power_on(false);
-      return;
-    }
-
-    if (step_result != SDF_FINGERPRINT_OP_OK) {
-      return;
-    }
-  }
-}
-
-static void sdf_services_start_pending_enrollment_if_any(void) {
-  bool started = false;
-  bool failed = false;
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE) {
-    return;
-  }
-
-  if (!s_state.enrollment_request_pending ||
-      sdf_enrollment_sm_is_active(&s_state.enrollment)) {
-    xSemaphoreGive(s_state.lock);
-    return;
-  }
-
-  esp_err_t err = sdf_enrollment_sm_start(
-      &s_state.enrollment, s_state.request_user_id, s_state.request_permission);
-  s_state.enrollment_request_pending = false;
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Unable to start enrollment state machine: %s",
-             esp_err_to_name(err));
-    failed = true;
-    xSemaphoreGive(s_state.lock);
-  } else {
-    ESP_LOGI(TAG,
-             "Enrollment started user_id=%u permission=%u step=%u cmd=0x%02X",
-             (unsigned)s_state.enrollment.user_id,
-             (unsigned)s_state.enrollment.permission,
-             (unsigned)sdf_enrollment_sm_current_step(&s_state.enrollment),
-             (unsigned)sdf_enrollment_sm_current_command(&s_state.enrollment));
-    started = true;
-    xSemaphoreGive(s_state.lock);
-  }
-
-  if (started) {
-    esp_err_t power_hold_err = fp_set_keep_power_on(true);
-    if (power_hold_err != ESP_OK) {
-      ESP_LOGW(TAG, "Failed to enable enrollment power hold: %s",
-               esp_err_to_name(power_hold_err));
-    }
-    led_pulse_blue();
-    sdf_services_notify_enrollment();
-    return;
-  }
-
-  if (failed) {
-    sdf_services_notify_enrollment();
-  }
-}
-
 static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
   (void)arg;
   BaseType_t higher_priority_task_woken = pdFALSE;
@@ -847,6 +658,8 @@ static void sdf_services_task(void *arg) {
     uint32_t poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
     int64_t now_us = esp_timer_get_time();
     bool is_pending_admin_action = false;
+    sdf_services_admin_action_t timed_out_action =
+        SDF_SERVICES_ADMIN_ACTION_NONE;
 
     if (xSemaphoreTake(s_state.lock,
                        pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
@@ -855,23 +668,25 @@ static void sdf_services_task(void *arg) {
       // Check for config button timeout
       if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE &&
           s_state.pending_admin_action_start_us > 0) {
-        if ((now_us - s_state.pending_admin_action_start_us) > 10000000LL) {
+        if ((now_us - s_state.pending_admin_action_start_us) >
+            ((int64_t)SDF_SERVICES_ADMIN_ACTION_TIMEOUT_MS * 1000LL)) {
           ESP_LOGW(TAG, "Admin Action Timeout. Resetting state.");
+          timed_out_action = s_state.pending_admin_action;
           s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
           s_state.pending_admin_action_start_us = 0;
-          xSemaphoreGive(s_state.lock);
-          led_flash_red();
-          if (xSemaphoreTake(s_state.lock,
-                             pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-              pdTRUE) {
-            // best effort
-          }
         }
       }
 
       is_pending_admin_action =
           (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE);
       xSemaphoreGive(s_state.lock);
+    }
+
+    if (timed_out_action != SDF_SERVICES_ADMIN_ACTION_NONE) {
+      led_flash_red();
+      if (timed_out_action == SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION) {
+        sdf_services_complete_permission_change(ESP_ERR_TIMEOUT);
+      }
     }
 
     sdf_services_start_pending_enrollment_if_any();
@@ -964,7 +779,9 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   if (s_state.lock == NULL) {
     s_state.lock = xSemaphoreCreateMutex();
     s_state.wake_sem = xSemaphoreCreateBinary();
-    if (s_state.lock == NULL || s_state.wake_sem == NULL) {
+    s_state.admin_action_done_sem = xSemaphoreCreateBinary();
+    if (s_state.lock == NULL || s_state.wake_sem == NULL ||
+        s_state.admin_action_done_sem == NULL) {
       return ESP_ERR_NO_MEM;
     }
   }
@@ -989,6 +806,13 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   s_state.failed_attempt_count = 0;
   s_state.failed_attempt_window_start_us = 0;
   s_state.lockout_until_us = 0;
+  s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_state.pending_admin_action_start_us = 0;
+  s_state.permission_change_pending = false;
+  s_state.permission_change_user_id = 0;
+  s_state.permission_change_permission = 0;
+  s_state.permission_change_result = ESP_OK;
+  s_state.enrolled_user_count = 0;
   xSemaphoreGive(s_state.lock);
 
   sdf_drivers_config_t drivers_config = {
@@ -1094,74 +918,6 @@ void sdf_services_trigger_low_battery_warning(void) {
   led_flash_orange();
 }
 
-esp_err_t sdf_services_request_enrollment(uint16_t user_id,
-                                          uint8_t permission) {
-  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
-      user_id > SDF_FINGERPRINT_USER_ID_MAX || permission < 1u ||
-      permission > 3u) {
-    return ESP_ERR_INVALID_ARG;
-  }
-
-  if (s_state.lock == NULL) {
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE) {
-    return ESP_ERR_TIMEOUT;
-  }
-
-  if (!s_state.initialized || s_state.enrollment_request_pending ||
-      sdf_enrollment_sm_is_active(&s_state.enrollment)) {
-    xSemaphoreGive(s_state.lock);
-    return ESP_ERR_INVALID_STATE;
-  }
-
-  s_state.request_user_id = user_id;
-  s_state.request_permission = permission;
-  s_state.enrollment_request_pending = true;
-  xSemaphoreGive(s_state.lock);
-
-  /* Wake the service task if it is blocked on the fingerprint semaphore */
-  if (s_state.wake_sem != NULL) {
-    xSemaphoreGive(s_state.wake_sem);
-  }
-  return ESP_OK;
-}
-
-bool sdf_services_is_enrollment_active(void) {
-  if (s_state.lock == NULL) {
-    return false;
-  }
-
-  bool active = false;
-  {
-    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired == pdTRUE) {
-      active = sdf_enrollment_sm_is_active(&s_state.enrollment) ||
-               s_state.enrollment_request_pending;
-    }
-  }
-  return active;
-}
-
-sdf_enrollment_sm_t sdf_services_get_enrollment_state(void) {
-  sdf_enrollment_sm_t snapshot;
-  sdf_enrollment_sm_init(&snapshot);
-
-  if (s_state.lock == NULL) {
-    return snapshot;
-  }
-
-  {
-    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired == pdTRUE) {
-      snapshot = s_state.enrollment;
-    }
-  }
-  return snapshot;
-}
-
 esp_err_t sdf_services_delete_user(uint16_t user_id) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
@@ -1206,4 +962,126 @@ esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
     res = fp_query_users(user_ids, permissions, count, max_count);
   }
   return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t sdf_services_change_user_permission(uint16_t user_id,
+                                              uint8_t permission) {
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
+      user_id > SDF_FINGERPRINT_USER_ID_MAX || permission < 1u ||
+      permission > 3u) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock == NULL || s_state.admin_action_done_sem == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  bool initialized = false;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE) {
+      return ESP_ERR_TIMEOUT;
+    }
+
+    initialized = s_state.initialized;
+    if (!initialized || s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE ||
+        s_state.permission_change_pending ||
+        s_state.enrollment_request_pending ||
+        sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+      return ESP_ERR_INVALID_STATE;
+    }
+  }
+
+  if (!initialized) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  const size_t query_capacity = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
+  uint16_t *user_ids = calloc(query_capacity, sizeof(*user_ids));
+  uint8_t *permissions = calloc(query_capacity, sizeof(*permissions));
+  if (user_ids == NULL || permissions == NULL) {
+    free(permissions);
+    free(user_ids);
+    return ESP_ERR_NO_MEM;
+  }
+
+  size_t count = query_capacity;
+  esp_err_t err =
+      sdf_services_query_users(user_ids, permissions, &count, query_capacity);
+  if (err != ESP_OK) {
+    free(permissions);
+    free(user_ids);
+    return err;
+  }
+
+  bool found = false;
+  uint8_t current_permission = 0;
+  size_t admin_count = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (permissions[i] == 3u) {
+      admin_count++;
+    }
+    if (user_ids[i] == user_id) {
+      found = true;
+      current_permission = permissions[i];
+    }
+  }
+
+  free(permissions);
+  free(user_ids);
+
+  if (!found) {
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  if (current_permission == permission) {
+    return ESP_OK;
+  }
+
+  if (current_permission == 3u && permission != 3u && admin_count <= 1u) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE) {
+      return ESP_ERR_TIMEOUT;
+    }
+
+    if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE ||
+        s_state.permission_change_pending ||
+        s_state.enrollment_request_pending ||
+        sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+      return ESP_ERR_INVALID_STATE;
+    }
+
+    while (xSemaphoreTake(s_state.admin_action_done_sem, 0) == pdTRUE) {
+    }
+
+    s_state.permission_change_pending = true;
+    s_state.permission_change_user_id = user_id;
+    s_state.permission_change_permission = permission;
+    s_state.permission_change_result = ESP_ERR_TIMEOUT;
+    s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION;
+    s_state.pending_admin_action_start_us = esp_timer_get_time();
+  }
+
+  led_pulse_blue();
+  if (s_state.wake_sem != NULL) {
+    xSemaphoreGive(s_state.wake_sem);
+  }
+
+  if (xSemaphoreTake(s_state.admin_action_done_sem,
+                     pdMS_TO_TICKS(SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS)) !=
+      pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE) {
+      return ESP_ERR_TIMEOUT;
+    }
+    return s_state.permission_change_result;
+  }
 }

@@ -1,5 +1,13 @@
 menu "SDF Zigbee"
 
+config SDF_ZIGBEE_ENABLE
+    bool "Enable Zigbee functionality"
+    default y
+    help
+        Enable the Zigbee stack and Zigbee-facing application behavior.
+        Disable this to run the device without Zigbee and allow the power
+        manager to treat the device as standalone when idle.
+
 config SDF_ZIGBEE_SLEEP_THRESHOLD_MS
     int "Minimum idle time before Zigbee sleep (ms)"
     range 10 5000
