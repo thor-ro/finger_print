@@ -39,9 +39,6 @@
 #define SDF_ZIGBEE_PRIMARY_CHANNEL_MASK ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK
 
 /* Kconfig defaults (overridden by sdkconfig when available) */
-#ifndef CONFIG_SDF_ZIGBEE_ENABLE
-#define CONFIG_SDF_ZIGBEE_ENABLE 1
-#endif
 #ifndef CONFIG_SDF_ZIGBEE_SLEEP_ENABLE
 #define CONFIG_SDF_ZIGBEE_SLEEP_ENABLE 1
 #endif
@@ -49,10 +46,16 @@
 #define CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS 20
 #endif
 
+#if defined(CONFIG_SDF_ZIGBEE_ENABLE)
+#define SDF_ZIGBEE_ENABLED 1
+#else
+#define SDF_ZIGBEE_ENABLED 0
+#endif
+
 static const char *TAG = "sdf_protocol_zigbee";
 
 bool sdf_protocol_zigbee_is_enabled(void) {
-  return CONFIG_SDF_ZIGBEE_ENABLE != 0;
+  return SDF_ZIGBEE_ENABLED != 0;
 }
 
 typedef struct {
@@ -897,7 +900,7 @@ fail:
 }
 
 esp_err_t sdf_protocol_zigbee_init(void) {
-#if !CONFIG_SDF_ZIGBEE_ENABLE
+#if !SDF_ZIGBEE_ENABLED
   ESP_LOGI(TAG, "Zigbee disabled by SDF configuration");
   return ESP_ERR_NOT_SUPPORTED;
 #elif !defined(CONFIG_ZB_ENABLED) || (CONFIG_ZB_ENABLED == 0)

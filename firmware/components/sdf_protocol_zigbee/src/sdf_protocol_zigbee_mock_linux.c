@@ -10,12 +10,14 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifndef CONFIG_SDF_ZIGBEE_ENABLE
-#define CONFIG_SDF_ZIGBEE_ENABLE 1
+#if defined(CONFIG_SDF_ZIGBEE_ENABLE)
+#define SDF_ZIGBEE_ENABLED 1
+#else
+#define SDF_ZIGBEE_ENABLED 0
 #endif
 
 bool sdf_protocol_zigbee_is_enabled(void) {
-  return CONFIG_SDF_ZIGBEE_ENABLE != 0;
+  return SDF_ZIGBEE_ENABLED != 0;
 }
 
 esp_err_t sdf_protocol_zigbee_init(void) {

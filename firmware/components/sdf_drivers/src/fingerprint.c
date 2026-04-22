@@ -6,6 +6,7 @@
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "driver/gpio.h"
 #include "driver/uart.h"
+#include "esp_task_wdt.h"
 #else
 #include "sdf_mock_linux_drivers.h"
 #endif
@@ -300,13 +301,22 @@ static esp_err_t fp_uart_read_exact(int uart_port, uint8_t *buffer,
     }
 
     uint32_t remaining_ms = (uint32_t)((deadline_us - now_us + 999LL) / 1000LL);
-    TickType_t read_timeout_ticks = pdMS_TO_TICKS(remaining_ms);
+    
+    // Process in chunks of max 1000ms to allow feeding the watchdog timer
+    uint32_t wait_ms = remaining_ms > 1000 ? 1000 : remaining_ms;
+    
+    TickType_t read_timeout_ticks = pdMS_TO_TICKS(wait_ms);
     if (read_timeout_ticks == 0) {
       read_timeout_ticks = 1;
     }
 
     int read_now = uart_read_bytes((uart_port_t)uart_port, buffer + offset,
                                    expected_len - offset, read_timeout_ticks);
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+    esp_task_wdt_reset();
+#endif
+
     if (read_now < 0) {
       return ESP_FAIL;
     }
