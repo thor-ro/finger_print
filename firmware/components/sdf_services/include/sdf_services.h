@@ -24,6 +24,7 @@ typedef enum {
   SDF_SERVICES_ADMIN_ACTION_ZB_JOIN = 3,
   SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET = 4,
   SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION = 5,
+  SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN = 6,
 } sdf_services_admin_action_t;
 
 typedef void (*sdf_services_admin_action_cb)(

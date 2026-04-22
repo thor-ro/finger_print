@@ -291,9 +291,34 @@ void test_enrollment_sm_ignore_failed(void) {
   sdf_enrollment_sm_t sm;
   sdf_enrollment_sm_init(&sm);
   sdf_enrollment_sm_start(&sm, 1, 1);
-  
-  // Apply a generic failure (should ignore and keep active on Step 1)
+
+  // ACK_FAIL on step 1 should be silently retried (finger not lifted)
   sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
   TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_1, sm.state);
+
+  // Advance to step 2 and verify retry still works there
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_2, sm.state);
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_2, sm.state);
+}
+
+void test_enrollment_sm_failed_on_step3_is_error(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 1, 1);
+
+  // Complete scans 1 and 2
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_3, sm.state);
+
+  // ACK_FAIL on step 3 (store/combine command) must fail enrollment,
+  // not retry, because the templates are incompatible.
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_RESULT_FAILED, sm.result);
+  TEST_ASSERT_FALSE(sdf_enrollment_sm_is_active(&sm));
 }

@@ -6,6 +6,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "esp_random.h"
+#include "esp_task_wdt.h"
 
 #include "mbedtls/ecdh.h"
 #include "mbedtls/ecp.h"
@@ -386,8 +387,13 @@ int crypto_scalarmult(
 
     mbedtls_ecp_point R;
     mbedtls_ecp_point_init(&R);
+    /* Curve25519 scalar multiplication is very CPU-intensive on ESP32-C6
+       (single-core RISC-V) and can exceed the 5 s task watchdog timeout.
+       Feed the watchdog before and after to prevent a reset. */
+    esp_task_wdt_reset();
     /* ESP-IDF's mbedTLS requires an RNG callback for scalar blinding. */
     mbed_ret = mbedtls_ecp_mul(&grp, &R, &d, &Qp, sdf_mbedtls_random, NULL);
+    esp_task_wdt_reset();
     if (mbed_ret != 0) {
         ESP_LOGE("NUKI_CRYPTO", "mbedtls_ecp_mul failed: %d", mbed_ret);
         mbedtls_ecp_point_free(&R);

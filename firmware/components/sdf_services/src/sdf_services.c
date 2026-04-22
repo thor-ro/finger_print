@@ -149,54 +149,83 @@ sdf_services_notify_security_event(const sdf_services_security_event_t *event) {
   }
 }
 
+static void sdf_services_start_local_enrollment_with_permission(
+    uint8_t permission) {
+  const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
+  uint16_t *users = calloc(max_users, sizeof(*users));
+  uint8_t *perms = calloc(max_users, sizeof(*perms));
+  size_t count = 0;
+  uint16_t new_id = 0;
+  esp_err_t err = ESP_OK;
+
+  if (users == NULL || perms == NULL) {
+    ESP_LOGE(TAG, "Failed to allocate local enrollment query buffers");
+    free(perms);
+    free(users);
+    led_flash_red();
+    return;
+  }
+
+  err = sdf_services_query_users(users, perms, &count, max_users);
+  // query_users involves a sensor UART exchange that can be slow.
+  // Reset the watchdog here because this function is called from
+  // sdf_services_execute_admin_action which itself follows fp_match_1n(),
+  // meaning two long operations run back-to-back without a WDT reset.
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_task_wdt_reset();
+#endif
+  if (err == ESP_OK) {
+    for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
+      bool in_use = false;
+      for (size_t i = 0; i < count; i++) {
+        if (users[i] == id) {
+          in_use = true;
+          break;
+        }
+      }
+      if (!in_use) {
+        new_id = id;
+        break;
+      }
+    }
+  } else {
+    ESP_LOGW(TAG, "Failed to query users for local enrollment: %s",
+             esp_err_to_name(err));
+  }
+
+  free(perms);
+  free(users);
+
+  if (new_id == 0) {
+    if (err == ESP_OK) {
+      ESP_LOGW(TAG, "No free user IDs available for local enrollment");
+    }
+    led_flash_red();
+    return;
+  }
+
+  err = sdf_services_request_enrollment(new_id, permission);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG,
+             "Failed to queue local enrollment for user_id=%u permission=%u: "
+             "%s",
+             (unsigned)new_id, (unsigned)permission, esp_err_to_name(err));
+    led_flash_red();
+  }
+}
+
 static void sdf_services_execute_admin_action(
     sdf_services_admin_action_t action,
     sdf_services_admin_action_cb action_cb, void *action_ctx) {
   ESP_LOGI(TAG, "Authorized action %d!", (int)action);
 
   if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
-    const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
-    uint16_t *users = calloc(max_users, sizeof(*users));
-    uint8_t *perms = calloc(max_users, sizeof(*perms));
-    size_t count = 0;
-    uint16_t new_id = 0;
-    esp_err_t err = ESP_OK;
+    sdf_services_start_local_enrollment_with_permission(1u);
+    return;
+  }
 
-    if (users == NULL || perms == NULL) {
-      ESP_LOGE(TAG, "Failed to allocate admin enrollment query buffers");
-    } else {
-      err = sdf_services_query_users(users, perms, &count, max_users);
-      if (err == ESP_OK) {
-        for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
-          bool in_use = false;
-          for (size_t i = 0; i < count; i++) {
-            if (users[i] == id) {
-              in_use = true;
-              break;
-            }
-          }
-          if (!in_use) {
-            new_id = id;
-            break;
-          }
-        }
-      } else {
-        ESP_LOGW(TAG, "Failed to query users for local enrollment: %s",
-                 esp_err_to_name(err));
-      }
-    }
-
-    free(perms);
-    free(users);
-
-    if (new_id > 0) {
-      sdf_services_request_enrollment(new_id, 1);
-    } else {
-      if (err == ESP_OK) {
-        ESP_LOGW(TAG, "No free user IDs available for local enrollment");
-      }
-      led_flash_red();
-    }
+  if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN) {
+    sdf_services_start_local_enrollment_with_permission(3u);
     return;
   }
 
@@ -258,7 +287,8 @@ static void sdf_services_btn_cb(void *arg, void *usr_data) {
     s_state.pending_admin_action_start_us = 0;
     xSemaphoreGive(s_state.lock);
 
-    if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
+    if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL ||
+        action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN) {
       led_pulse_blue();
       sdf_services_request_enrollment(1, 3);
     } else {
@@ -279,6 +309,7 @@ static void sdf_services_btn_cb(void *arg, void *usr_data) {
 
     switch (action) {
     case SDF_SERVICES_ADMIN_ACTION_ENROLL:
+    case SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN:
       led_pulse_blue();
       break;
     case SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR:
@@ -372,6 +403,14 @@ static void sdf_services_run_match_cycle(void) {
   }
 
   sdf_fingerprint_match_t match = {0};
+
+  // fp_match_1n() can block for up to the full UART timeout (~12 s).
+  // Reset the watchdog before calling it, especially since the previous
+  // function in the loop (sdf_services_run_enrollment_step) could have
+  // already blocked for ~12 s.
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_task_wdt_reset();
+#endif
   sdf_fingerprint_op_result_t match_result =
       fp_match_1n(&match);
   if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
@@ -528,8 +567,21 @@ static void sdf_services_run_admin_auth_cycle(void) {
   }
 
   sdf_fingerprint_match_t match = {0};
+
+  // fp_match_1n() can block for up to the full UART timeout (~12 s).
+  // Reset the watchdog before calling it to avoid accumulating time.
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_task_wdt_reset();
+#endif
   sdf_fingerprint_op_result_t match_result =
       fp_match_1n(&match);
+
+  // fp_match_1n() can block for up to the full UART timeout (~12 s).
+  // Reset the watchdog immediately after to avoid accumulating time with the
+  // subsequent query_users call in sdf_services_start_local_enrollment_with_permission.
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_task_wdt_reset();
+#endif
 
   if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
       match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
@@ -628,6 +680,7 @@ static void sdf_services_task(void *arg) {
     ESP_LOGI(TAG, "===============================================");
     ESP_LOGI(TAG, "AVAILABLE CONFIGURATION ACTIONS:");
     ESP_LOGI(TAG, " -> Short press: Enroll a new standard user.");
+    ESP_LOGI(TAG, " -> Triple press: Enroll a new admin user.");
     ESP_LOGI(TAG, " -> Double press: Pair to Nuki Smart Lock (Phase 2).");
     ESP_LOGI(TAG, " -> Hold 3 sec: Join Zigbee Network (Phase 3).");
     ESP_LOGI(TAG, " -> Hold 8 sec: Factory Reset.");
@@ -871,6 +924,14 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
       iot_button_register_cb(s_state.btn_handle, BUTTON_SINGLE_CLICK, NULL,
                              sdf_services_btn_cb,
                              (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL);
+
+      button_event_args_t arg_3click = {
+          .multiple_clicks = {.clicks = 3},
+      };
+      iot_button_register_cb(s_state.btn_handle, BUTTON_MULTIPLE_CLICK,
+                             &arg_3click, sdf_services_btn_cb,
+                             (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN);
+
       iot_button_register_cb(s_state.btn_handle, BUTTON_DOUBLE_CLICK, NULL,
                              sdf_services_btn_cb,
                              (void *)SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
