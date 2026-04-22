@@ -37,6 +37,8 @@ typedef enum {
   LED_CMD_PULSE_RED,
   LED_CMD_FLASH_RED,
   LED_CMD_FLASH_ORANGE,
+  LED_CMD_ADMIN_AUTH_GREEN,
+  LED_CMD_ADMIN_AUTH_RED,
 } led_cmd_t;
 
 typedef struct {
@@ -166,6 +168,12 @@ static void led_execute_cmd(led_cmd_t cmd) {
     break;
   case LED_CMD_FLASH_ORANGE:
     led_play_pattern(255, 165, 0, 250, 250, 5);
+    break;
+  case LED_CMD_ADMIN_AUTH_GREEN:
+    led_hold_color(0, 255, 0, 800);
+    break;
+  case LED_CMD_ADMIN_AUTH_RED:
+    led_hold_color(255, 0, 0, 800);
     break;
   }
 }
@@ -309,6 +317,10 @@ void led_flash_red(void) { led_post_cmd(LED_CMD_FLASH_RED); }
 
 void led_flash_orange(void) { led_post_cmd(LED_CMD_FLASH_ORANGE); }
 
+void led_admin_auth_green(void) { led_post_cmd(LED_CMD_ADMIN_AUTH_GREEN); }
+
+void led_admin_auth_red(void) { led_post_cmd(LED_CMD_ADMIN_AUTH_RED); }
+
 #else
 
 esp_err_t led_init(const sdf_led_config_t *config) {
@@ -332,5 +344,7 @@ void led_rapid_purple(void) {}
 void led_pulse_red(void) {}
 void led_flash_red(void) {}
 void led_flash_orange(void) {}
+void led_admin_auth_green(void) {}
+void led_admin_auth_red(void) {}
 
 #endif
