@@ -49,6 +49,9 @@ static const char *TAG = "sdf_services";
 
 static sdf_services_state_t s_state = {0};
 
+static bool sdf_services_try_claim_admin_action(
+    const sdf_fingerprint_match_t *match);
+
 sdf_services_state_t *sdf_services_state(void) {
   return &s_state;
 }
@@ -486,42 +489,7 @@ static void sdf_services_run_match_cycle(void) {
   ESP_LOGI(TAG, "Fingerprint match user_id=%u permission=%u",
            (unsigned)match.user_id, (unsigned)match.permission);
 
-  sdf_services_admin_action_t pending_action =
-      SDF_SERVICES_ADMIN_ACTION_NONE;
-  sdf_services_admin_action_cb pending_action_cb = NULL;
-  void *pending_action_ctx = NULL;
-  bool has_pending_admin_action = false;
-  bool claimed_pending_admin_action = false;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
-      pdTRUE) {
-    has_pending_admin_action =
-        (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE);
-    if (has_pending_admin_action && match.permission == 3) {
-      pending_action = s_state.pending_admin_action;
-      pending_action_cb = s_state.config.admin_action_cb;
-      pending_action_ctx = s_state.config.admin_action_ctx;
-      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-      s_state.pending_admin_action_start_us = 0;
-      claimed_pending_admin_action = true;
-    }
-    xSemaphoreGive(s_state.lock);
-  }
-
-  if (has_pending_admin_action) {
-    if (claimed_pending_admin_action) {
-      ESP_LOGI(TAG,
-               "Pending admin action %d consumed by user_id=%u permission=%u",
-               (int)pending_action, (unsigned)match.user_id,
-               (unsigned)match.permission);
-      sdf_services_execute_admin_action(pending_action, pending_action_cb,
-                                        pending_action_ctx);
-    } else {
-      ESP_LOGW(TAG,
-               "Ignoring normal unlock for user_id=%u permission=%u while "
-               "admin action is pending",
-               (unsigned)match.user_id, (unsigned)match.permission);
-      led_flash_red();
-    }
+  if (sdf_services_try_claim_admin_action(&match)) {
     return;
   }
 
@@ -561,6 +529,65 @@ static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
   }
 }
 
+/**
+ * @brief Attempt to claim and execute a pending admin action using a
+ *        fingerprint match result.
+ *
+ * Checks whether there is a pending admin action and whether the matched
+ * fingerprint has admin privileges (permission == 3).  If both conditions
+ * are met, the pending action is claimed (cleared from state) and executed.
+ *
+ * @param match  The fingerprint match result to authorize with.
+ * @return true  if a pending action was present (regardless of whether it
+ *               was authorized — the caller should NOT proceed with a
+ *               normal unlock).
+ * @return false if no pending admin action exists (caller should proceed
+ *               with normal unlock flow).
+ */
+static bool sdf_services_try_claim_admin_action(
+    const sdf_fingerprint_match_t *match) {
+  sdf_services_admin_action_t action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  sdf_services_admin_action_cb action_cb = NULL;
+  void *action_ctx = NULL;
+  bool has_pending = false;
+  bool authorized = false;
+
+  if (xSemaphoreTake(s_state.lock,
+                     pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+    has_pending =
+        (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE);
+    if (has_pending && match->permission == 3) {
+      action = s_state.pending_admin_action;
+      action_cb = s_state.config.admin_action_cb;
+      action_ctx = s_state.config.admin_action_ctx;
+      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+      s_state.pending_admin_action_start_us = 0;
+      authorized = true;
+    }
+    xSemaphoreGive(s_state.lock);
+  }
+
+  if (!has_pending) {
+    return false;
+  }
+
+  if (authorized) {
+    ESP_LOGI(TAG,
+             "Pending admin action %d consumed by user_id=%u permission=%u",
+             (int)action, (unsigned)match->user_id,
+             (unsigned)match->permission);
+    led_admin_auth_green();
+    sdf_services_execute_admin_action(action, action_cb, action_ctx);
+  } else {
+    ESP_LOGW(TAG,
+             "Admin auth rejected: user_id=%u permission=%u != ADMIN(3)",
+             (unsigned)match->user_id, (unsigned)match->permission);
+    led_admin_auth_red();
+  }
+
+  return true;
+}
+
 static void sdf_services_run_admin_auth_cycle(void) {
   if (s_state.pending_admin_action == SDF_SERVICES_ADMIN_ACTION_NONE) {
     return;
@@ -596,29 +623,7 @@ static void sdf_services_run_admin_auth_cycle(void) {
 
   ESP_LOGI(TAG, "Admin Auth Match: user_id=%u, permission=%u",
            (unsigned)match.user_id, (unsigned)match.permission);
-  if (match.permission == 3) {
-    sdf_services_admin_action_t action;
-    sdf_services_admin_action_cb action_cb = NULL;
-    void *action_ctx = NULL;
-
-    if (xSemaphoreTake(s_state.lock,
-                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-      action = s_state.pending_admin_action;
-      action_cb = s_state.config.admin_action_cb;
-      action_ctx = s_state.config.admin_action_ctx;
-
-      // Clear pending action
-      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-      s_state.pending_admin_action_start_us = 0;
-      xSemaphoreGive(s_state.lock);
-
-      sdf_services_execute_admin_action(action, action_cb, action_ctx);
-    }
-  } else {
-    ESP_LOGW(TAG, "Admin auth match permission %u != ADMIN(3), rejecting.",
-             (unsigned)match.permission);
-    led_flash_red();
-  }
+  sdf_services_try_claim_admin_action(&match);
 }
 
 static void sdf_services_task(void *arg) {
