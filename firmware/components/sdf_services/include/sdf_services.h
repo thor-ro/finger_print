@@ -83,4 +83,6 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
 
 void sdf_services_trigger_low_battery_warning(void);
 
+esp_err_t sdf_services_reset_state(void);
+
 #endif /* SDF_SERVICES_H */

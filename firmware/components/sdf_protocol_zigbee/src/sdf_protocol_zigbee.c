@@ -1158,6 +1158,41 @@ esp_err_t sdf_protocol_zigbee_permit_join(void) {
   return err;
 }
 
+esp_err_t sdf_protocol_zigbee_factory_reset(void) {
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    return ESP_ERR_NOT_SUPPORTED;
+  }
+
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  bool ready = false;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+    ready = s_state.stack_started;
+    xSemaphoreGive(s_state.lock);
+  }
+
+  if (!ready) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (s_state.network_joined) {
+    ESP_LOGI(TAG, "Resetting Zigbee network via local action");
+    esp_zb_bdb_reset_via_local_action();
+  } else {
+    ESP_LOGI(TAG, "Performing Zigbee factory reset");
+    esp_zb_factory_reset();
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+    s_state.network_joined = false;
+    xSemaphoreGive(s_state.lock);
+  }
+
+  return ESP_OK;
+}
+
 uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void) {
   if (s_state.lock == NULL) {
     return s_state.checkin_interval_ms;

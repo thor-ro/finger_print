@@ -1,5 +1,6 @@
 #include "sdf_services_internal.h"
 #include "sdf_drivers.h"
+#include "sdf_platform.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -8,7 +9,6 @@
 #include "sdf_mock_linux_gpio.h"
 #else
 #include "button_gpio.h"
-#include "driver/gpio.h"
 #include "iot_button.h"
 #endif
 
@@ -895,18 +895,13 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   }
 
   if (config->wake_gpio >= 0) {
-    gpio_config_t io_config = {
-        .pin_bit_mask = (1ULL << config->wake_gpio),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_ANYEDGE,
-    };
-    err = gpio_config(&io_config);
-    if (err == ESP_OK) {
-      gpio_install_isr_service(0);
-      gpio_isr_handler_add(config->wake_gpio, sdf_services_wake_isr, NULL);
-    } else {
+    err = sdf_platform_gpio_configure_wake(config->wake_gpio,
+                                           GPIO_INTR_ANYEDGE,
+                                           false,
+                                           true,
+                                           sdf_services_wake_isr,
+                                           NULL);
+    if (err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to configure wake GPIO interrupt: %s",
                esp_err_to_name(err));
     }
@@ -1150,4 +1145,38 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
     }
     return s_state.permission_change_result;
   }
+}
+
+esp_err_t sdf_services_reset_state(void) {
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  // Reset all state variables to defaults
+  s_state.enrolled_user_count = 0;
+  s_state.failed_attempt_count = 0;
+  s_state.lockout_until_us = 0;
+  s_state.failed_attempt_window_start_us = 0;
+  s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_state.pending_admin_action_start_us = 0;
+  s_state.match_cooldown_until_us = 0;
+  s_state.enrollment_request_pending = false;
+  s_state.request_user_id = 0;
+  s_state.request_permission = 0;
+  s_state.permission_change_pending = false;
+  s_state.permission_change_user_id = 0;
+  s_state.permission_change_permission = 0;
+  s_state.permission_change_result = ESP_OK;
+  sdf_enrollment_sm_init(&s_state.enrollment);
+
+  xSemaphoreGive(s_state.lock);
+
+  // Turn off LED
+  led_off();
+
+  return ESP_OK;
 }

@@ -1,4 +1,5 @@
 #include "sdf_power.h"
+#include "sdf_platform.h"
 
 #include <string.h>
 
@@ -69,6 +70,11 @@ sdf_power_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
     return SDF_POWER_WAKE_REASON_TIMER;
   case ESP_SLEEP_WAKEUP_GPIO:
     return SDF_POWER_WAKE_REASON_FINGERPRINT;
+#ifdef ESP_SLEEP_WAKEUP_USB
+  case ESP_SLEEP_WAKEUP_USB:
+    ESP_LOGD(TAG, "Wake from USB serial/JTAG disconnection");
+    return SDF_POWER_WAKE_REASON_OTHER;
+#endif
   default:
     return SDF_POWER_WAKE_REASON_OTHER;
   }
@@ -120,16 +126,7 @@ static esp_err_t sdf_power_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
     return ESP_OK;
   }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_err_t err = gpio_wakeup_enable(wake_gpio, GPIO_INTR_HIGH_LEVEL);
-  if (err != ESP_OK) {
-    return err;
-  }
-
-  return esp_sleep_enable_gpio_wakeup();
-#else
-  return ESP_OK;
-#endif
+  return sdf_platform_sleep_enable_gpio_wakeup_light(wake_gpio, 1);
 }
 
 static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
@@ -151,25 +148,28 @@ static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
   }
 
 #ifndef CONFIG_IDF_TARGET_LINUX
+  bool ble_was_gated = false;
   if (config->enable_ble_radio_gating && config->ble_transport != NULL) {
     sdf_nuki_ble_set_enabled(config->ble_transport, false);
+    ble_was_gated = true;
   }
 #endif
 
-  esp_err_t sleep_err = esp_light_sleep_start();
+  esp_err_t sleep_err = sdf_platform_sleep_light();
   if (sleep_err != ESP_OK) {
-    ESP_LOGW(TAG, "esp_light_sleep_start failed: %s",
+    ESP_LOGW(TAG, "sdf_platform_sleep_light failed: %s",
              esp_err_to_name(sleep_err));
   }
 
 #ifndef CONFIG_IDF_TARGET_LINUX
-  if (config->enable_ble_radio_gating && config->ble_transport != NULL) {
+  /* Always restore BLE state after sleep attempt, even on failure. */
+  if (ble_was_gated) {
     sdf_nuki_ble_set_enabled(config->ble_transport, true);
   }
 #endif
 
   sdf_power_wake_reason_t reason =
-      sdf_power_map_wakeup_reason(esp_sleep_get_wakeup_cause());
+      sdf_platform_map_wakeup_reason(esp_sleep_get_wakeup_cause());
   ESP_LOGI(TAG, "Woke from light sleep (%s)",
            sdf_power_wakeup_reason_name(reason));
   sdf_power_notify_wakeup(config, reason);
@@ -230,6 +230,11 @@ static void sdf_power_task(void *arg) {
         s_state.next_battery_report_us =
             now_us +
             ((int64_t)config_snapshot.battery_report_interval_ms * 1000LL);
+        /* Hold wake guard while the Zigbee battery push completes so the
+           device doesn't enter sleep mid-report. */
+        s_state.wake_guard_until_us =
+            esp_timer_get_time() +
+            ((int64_t)config_snapshot.post_wake_guard_ms * 1000LL);
         xSemaphoreGive(s_state.lock);
       }
       sdf_power_push_battery_percent(battery_percent);
@@ -257,21 +262,14 @@ static void sdf_power_task(void *arg) {
     if (allow_sleep) {
       bool zigbee_enabled = sdf_protocol_zigbee_is_enabled();
       if (config_snapshot.enable_deep_sleep_fallback &&
-          (!zigbee_enabled || !sdf_protocol_zigbee_is_ready())) {
-        const char *sleep_reason = zigbee_enabled
-                                       ? "Entering deep sleep (Zigbee not joined)"
-                                       : "Entering deep sleep (Zigbee disabled)";
-        ESP_LOGI(TAG, "%s", sleep_reason);
-        esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+          zigbee_enabled && !sdf_protocol_zigbee_is_ready()) {
+        ESP_LOGI(TAG, "Entering deep sleep (Zigbee not joined)");
+        sdf_platform_sleep_disable_all_wakeup_sources();
 
         if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio)) {
-#ifndef CONFIG_IDF_TARGET_LINUX
-          esp_deep_sleep_enable_gpio_wakeup(
-              1ULL << config_snapshot.fingerprint_wake_gpio,
-              ESP_GPIO_WAKEUP_GPIO_HIGH);
-#endif
+          sdf_platform_sleep_enable_gpio_wakeup_deep(config_snapshot.fingerprint_wake_gpio, 1);
         }
-        esp_deep_sleep_start();
+        sdf_platform_sleep_deep();
       }
 
       sdf_power_sleep_once(&config_snapshot);

@@ -2,6 +2,29 @@
 
 This file tracks firmware-level changes and maps them to project versions.
 
+## 0.1.6 — 2026-07-22
+
+### Added
+- **sdf_platform component**: ESP32-C6 HAL wrappers for GPIO/ISR, sleep/wake, time/timer, and NVS security initialization. Includes Linux mock implementations for test_runner.
+- **sdf_config component**: Centralized runtime configuration management with `sdf_config_t` struct, defaults from Kconfig, validation, and dump API.
+- Migrated `sdf_services`, `sdf_power`, `sdf_storage`, `sdf_app`, `sdf_drivers` to use `sdf_platform` APIs instead of inline ESP-IDF HAL calls.
+- Updated `sdf_app` to use `sdf_config` for configuration values.
+- Updated test_runner CMakeLists to include new components.
+
+### Changed
+- Architecture now matches documentation (sdf_platform and sdf_config no longer missing).
+- Removed risk entry for missing components from sdf_sas.md.
+
+## 0.1.5 — 2026-07-22
+
+### Added
+- Complete factory reset capability (`complete-factory-reset` OpenSpec change):
+  - `sdf_storage_erase_all()` and `sdf_storage_ble_target_clear()` to wipe NVS persistent storage.
+  - `sdf_protocol_zigbee_factory_reset()` to leave network and clear Zigbee NVRAM.
+  - `sdf_services_reset_state()` for in-memory service state clearing.
+  - Full execution pipeline in `sdf_app_on_admin_action()` for `FACTORY_RESET` admin action.
+  - `factory_reset YES` CLI command in `sdf_cli` with confirmation check and subsystem reset sequence.
+
 ## 0.1.4 — 2026-02-19
 
 ### Added

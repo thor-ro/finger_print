@@ -41,5 +41,8 @@ esp_err_t sdf_storage_nuki_handles_load(sdf_nuki_ble_handles_t *handles);
 
 esp_err_t sdf_storage_ble_target_save(uint8_t addr_type, const uint8_t addr[6]);
 esp_err_t sdf_storage_ble_target_load(uint8_t *addr_type, uint8_t addr[6]);
+esp_err_t sdf_storage_ble_target_clear(void);
+
+esp_err_t sdf_storage_erase_all(void);
 
 #endif /* SDF_STORAGE_H */

@@ -48,6 +48,14 @@ esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array) {
   return ESP_OK;
 }
 
+esp_err_t sdf_protocol_zigbee_permit_join(void) {
+  return ESP_OK;
+}
+
+esp_err_t sdf_protocol_zigbee_factory_reset(void) {
+  return sdf_protocol_zigbee_is_enabled() ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
+}
+
 esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms) {
   (void)interval_ms;
   return ESP_OK;

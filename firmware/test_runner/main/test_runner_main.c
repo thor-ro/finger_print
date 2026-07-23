@@ -69,6 +69,18 @@ extern void test_sdf_storage_nuki_clear_success(void);
 extern void test_sdf_storage_nuki_clear_already_cleared(void);
 extern void test_sdf_storage_ble_target_save_and_load_success(void);
 extern void test_sdf_storage_ble_target_load_not_found(void);
+extern void test_sdf_storage_ble_target_clear_success(void);
+extern void test_sdf_storage_ble_target_clear_already_cleared(void);
+extern void test_sdf_storage_erase_all_success(void);
+extern void test_sdf_storage_erase_all_idempotent(void);
+
+/* Zigbee protocol tests */
+extern void test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supported(void);
+extern void test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok(void);
+
+/* SDF Services tests */
+extern void test_sdf_services_reset_state_returns_ok(void);
+extern void test_sdf_services_reset_state_can_be_called_multiple_times(void);
 
 /* Tasks tests */
 extern void test_sdf_power_wakeup_reason_mapping(void);
@@ -80,6 +92,7 @@ extern void test_sdf_app_string_mappers(void);
 extern void test_sdf_app_valid_lock_action_logic(void);
 extern void test_sdf_app_map_lock_state_to_zigbee_logic(void);
 extern void test_sdf_app_choose_fingerprint_permission_logic(void);
+extern void test_sdf_app_on_admin_action_factory_reset_calls_sequence(void);
 
 /* Nuki crypto tests */
 extern void test_crypto_secretbox_round_trip(void);
@@ -207,6 +220,18 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_nuki_clear_already_cleared);
   RUN_TEST(test_sdf_storage_ble_target_save_and_load_success);
   RUN_TEST(test_sdf_storage_ble_target_load_not_found);
+  RUN_TEST(test_sdf_storage_ble_target_clear_success);
+  RUN_TEST(test_sdf_storage_ble_target_clear_already_cleared);
+  RUN_TEST(test_sdf_storage_erase_all_success);
+  RUN_TEST(test_sdf_storage_erase_all_idempotent);
+
+  /* Zigbee protocol tests */
+  RUN_TEST(test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supported);
+  RUN_TEST(test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok);
+
+  /* SDF Services tests */
+  RUN_TEST(test_sdf_services_reset_state_returns_ok);
+  RUN_TEST(test_sdf_services_reset_state_can_be_called_multiple_times);
 
   /* Tasks tests */
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);
@@ -218,6 +243,7 @@ void app_main(void) {
   RUN_TEST(test_sdf_app_valid_lock_action_logic);
   RUN_TEST(test_sdf_app_map_lock_state_to_zigbee_logic);
   RUN_TEST(test_sdf_app_choose_fingerprint_permission_logic);
+  RUN_TEST(test_sdf_app_on_admin_action_factory_reset_calls_sequence);
 
   /* Nuki crypto tests */
   RUN_TEST(test_crypto_secretbox_round_trip);

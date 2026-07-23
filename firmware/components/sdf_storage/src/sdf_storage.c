@@ -318,3 +318,42 @@ esp_err_t sdf_storage_ble_target_load(uint8_t *addr_type, uint8_t addr[6]) {
   nvs_close(handle);
   return err;
 }
+
+esp_err_t sdf_storage_ble_target_clear(void) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_erase_key(handle, SDF_STORAGE_KEY_BLE_TARGET);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = ESP_OK;
+  }
+
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_erase_all(void) {
+  esp_err_t err = nvs_flash_erase();
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_flash_init();
+  if (err == ESP_ERR_NVS_NO_FREE_PAGES ||
+      err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    err = nvs_flash_erase();
+    if (err != ESP_OK) {
+      return err;
+    }
+    err = nvs_flash_init();
+  }
+
+  return err;
+}

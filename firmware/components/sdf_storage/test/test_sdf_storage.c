@@ -152,3 +152,56 @@ void test_sdf_storage_ble_target_load_not_found(void) {
 
   nvs_teardown();
 }
+
+void test_sdf_storage_ble_target_clear_success(void) {
+  nvs_setup();
+
+  uint8_t mac_to_save[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_ble_target_save(1, mac_to_save));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_ble_target_clear());
+
+  uint8_t type_loaded;
+  uint8_t mac_loaded[6];
+  esp_err_t err = sdf_storage_ble_target_load(&type_loaded, mac_loaded);
+  TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, err);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_ble_target_clear_already_cleared(void) {
+  nvs_setup();
+
+  esp_err_t err = sdf_storage_ble_target_clear();
+  TEST_ASSERT_EQUAL(ESP_OK, err);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_erase_all_success(void) {
+  nvs_setup();
+
+  uint8_t key_to_save[32];
+  memset(key_to_save, 0xCC, 32);
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(9999, key_to_save));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
+
+  uint32_t auth_id;
+  uint8_t key[32];
+  esp_err_t err = sdf_storage_nuki_load(&auth_id, key);
+  TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, err);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_erase_all_idempotent(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
+
+  nvs_teardown();
+}

@@ -1,8 +1,12 @@
 #include "argtable3/argtable3.h"
 #include "esp_console.h"
 #include "esp_log.h"
+#include "esp_system.h"
+#include "fingerprint.h"
 #include "sdf_cli.h"
+#include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
+#include "sdf_storage.h"
 #include <errno.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -170,6 +174,47 @@ static int cmd_zigbee(int argc, char **argv) {
   return 0;
 }
 
+// ==== FACTORY RESET COMMAND ====
+static int cmd_factory_reset(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc < 2 || strcmp(argv[1], "YES") != 0) {
+    printf("WARNING: Factory reset will erase all NVS data, fingerprint users, Zigbee pairing, and reboot.\n");
+    printf("To confirm factory reset, run: factory_reset YES\n");
+    return 0;
+  }
+
+  printf("Executing factory reset...\n");
+  printf("Step 1/5: Erasing NVS storage...\n");
+  esp_err_t err = sdf_storage_erase_all();
+  if (err != ESP_OK) {
+    printf("Warning: NVS erase failed: %s\n", esp_err_to_name(err));
+  }
+
+  printf("Step 2/5: Deleting fingerprint templates...\n");
+  sdf_fingerprint_op_result_t fp_res = fp_delete_all_users();
+  if (fp_res != SDF_FINGERPRINT_OP_OK) {
+    printf("Warning: Fingerprint clear failed: %d\n", (int)fp_res);
+  }
+
+  printf("Step 3/5: Resetting Zigbee stack...\n");
+  err = sdf_protocol_zigbee_factory_reset();
+  if (err != ESP_OK) {
+    printf("Warning: Zigbee reset failed: %s\n", esp_err_to_name(err));
+  }
+
+  printf("Step 4/5: Resetting services state...\n");
+  err = sdf_services_reset_state();
+  if (err != ESP_OK) {
+    printf("Warning: Services state reset failed: %s\n", esp_err_to_name(err));
+  }
+
+  printf("Step 5/5: Rebooting device...\n");
+  esp_restart();
+  return 0;
+}
+
 void sdf_cli_register_commands(void) {
   const esp_console_cmd_t user_cmd = {
       .command = "user",
@@ -194,4 +239,13 @@ void sdf_cli_register_commands(void) {
       .func = &cmd_zigbee,
   };
   esp_console_cmd_register(&zigbee_cmd);
+
+  const esp_console_cmd_t factory_reset_cmd = {
+      .command = "factory_reset",
+      .help = "Perform complete factory reset (erases NVS, users, Zigbee pairing, reboots)",
+      .hint = "YES",
+      .func = &cmd_factory_reset,
+  };
+  esp_console_cmd_register(&factory_reset_cmd);
 }
+

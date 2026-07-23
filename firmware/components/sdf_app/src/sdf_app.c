@@ -1,4 +1,6 @@
 #include "sdf_app.h"
+#include "sdf_platform.h"
+#include "sdf_config.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -483,11 +485,37 @@ static void sdf_app_on_admin_action(void *ctx,
     }
     break;
 
-  case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET:
+  case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET: {
     ESP_LOGI(TAG, "Admin authorized Factory Reset");
-    // TODO: implement actual factory reset
-    ESP_LOGI(TAG, "Factory reset not fully implemented yet in sdf_app");
+    // Execute complete factory reset sequence
+    ESP_LOGI(TAG, "Step 1/5: Erasing all NVS data");
+    esp_err_t err = sdf_storage_erase_all();
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to erase NVS: %s", esp_err_to_name(err));
+    }
+    
+    ESP_LOGI(TAG, "Step 2/5: Deleting all fingerprint templates");
+    sdf_fingerprint_op_result_t fp_result = fp_delete_all_users();
+    if (fp_result != SDF_FINGERPRINT_OP_OK) {
+      ESP_LOGE(TAG, "Failed to delete all fingerprint users: %d", (int)fp_result);
+    }
+    
+    ESP_LOGI(TAG, "Step 3/5: Resetting Zigbee stack");
+    err = sdf_protocol_zigbee_factory_reset();
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to reset Zigbee: %s", esp_err_to_name(err));
+    }
+    
+    ESP_LOGI(TAG, "Step 4/5: Resetting services state");
+    err = sdf_services_reset_state();
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "Failed to reset services state: %s", esp_err_to_name(err));
+    }
+    
+    ESP_LOGI(TAG, "Step 5/5: Rebooting device");
+    esp_restart();
     break;
+  }
 
   default:
     break;

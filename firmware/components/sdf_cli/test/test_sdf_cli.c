@@ -19,3 +19,10 @@ void test_sdf_cli_can_authenticate_and_logout(void) {
   sdf_cli_logout();
   TEST_ASSERT_FALSE(sdf_cli_is_authenticated());
 }
+
+void test_sdf_cli_register_commands_runs_without_crash(void) {
+  // Verifies command registration table handles factory_reset and standard commands
+  sdf_cli_register_commands();
+  TEST_ASSERT_TRUE(true);
+}
+

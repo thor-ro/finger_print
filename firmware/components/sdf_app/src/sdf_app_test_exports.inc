@@ -41,3 +41,7 @@ uint8_t test_sdf_app_choose_fingerprint_permission(
     const sdf_protocol_zigbee_programming_event_t *pe) {
   return sdf_app_choose_fingerprint_permission(pe);
 }
+
+void test_sdf_app_on_admin_action(void *ctx, sdf_services_admin_action_t action) {
+  sdf_app_on_admin_action(ctx, action);
+}
