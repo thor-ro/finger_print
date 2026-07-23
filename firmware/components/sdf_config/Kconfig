@@ -1,0 +1,21 @@
+menu "SDF Config Configuration"
+
+config SDF_CONFIG_ENABLE_RUNTIME_OVERRIDE
+    bool "Enable runtime configuration override"
+    default n
+    help
+        Allow configuration values to be overridden at runtime via API.
+
+config SDF_CONFIG_VALIDATE_AT_BOOT
+    bool "Validate configuration at boot"
+    default y
+    help
+        Run configuration validation checks during initialization.
+
+config SDF_CONFIG_DEBUG_LOG
+    bool "Enable config debug logging"
+    default n
+    help
+        Enable verbose debug logging for configuration subsystem.
+
+endmenu
