@@ -1,0 +1,18 @@
+{
+    "mcpServers": {
+        "codebase-memory-mcp": {
+            "command": "/Users/thorstenropertz/.local/bin/codebase-memory-mcp"
+        },
+        "serena": {
+            "command": "/Users/thorstenropertz/.local/bin/serena",
+            "args": [
+                "start-mcp-server",
+                "--project-from-cwd",
+                "--context",
+                "agent",
+                "--open-web-dashboard",
+                "False"
+            ]
+        }
+    }
+}
