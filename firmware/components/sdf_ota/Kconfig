@@ -1,0 +1,42 @@
+menu "SDF OTA Configuration"
+
+config SDF_OTA_ENABLE
+    bool "Enable OTA update mechanism"
+    default y
+    help
+      Enable the sdf_ota component for managing OTA updates.
+
+config SDF_OTA_SIGNATURE_VERIFY
+    bool "Verify Ed25519 signature on OTA image"
+    default n
+    depends on SDF_OTA_ENABLE
+    help
+      Verify Ed25519 signature before committing OTA image.
+      Requires mbedTLS with ed25519 support (CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED).
+
+config SDF_OTA_ALLOW_DOWNGRADE
+    bool "Allow firmware downgrades"
+    default y
+    depends on SDF_OTA_ENABLE
+    help
+      Allow OTA to proceed when incoming version is older than current.
+      When disabled, downgrades will be rejected.
+
+config SDF_OTA_BOOTLOADER_ROLLBACK
+    bool "Enable bootloader automatic rollback"
+    default y
+    depends on SDF_OTA_ENABLE
+    help
+      Enable ESP-IDF bootloader rollback feature (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE).
+      Requires bootloader to be built with this option.
+
+config SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS
+    int "Zigbee OTA query interval (hours)"
+    default 24
+    range 1 168
+    depends on SDF_OTA_ENABLE
+    help
+      How often the Zigbee OTA client queries the coordinator for updates.
+      Default is 24 hours (once per day).
+
+endmenu

@@ -1,0 +1,16 @@
+menu "SDF Event Router"
+
+config SDF_EVENT_ROUTER_QUEUE_DEPTH
+    int "Event router queue depth"
+    range 8 64
+    default 32
+    help
+        Number of events that can be queued for async dispatch.
+
+config SDF_EVENT_ROUTER_ENABLE_AUDIT
+    bool "Enable audit logging"
+    default y
+    help
+        When enabled, all events are automatically logged to the audit trail.
+
+endmenu

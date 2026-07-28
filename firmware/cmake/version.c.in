@@ -1,0 +1,3 @@
+#include "sdf_ota.h"
+
+const char sdf_ota_version_string[] = "@PROJECT_VER@";
