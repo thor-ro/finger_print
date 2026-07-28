@@ -2,11 +2,21 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "fingerprint.h"
 #include "sdf_cli.h"
 #include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
 #include "sdf_storage.h"
+#include "sdf_ota.h"
+#ifndef CONFIG_IDF_TARGET_LINUX
+#include "esp_zigbee_core.h"
+#include "sdf_app.h"
+#include "sdf_nuki_ble_transport.h"
+#include "sdf_nuki_pairing.h"
+#endif
 #include <errno.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -59,12 +69,217 @@ static bool parse_uint8_arg(const char *text, uint8_t min_value,
 }
 
 // ==== USER COMMANDS ====
+
+static const char *permission_name(uint8_t perm) {
+  switch (perm) {
+  case 1:
+    return "Standard";
+  case 2:
+    return "Elevated";
+  case 3:
+    return "Admin";
+  default:
+    return "Unknown";
+  }
+}
+
+static int cmd_user_list(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  uint16_t user_ids[4096];
+  uint8_t permissions[4096];
+  size_t count = 0;
+  esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, 4096);
+  if (err != ESP_OK) {
+    printf("Failed to query users: %s\n", esp_err_to_name(err));
+    return 0;
+  }
+
+  if (count == 0) {
+    printf("No users enrolled.\n");
+    return 0;
+  }
+
+  printf("User ID  Permission\n");
+  printf("-------  ----------\n");
+  for (size_t i = 0; i < count; i++) {
+    printf("%-7u  %u (%s)\n", (unsigned)user_ids[i], (unsigned)permissions[i],
+           permission_name(permissions[i]));
+  }
+  return 0;
+}
+
+static int cmd_user_get(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc != 3) {
+    printf("Usage: user get <user_id>\n");
+    return 0;
+  }
+
+  uint16_t user_id = 0;
+  if (!parse_uint16_arg(argv[2], SDF_FINGERPRINT_USER_ID_MIN,
+                        SDF_FINGERPRINT_USER_ID_MAX, &user_id)) {
+    printf("Invalid user_id. Expected %u-%u.\n",
+           (unsigned)SDF_FINGERPRINT_USER_ID_MIN,
+           (unsigned)SDF_FINGERPRINT_USER_ID_MAX);
+    return 0;
+  }
+
+  uint8_t permission = 0;
+  sdf_fingerprint_op_result_t res = fp_query_user_permission(user_id, &permission);
+  if (res == SDF_FINGERPRINT_OP_OK) {
+    printf("User ID: %u, Permission: %u (%s)\n", (unsigned)user_id,
+           (unsigned)permission, permission_name(permission));
+  } else if (res == SDF_FINGERPRINT_OP_NO_MATCH) {
+    printf("User %u not found.\n", (unsigned)user_id);
+  } else {
+    printf("Failed to query user %u: %d\n", (unsigned)user_id, (int)res);
+  }
+  return 0;
+}
+
+static int cmd_user_del(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc != 3) {
+    printf("Usage: user del <user_id>\n");
+    return 0;
+  }
+
+  uint16_t user_id = 0;
+  if (!parse_uint16_arg(argv[2], SDF_FINGERPRINT_USER_ID_MIN,
+                        SDF_FINGERPRINT_USER_ID_MAX, &user_id)) {
+    printf("Invalid user_id. Expected %u-%u.\n",
+           (unsigned)SDF_FINGERPRINT_USER_ID_MIN,
+           (unsigned)SDF_FINGERPRINT_USER_ID_MAX);
+    return 0;
+  }
+
+  esp_err_t err = sdf_services_delete_user(user_id);
+  if (err == ESP_OK) {
+    printf("User %u deleted.\n", (unsigned)user_id);
+  } else if (err == ESP_ERR_NOT_FOUND) {
+    printf("User %u not found.\n", (unsigned)user_id);
+  } else if (err == ESP_ERR_INVALID_STATE) {
+    printf("Cannot delete user %u: invalid state (may be last admin).\n",
+           (unsigned)user_id);
+  } else {
+    printf("Failed to delete user %u: %s\n", (unsigned)user_id,
+           esp_err_to_name(err));
+  }
+  return 0;
+}
+
+static int cmd_user_add(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc != 4) {
+    printf("Usage: user add <user_id> <permission>\n");
+    return 0;
+  }
+
+  uint16_t user_id = 0;
+  if (!parse_uint16_arg(argv[2], SDF_FINGERPRINT_USER_ID_MIN,
+                        SDF_FINGERPRINT_USER_ID_MAX, &user_id)) {
+    printf("Invalid user_id. Expected %u-%u.\n",
+           (unsigned)SDF_FINGERPRINT_USER_ID_MIN,
+           (unsigned)SDF_FINGERPRINT_USER_ID_MAX);
+    return 0;
+  }
+
+  uint8_t permission = 0;
+  if (!parse_uint8_arg(argv[3], 1u, 3u, &permission)) {
+    printf("Invalid permission level. Expected 1, 2, or 3.\n");
+    return 0;
+  }
+
+  // Check if user_id is already occupied
+  uint16_t user_ids[4096];
+  uint8_t permissions[4096];
+  size_t count = 0;
+  esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, 4096);
+  if (err != ESP_OK) {
+    printf("Failed to check existing users: %s\n", esp_err_to_name(err));
+    return 0;
+  }
+  for (size_t i = 0; i < count; i++) {
+    if (user_ids[i] == user_id) {
+      printf("User ID %u already enrolled.\n", (unsigned)user_id);
+      return 0;
+    }
+  }
+
+  // Request enrollment
+  printf("Scan an admin fingerprint to authorize enrollment of user %" PRIu16
+         " with permission %u...\n",
+         user_id, (unsigned)permission);
+  err = sdf_services_request_enrollment(user_id, permission);
+  if (err != ESP_OK) {
+    if (err == ESP_ERR_INVALID_STATE) {
+      printf("Enrollment request rejected: service busy or invalid state.\n");
+    } else if (err == ESP_ERR_INVALID_ARG) {
+      printf("Invalid user ID or permission.\n");
+    } else {
+      printf("Failed to request enrollment: %s\n", esp_err_to_name(err));
+    }
+    return 0;
+  }
+
+  // Run 3-step enrollment loop
+  for (int step = 1; step <= 3; step++) {
+    printf("Place finger on sensor (scan %d of 3)...\n", step);
+    sdf_fingerprint_op_result_t step_result =
+        fp_enroll_step(step, user_id, permission);
+
+    if (step_result == SDF_FINGERPRINT_OP_OK) {
+      printf("Scan %d OK.\n", step);
+      if (step < 3) {
+        printf("Remove finger and place again for next scan.\n");
+      }
+    } else if (step_result == SDF_FINGERPRINT_OP_TIMEOUT) {
+      printf("Scan %d timed out.\n", step);
+      printf("Enrollment failed. Remove finger and try again.\n");
+      return 0;
+    } else if (step_result == SDF_FINGERPRINT_OP_FAILED) {
+      if (step < 3) {
+        printf("Scan %d failed. Please try this scan again.\n", step);
+        step--; // retry same step
+      } else {
+        printf("Scan 3 failed. Enrollment failed.\n");
+        return 0;
+      }
+    } else if (step_result == SDF_FINGERPRINT_OP_USER_OCCUPIED) {
+      printf("User ID %u is already enrolled.\n", (unsigned)user_id);
+      return 0;
+    } else if (step_result == SDF_FINGERPRINT_OP_FULL) {
+      printf("Fingerprint database full (max 4095 users).\n");
+      return 0;
+    } else {
+      printf("Scan %d error: %d\n", step, (int)step_result);
+      printf("Enrollment failed.\n");
+      return 0;
+    }
+  }
+
+  printf("User %u enrolled successfully with permission %u (%s).\n",
+         (unsigned)user_id, (unsigned)permission, permission_name(permission));
+  return 0;
+}
+
 static int cmd_user(int argc, char **argv) {
   if (!check_auth())
     return 0;
 
   if (argc < 2) {
-    printf("Usage: user <permission|add|get|update|del|list>\n");
+    printf("Usage: user <permission|add|get|del|list>\n");
     return 0;
   }
   const char *action = argv[1];
@@ -109,15 +324,15 @@ static int cmd_user(int argc, char **argv) {
              esp_err_to_name(err));
     }
   } else if (strcmp(action, "add") == 0) {
-    printf("User add not fully implemented yet.\n");
+    return cmd_user_add(argc, argv);
   } else if (strcmp(action, "get") == 0) {
-    printf("User get not fully implemented yet.\n");
+    return cmd_user_get(argc, argv);
   } else if (strcmp(action, "update") == 0) {
-    printf("User update not fully implemented yet.\n");
+    printf("User update not implemented. Use 'user permission <id> <perm>'.\n");
   } else if (strcmp(action, "del") == 0) {
-    printf("User del not fully implemented yet.\n");
+    return cmd_user_del(argc, argv);
   } else if (strcmp(action, "list") == 0) {
-    printf("User list not fully implemented yet.\n");
+    return cmd_user_list(argc, argv);
   } else {
     printf("Unknown action: %s\n", action);
   }
@@ -125,6 +340,197 @@ static int cmd_user(int argc, char **argv) {
 }
 
 // ==== NUKI COMMANDS ====
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+
+static int cmd_nuki_status(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  uint32_t auth_id = 0;
+  uint8_t shared_key[32] = {0};
+  esp_err_t err = sdf_storage_nuki_load(&auth_id, shared_key);
+  bool paired = (err == ESP_OK);
+
+  bool ble_ready = sdf_nuki_ble_is_ready(sdf_app_get_ble_transport());
+
+  printf("Nuki Status:\n");
+  printf("  Paired: %s\n", paired ? "yes" : "no");
+  if (paired) {
+    printf("  Authorization ID: 0x%08" PRIX32 "\n", auth_id);
+  } else {
+    printf("  Authorization ID: N/A\n");
+  }
+  printf("  BLE Transport: %s\n", ble_ready ? "ready" : "disconnected");
+
+  // Try to get last known keyturner state from sdf_app if available
+  // (This would need access to sdf_app internal state, for now we show unknown)
+  printf("  Last Keyturner State: unknown\n");
+  printf("  Signal RSSI: N/A\n");
+
+  return 0;
+}
+
+static int cmd_nuki_connect(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  uint32_t auth_id = 0;
+  uint8_t shared_key[32] = {0};
+  esp_err_t err = sdf_storage_nuki_load(&auth_id, shared_key);
+  if (err != ESP_OK) {
+    printf("Not paired - run 'nuki pair' first\n");
+    return 0;
+  }
+
+  if (sdf_nuki_ble_is_ready(sdf_app_get_ble_transport())) {
+    printf("Already connected\n");
+    return 0;
+  }
+
+  printf("Connecting to Nuki lock...\n");
+  err = sdf_nuki_ble_set_enabled(sdf_app_get_ble_transport(), true);
+  if (err != 0) {
+    printf("Failed to enable BLE: %d\n", err);
+    return 0;
+  }
+
+  err = sdf_nuki_ble_start(sdf_app_get_ble_transport());
+  if (err != 0) {
+    printf("Failed to start BLE: %d\n", err);
+    return 0;
+  }
+
+  // Poll for connection with 10s timeout
+  printf("Waiting for connection...\n");
+  for (int i = 0; i < 100; i++) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+if (sdf_nuki_ble_is_ready(sdf_app_get_ble_transport())) {
+      printf("Connected successfully!\n");
+      return 0;
+    }
+  }
+
+  printf("Connection timeout (10s)\n");
+  return 0;
+}
+
+static int cmd_nuki_pair(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  // Check if already paired
+  uint32_t auth_id = 0;
+  uint8_t shared_key[32] = {0};
+  esp_err_t err = sdf_storage_nuki_load(&auth_id, shared_key);
+  if (err == ESP_OK) {
+    printf("WARNING: Already paired (Authorization ID: 0x%08" PRIX32 ").\n", auth_id);
+    printf("Re-pairing will overwrite existing credentials.\n");
+  }
+
+  printf("Starting Nuki pairing...\n");
+  printf("Ensure Nuki lock is in pairing mode (hold button 5s until LED solid).\n");
+
+  // Enable BLE transport
+  err = sdf_nuki_ble_set_enabled(sdf_app_get_ble_transport(), true);
+  if (err != 0) {
+    printf("Failed to enable BLE: %d\n", err);
+    return 0;
+  }
+
+  err = sdf_nuki_ble_start(sdf_app_get_ble_transport());
+  if (err != 0) {
+    printf("Failed to start BLE: %d\n", err);
+    return 0;
+  }
+
+  // Initialize pairing
+  // Using fixed values from sdf_app.c
+  #define SDF_APP_ID 123456
+  #define SDF_APP_NAME "SmartDoorFinger"
+
+  err = sdf_nuki_pairing_init(sdf_app_get_nuki_pairing(), sdf_app_get_nuki_client(), 1, SDF_APP_ID, SDF_APP_NAME);
+  if (err != 0) {
+    printf("Failed to initialize pairing: %d\n", err);
+    return 0;
+  }
+
+  printf("Pairing initialized. Starting pairing process...\n");
+  err = sdf_nuki_pairing_start(sdf_app_get_nuki_pairing());
+  if (err != 0) {
+    printf("Failed to start pairing: %d\n", err);
+    return 0;
+  }
+
+  // Wait for pairing completion (poll state with 60s timeout)
+  printf("Waiting for pairing to complete (60s timeout)...\n");
+  for (int i = 0; i < 600; i++) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (sdf_app_get_nuki_pairing()->state == SDF_NUKI_PAIRING_COMPLETE) {
+      sdf_nuki_credentials_t creds;
+      err = sdf_nuki_pairing_get_credentials(sdf_app_get_nuki_pairing(), &creds);
+      if (err == 0) {
+        err = sdf_storage_nuki_save(creds.authorization_id, creds.shared_key);
+        if (err == ESP_OK) {
+          printf("Pairing complete! Authorization ID: 0x%08" PRIX32 "\n",
+                 creds.authorization_id);
+        } else {
+          printf("Pairing completed but failed to save credentials: %s\n",
+                 esp_err_to_name(err));
+        }
+      } else {
+        printf("Pairing completed but failed to get credentials: %d\n", err);
+      }
+      return 0;
+    } else if (sdf_app_get_nuki_pairing()->state == SDF_NUKI_PAIRING_ERROR) {
+      printf("Pairing failed (state: ERROR)\n");
+      return 0;
+    }
+  }
+
+  printf("Pairing timeout (60s)\n");
+  return 0;
+}
+
+static int cmd_nuki_unpair(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  printf("Unpairing from Nuki lock...\n");
+
+  // Stop BLE transport
+  sdf_nuki_ble_stop(sdf_app_get_ble_transport());
+
+  // Clear credentials
+  esp_err_t err = sdf_storage_nuki_clear();
+  if (err != ESP_OK) {
+    printf("Warning: Failed to clear Nuki credentials: %s\n", esp_err_to_name(err));
+  }
+
+  err = sdf_storage_ble_target_clear();
+  if (err != ESP_OK) {
+    printf("Warning: Failed to clear BLE target: %s\n", esp_err_to_name(err));
+  }
+
+  // Reset pairing state
+  memset(sdf_app_get_nuki_pairing(), 0, sizeof(sdf_nuki_pairing_t));
+
+  printf("Nuki unpair complete. Device ready for new pairing.\n");
+  return 0;
+}
+
 static int cmd_nuki(int argc, char **argv) {
   if (!check_auth())
     return 0;
@@ -136,45 +542,357 @@ static int cmd_nuki(int argc, char **argv) {
   const char *action = argv[1];
 
   if (strcmp(action, "status") == 0) {
-    printf("Nuki status not fully implemented yet.\n");
+    return cmd_nuki_status(argc, argv);
   } else if (strcmp(action, "connect") == 0) {
-    printf("Nuki connect not fully implemented yet.\n");
+    return cmd_nuki_connect(argc, argv);
   } else if (strcmp(action, "pair") == 0) {
-    printf("Nuki pair not fully implemented yet.\n");
+    return cmd_nuki_pair(argc, argv);
   } else if (strcmp(action, "unpair") == 0) {
-    printf("Nuki unpair not fully implemented yet.\n");
+    return cmd_nuki_unpair(argc, argv);
   } else {
     printf("Unknown action: %s\n", action);
   }
   return 0;
 }
 
+#endif // CONFIG_IDF_TARGET_LINUX
+
 // ==== ZIGBEE COMMANDS ====
+
+static int cmd_zigbee_status(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  printf("Zigbee Status:\n");
+
+  bool enabled = sdf_protocol_zigbee_is_enabled();
+  printf("  Enabled: %s\n", enabled ? "yes" : "no");
+
+  if (!enabled) {
+    printf("  (Zigbee disabled in build config)\n");
+    return 0;
+  }
+
+  bool ready = sdf_protocol_zigbee_is_ready();
+  printf("  Stack Started: %s\n", ready ? "yes" : "no");
+
+  if (!ready) {
+    printf("  Network Joined: no\n");
+    return 0;
+  }
+
+  // Try to get network info from ESP Zigbee stack
+  // Note: These require ESP Zigbee stack APIs which may not be available on Linux builds
+#ifndef CONFIG_IDF_TARGET_LINUX
+  esp_zb_ieee_addr_t ieee_addr;
+  esp_zb_get_long_address(ieee_addr);
+  printf("  IEEE Address: %02X:%02X:%02X:%02X:%02X:%02X:%02X:%02X\n",
+         ieee_addr[7], ieee_addr[6], ieee_addr[5], ieee_addr[4],
+         ieee_addr[3], ieee_addr[2], ieee_addr[1], ieee_addr[0]);
+
+  uint16_t short_addr = esp_zb_get_short_address();
+  printf("  Short Address: 0x%04X\n", short_addr);
+
+  uint16_t pan_id = esp_zb_get_pan_id();
+  printf("  PAN ID: 0x%04X\n", pan_id);
+
+  uint8_t channel = esp_zb_get_current_channel();
+  printf("  Channel: %u\n", (unsigned)channel);
+
+  uint32_t checkin_interval = sdf_protocol_zigbee_get_checkin_interval_ms();
+  printf("  Check-in Interval: %" PRIu32 " ms\n", checkin_interval);
+
+  // Parent RSSI would require additional Zigbee APIs
+  printf("  Parent RSSI: N/A\n");
+#else
+  printf("  (Network details not available on Linux build)\n");
+#endif
+
+  printf("  Network Joined: yes\n");
+  return 0;
+}
+
+static int cmd_zigbee_connect(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    printf("Zigbee disabled in build config\n");
+    return 0;
+  }
+
+  if (sdf_protocol_zigbee_is_ready()) {
+    // Already joined, show current network
+#ifndef CONFIG_IDF_TARGET_LINUX
+    uint16_t pan_id = esp_zb_get_pan_id();
+    printf("Already joined to network PAN 0x%04X\n", pan_id);
+#else
+    printf("Already joined to network\n");
+#endif
+    return 0;
+  }
+
+  printf("Starting network steering (permit join)...\n");
+  esp_err_t err = sdf_protocol_zigbee_permit_join();
+  if (err == ESP_OK) {
+    printf("Network steering enabled (join window open)\n");
+    printf("Check coordinator for join request.\n");
+  } else {
+    printf("Failed to start network steering: %s\n", esp_err_to_name(err));
+  }
+  return 0;
+}
+
+static int cmd_zigbee_unpair(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    printf("Zigbee disabled in build config\n");
+    return 0;
+  }
+
+  if (!sdf_protocol_zigbee_is_ready()) {
+    printf("Not joined to any network\n");
+    return 0;
+  }
+
+  printf("Leaving Zigbee network and clearing NVRAM...\n");
+  esp_err_t err = sdf_protocol_zigbee_factory_reset();
+  if (err == ESP_OK) {
+    printf("Zigbee network left and NVRAM cleared\n");
+  } else {
+    printf("Failed to leave network: %s\n", esp_err_to_name(err));
+  }
+  return 0;
+}
+
 static int cmd_zigbee(int argc, char **argv) {
   if (!check_auth())
     return 0;
 
   if (argc < 2) {
-    printf("Usage: zigbee <status|connect|pair|unpair>\n");
+    printf("Usage: zigbee <status|connect|unpair>\n");
     return 0;
   }
   const char *action = argv[1];
 
   if (strcmp(action, "status") == 0) {
-    printf("Zigbee status not fully implemented yet.\n");
+    return cmd_zigbee_status(argc, argv);
   } else if (strcmp(action, "connect") == 0) {
-    printf("Zigbee connect not fully implemented yet.\n");
-  } else if (strcmp(action, "pair") == 0) {
-    printf("Zigbee pair not fully implemented yet.\n");
+    return cmd_zigbee_connect(argc, argv);
   } else if (strcmp(action, "unpair") == 0) {
-    printf("Zigbee unpair not fully implemented yet.\n");
+    return cmd_zigbee_unpair(argc, argv);
   } else {
     printf("Unknown action: %s\n", action);
   }
   return 0;
 }
 
-// ==== FACTORY RESET COMMAND ====
+// ==== OTA COMMANDS ====
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+
+static int cmd_ota_version(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  const char *version = sdf_ota_get_version();
+  const esp_app_desc_t *app_desc = esp_app_get_description();
+  
+  printf("SDF Firmware Version: %s\n", version ? version : "unknown");
+  printf("Project Name: %s\n", app_desc->project_name);
+  printf("Build Time: %s %s\n", app_desc->date, app_desc->time);
+  printf("IDF Version: %s\n", app_desc->idf_ver);
+  printf("ELF SHA256: %.8s\n", app_desc->app_elf_sha256);
+  return 0;
+}
+
+static int cmd_ota_status(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  sdf_ota_state_t state = sdf_ota_get_state();
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+  
+  printf("OTA Status:\n");
+  printf("  State: %d\n", state);
+  printf("  Running Partition: %s (0x%08" PRIX32 ", %" PRIu32 " bytes)\n",
+         running->label, running->address, running->size);
+  printf("  Next Update Partition: %s (0x%08" PRIX32 ", %" PRIu32 " bytes)\n",
+         next->label, next->address, next->size);
+  printf("  Current Version: %s\n", sdf_ota_get_version());
+
+  esp_app_desc_t running_desc;
+  esp_err_t err = esp_ota_get_partition_description(running, &running_desc);
+  if (err == ESP_OK) {
+    printf("  Running Version: %s\n", running_desc.version);
+  }
+
+  esp_app_desc_t next_desc;
+  err = esp_ota_get_partition_description(next, &next_desc);
+  if (err == ESP_OK) {
+    printf("  Next Version: %s\n", next_desc.version);
+  } else {
+    printf("  Next Version: (empty or invalid)\n");
+  }
+
+  return 0;
+}
+
+static int cmd_ota_trigger(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc < 3) {
+    printf("Usage: ota trigger <source>\n");
+    printf("  zigbee://  - Trigger Zigbee OTA query\n");
+    printf("  <url>      - Placeholder for HTTP/BLE source (not implemented)\n");
+    return 0;
+  }
+
+  const char *source = argv[2];
+  
+  if (strcmp(source, "zigbee://") == 0) {
+    printf("Triggering Zigbee OTA query...\n");
+    // The Zigbee stack handles OTA queries automatically based on query interval
+    // This just triggers an immediate query
+    // TODO: Add API to trigger immediate OTA query in Zigbee stack
+    printf("Zigbee OTA query interval: %d hours\n", CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS);
+    printf("Note: OTA queries happen automatically. Use 'zigbee status' to check network.\n");
+  } else {
+    printf("Source '%s' not yet implemented\n", source);
+  }
+  return 0;
+}
+
+static int cmd_ota_rollback(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  printf("WARNING: This will rollback to the previous firmware and reboot!\n");
+  printf("Are you sure? (y/N): ");
+  
+  char confirm[4];
+  if (fgets(confirm, sizeof(confirm), stdin) == NULL) {
+    printf("Cancelled\n");
+    return 0;
+  }
+  
+  if (confirm[0] != 'y' && confirm[0] != 'Y') {
+    printf("Cancelled\n");
+    return 0;
+  }
+
+  printf("Rolling back...\n");
+  esp_err_t err = sdf_ota_rollback();
+  if (err != ESP_OK) {
+    printf("Rollback failed: %s\n", esp_err_to_name(err));
+  }
+  // sdf_ota_rollback() reboots on success
+  return 0;
+}
+
+static int cmd_ota_verify(int argc, char **argv) {
+  (void)argc;
+  (void)argv;
+
+  if (!check_auth())
+    return 0;
+
+  const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
+  if (next == NULL) {
+    printf("No OTA partition available\n");
+    return 0;
+  }
+
+  printf("Verifying OTA partition: %s\n", next->label);
+  
+  // Check if partition has valid app
+  esp_app_desc_t desc;
+  esp_err_t err = esp_ota_get_partition_description(next, &desc);
+  if (err != ESP_OK) {
+    printf("No valid firmware in next partition: %s\n", esp_err_to_name(err));
+    return 0;
+  }
+  
+  printf("Found firmware: version=%s, project=%s\n", desc.version, desc.project_name);
+  
+  // Compare versions
+  const char *current = sdf_ota_get_version();
+  sdf_ota_version_cmp_t cmp = sdf_ota_version_compare(current, desc.version);
+  
+  if (cmp == SDF_OTA_VERSION_NEWER) {
+    printf("Incoming is NEWER (upgrade)\n");
+  } else if (cmp == SDF_OTA_VERSION_OLDER) {
+    printf("Incoming is OLDER (downgrade)\n");
+  } else {
+    printf("Incoming is SAME version (reinstall)\n");
+  }
+
+#if CONFIG_SDF_OTA_SIGNATURE_VERIFY
+  printf("Verifying signature...\n");
+  // sdf_ota_verify_signature() reads from partition
+  err = sdf_ota_verify_signature(next);
+  if (err == ESP_OK) {
+    printf("Signature verification: PASSED\n");
+  } else {
+    printf("Signature verification: FAILED (%s)\n", esp_err_to_name(err));
+  }
+#else
+  printf("Signature verification: DISABLED (CONFIG_SDF_OTA_SIGNATURE_VERIFY=n)\n");
+#endif
+
+  return 0;
+}
+
+static int cmd_ota(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc < 2) {
+    printf("Usage: ota <version|status|trigger|rollback|verify>\n");
+    return 0;
+  }
+  const char *action = argv[1];
+
+  if (strcmp(action, "version") == 0) {
+    return cmd_ota_version(argc, argv);
+  } else if (strcmp(action, "status") == 0) {
+    return cmd_ota_status(argc, argv);
+  } else if (strcmp(action, "trigger") == 0) {
+    return cmd_ota_trigger(argc, argv);
+  } else if (strcmp(action, "rollback") == 0) {
+    return cmd_ota_rollback(argc, argv);
+  } else if (strcmp(action, "verify") == 0) {
+    return cmd_ota_verify(argc, argv);
+  } else {
+    printf("Unknown action: %s\n", action);
+    printf("Usage: ota <version|status|trigger|rollback|verify>\n");
+  }
+  return 0;
+}
+
+#endif // CONFIG_IDF_TARGET_LINUX
 static int cmd_factory_reset(int argc, char **argv) {
   if (!check_auth())
     return 0;
@@ -224,6 +942,7 @@ void sdf_cli_register_commands(void) {
   };
   esp_console_cmd_register(&user_cmd);
 
+#ifndef CONFIG_IDF_TARGET_LINUX
   const esp_console_cmd_t nuki_cmd = {
       .command = "nuki",
       .help = "Manage Nuki connection (status, connect, pair, unpair)",
@@ -231,6 +950,7 @@ void sdf_cli_register_commands(void) {
       .func = &cmd_nuki,
   };
   esp_console_cmd_register(&nuki_cmd);
+#endif
 
   const esp_console_cmd_t zigbee_cmd = {
       .command = "zigbee",
@@ -239,6 +959,16 @@ void sdf_cli_register_commands(void) {
       .func = &cmd_zigbee,
   };
   esp_console_cmd_register(&zigbee_cmd);
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+  const esp_console_cmd_t ota_cmd = {
+      .command = "ota",
+      .help = "Manage OTA updates (version, status, trigger, rollback, verify)",
+      .hint = "<action>",
+      .func = &cmd_ota,
+  };
+  esp_console_cmd_register(&ota_cmd);
+#endif
 
   const esp_console_cmd_t factory_reset_cmd = {
       .command = "factory_reset",

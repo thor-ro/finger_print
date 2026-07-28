@@ -45,20 +45,25 @@ Out of scope:
 
 ## 6. Runtime Design
 **Execution Model**
-* FreeRTOS tasks with event queues and short‑lived BLE sessions.
-* Interrupt‑driven wake from sensor `WAKE` pin and periodic Zigbee check‑ins.
+* FreeRTOS tasks with event router for inter-task communication.
+* Interrupt-driven wake from sensor `WAKE` pin and periodic Zigbee check-ins.
+* On-demand BLE sessions (radio gated by power manager).
 
 **Primary Tasks**
-* `task_event_router` handles event dispatch and state transitions.
-* `task_zigbee` manages ZHA commands, attribute reporting, and check‑ins.
-* `task_ble` manages Nuki connections and lock actions.
-* `task_fingerprint` manages UART sensor commands and match/enroll flows.
-* `task_power` manages sleep entry, wake sources, and radio gating.
+* `sdf_power_task` (prio 4, 4KB) — sleep/wake scheduling, battery reporting, Zigbee check-in, BLE radio gating.
+* `sdf_zigbee_task` (prio 5, 8KB) — ESP-Zigbee stack, ZHA commands, attribute reporting, OTA.
+* `sdf_match_task` (prio 5, 6KB) — fingerprint 1:N match polling (400ms), sensor power mgmt, lockout tracking.
+* `sdf_enroll_task` (prio 4, 4KB) — enrollment step execution, retry logic, LED feedback.
+* `sdf_admin_task` (prio 5, 4KB) — admin auth (10s timeout), action execution (pair/join/reset/perm).
+* `sdf_button_task` (prio 4, 3KB) — GPIO ISR (GPIO 14), debounce, multi-press → admin actions.
+* `sdf_ota_task` (prio 3, 8KB, future) — OTA download, verify, commit, rollback.
+* `nimble_host` — BLE host stack (NimBLE, managed by ESP-IDF, stack/prio via menuconfig).
 
 **Concurrency Rules**
 * Only one lock action (BLE session) at a time.
 * Enrollment mode blocks biometric unlock attempts.
-* Zigbee commands are queued while BLE is active.
+* Zigbee commands queued while BLE active.
+* Event router handles priority-based dispatch (CRITICAL → HIGH → NORMAL → LOW).
 
 ## 7. Module Decomposition
 **Event Router**

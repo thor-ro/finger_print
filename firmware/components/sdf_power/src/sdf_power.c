@@ -1,5 +1,6 @@
 #include "sdf_power.h"
 #include "sdf_platform.h"
+#include "sdf_config.h"
 
 #include <string.h>
 
@@ -19,6 +20,7 @@
 #endif
 
 #include "sdf_protocol_zigbee.h"
+#include "sdf_event_router.h"
 
 #ifdef SDF_POWER_TESTING
 #define SDF_POWER_STATIC
@@ -30,19 +32,8 @@
 #define SDF_POWER_TASK_STACK 4096
 #define SDF_POWER_TASK_PRIORITY 4
 #define SDF_POWER_LOCK_WAIT_MS 250u
-
-#define SDF_POWER_CHECKIN_INTERVAL_DEFAULT_MS                                  \
-  CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS
 #define SDF_POWER_CHECKIN_INTERVAL_MIN_MS 1000u
 #define SDF_POWER_CHECKIN_INTERVAL_MAX_MS 600000u
-#define SDF_POWER_IDLE_BEFORE_SLEEP_DEFAULT_MS                                 \
-  CONFIG_SDF_POWER_IDLE_BEFORE_SLEEP_MS
-#define SDF_POWER_POST_WAKE_GUARD_DEFAULT_MS CONFIG_SDF_POWER_POST_WAKE_GUARD_MS
-#define SDF_POWER_LOOP_INTERVAL_DEFAULT_MS CONFIG_SDF_POWER_LOOP_INTERVAL_MS
-#define SDF_POWER_BATTERY_REPORT_DEFAULT_MS                                    \
-  CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS
-#define SDF_POWER_BATTERY_DEFAULT_PERCENT                                      \
-  CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT
 
 static const char *TAG = "sdf_power";
 
@@ -61,23 +52,6 @@ static sdf_power_state_t s_state = {0};
 
 static bool sdf_power_gpio_valid(gpio_num_t gpio) {
   return gpio >= 0 && gpio < GPIO_NUM_MAX;
-}
-
-SDF_POWER_STATIC sdf_power_wake_reason_t
-sdf_power_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
-  switch (cause) {
-  case ESP_SLEEP_WAKEUP_TIMER:
-    return SDF_POWER_WAKE_REASON_TIMER;
-  case ESP_SLEEP_WAKEUP_GPIO:
-    return SDF_POWER_WAKE_REASON_FINGERPRINT;
-#ifdef ESP_SLEEP_WAKEUP_USB
-  case ESP_SLEEP_WAKEUP_USB:
-    ESP_LOGD(TAG, "Wake from USB serial/JTAG disconnection");
-    return SDF_POWER_WAKE_REASON_OTHER;
-#endif
-  default:
-    return SDF_POWER_WAKE_REASON_OTHER;
-  }
 }
 
 static const char *
@@ -104,6 +78,15 @@ static void sdf_power_push_battery_percent(uint8_t battery_percent) {
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
     ESP_LOGW(TAG, "Battery update failed: %s", esp_err_to_name(err));
   }
+
+  // Emit battery event
+  sdf_event_router_event_t evt = {
+      .type = SDF_EVENT_ROUTER_POWER_SLEEP, // Reuse POWER_SLEEP for battery events (LOW priority)
+      .priority = SDF_EVENT_ROUTER_PRIO_LOW,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .payload.power.remaining_ms = battery_percent,
+  };
+  sdf_event_router_emit(&evt);
 }
 
 static bool sdf_power_busy_now(const sdf_power_manager_config_t *config) {
@@ -119,6 +102,15 @@ static void sdf_power_notify_wakeup(const sdf_power_manager_config_t *config,
     return;
   }
   config->wake_cb(config->wake_ctx, reason);
+
+  // Emit wake event
+  sdf_event_router_event_t evt = {
+      .type = SDF_EVENT_ROUTER_POWER_WAKE,
+      .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .payload.power.remaining_ms = 0,
+  };
+  sdf_event_router_emit(&evt);
 }
 
 static esp_err_t sdf_power_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
@@ -133,6 +125,15 @@ static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
   if (config == NULL || !config->enable_light_sleep) {
     return;
   }
+
+  // Emit sleep event
+  sdf_event_router_event_t sleep_evt = {
+      .type = SDF_EVENT_ROUTER_POWER_SLEEP,
+      .priority = SDF_EVENT_ROUTER_PRIO_LOW,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .payload.power.remaining_ms = config->checkin_interval_ms,
+  };
+  sdf_event_router_emit(&sleep_evt);
 
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_timer_wakeup((uint64_t)config->checkin_interval_ms *
@@ -186,13 +187,15 @@ static void sdf_power_task(void *arg) {
 #ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_reset();
 #endif
-    sdf_power_manager_config_t config_snapshot;
+    sdf_power_manager_config_t config_snapshot = {
+        .loop_interval_ms = s_state.config.loop_interval_ms,
+    };
     bool initialized = false;
     int64_t now_us = esp_timer_get_time();
     int64_t last_activity_us = now_us;
     int64_t wake_guard_until_us = now_us;
     int64_t next_battery_report_us = now_us;
-    uint8_t battery_percent = SDF_POWER_BATTERY_DEFAULT_PERCENT;
+    uint8_t battery_percent = s_state.battery_percent;
 
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
         pdTRUE) {
@@ -204,12 +207,12 @@ static void sdf_power_task(void *arg) {
       battery_percent = s_state.battery_percent;
       xSemaphoreGive(s_state.lock);
     } else {
-      vTaskDelay(pdMS_TO_TICKS(SDF_POWER_LOOP_INTERVAL_DEFAULT_MS));
+      vTaskDelay(pdMS_TO_TICKS(config_snapshot.loop_interval_ms));
       continue;
     }
 
     if (!initialized) {
-      vTaskDelay(pdMS_TO_TICKS(SDF_POWER_LOOP_INTERVAL_DEFAULT_MS));
+      vTaskDelay(pdMS_TO_TICKS(config_snapshot.loop_interval_ms));
       continue;
     }
 
@@ -288,35 +291,30 @@ static void sdf_power_task(void *arg) {
 }
 
 void sdf_power_init(void) {
-  sdf_power_manager_config_t config;
-  sdf_power_get_default_power_config(&config);
+  const sdf_config_t *cfg = sdf_config_get();
+  sdf_power_manager_config_t config = {
+      .ble_transport = NULL,
+      .fingerprint_wake_gpio = (gpio_num_t)cfg->fp_wake_gpio,
+      .checkin_interval_ms = cfg->checkin_interval_ms,
+      .idle_before_sleep_ms = cfg->idle_before_sleep_ms,
+      .post_wake_guard_ms = cfg->post_wake_guard_ms,
+      .loop_interval_ms = cfg->power_loop_interval_ms,
+      .battery_report_interval_ms = cfg->battery_report_interval_ms,
+      .enable_light_sleep = cfg->enable_light_sleep,
+      .enable_ble_radio_gating = cfg->enable_ble_radio_gating,
+      .enable_deep_sleep_fallback = cfg->enable_deep_sleep_fallback,
+      .battery_percent_default = cfg->battery_default_percent,
+      .busy_cb = NULL,
+      .busy_ctx = NULL,
+      .wake_cb = NULL,
+      .wake_ctx = NULL,
+      .battery_cb = NULL,
+      .battery_ctx = NULL,
+  };
   sdf_power_init_power_manager(&config);
 }
 
-void sdf_power_get_default_power_config(sdf_power_manager_config_t *config) {
-  if (config == NULL) {
-    return;
-  }
 
-  memset(config, 0, sizeof(*config));
-  config->ble_transport = NULL;
-  config->fingerprint_wake_gpio = (gpio_num_t)CONFIG_SDF_POWER_FP_WAKE_GPIO;
-  config->checkin_interval_ms = SDF_POWER_CHECKIN_INTERVAL_DEFAULT_MS;
-  config->idle_before_sleep_ms = SDF_POWER_IDLE_BEFORE_SLEEP_DEFAULT_MS;
-  config->post_wake_guard_ms = SDF_POWER_POST_WAKE_GUARD_DEFAULT_MS;
-  config->loop_interval_ms = SDF_POWER_LOOP_INTERVAL_DEFAULT_MS;
-  config->battery_report_interval_ms = SDF_POWER_BATTERY_REPORT_DEFAULT_MS;
-  config->enable_light_sleep = CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP;
-  config->enable_ble_radio_gating = CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING;
-  config->enable_deep_sleep_fallback = false;
-  config->battery_percent_default = SDF_POWER_BATTERY_DEFAULT_PERCENT;
-  config->busy_cb = NULL;
-  config->busy_ctx = NULL;
-  config->wake_cb = NULL;
-  config->wake_ctx = NULL;
-  config->battery_cb = NULL;
-  config->battery_ctx = NULL;
-}
 
 esp_err_t
 sdf_power_init_power_manager(const sdf_power_manager_config_t *config) {
@@ -475,5 +473,5 @@ uint8_t sdf_power_get_battery_percent(void) {
     return battery_percent;
   }
 
-  return SDF_POWER_BATTERY_DEFAULT_PERCENT;
+  return s_state.battery_percent;
 }

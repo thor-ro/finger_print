@@ -11,8 +11,6 @@
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_check.h"
 #include "esp_log.h"
-#include "esp_ota_ops.h"
-#include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 
@@ -25,6 +23,9 @@
 #include "zcl/esp_zigbee_zcl_door_lock.h"
 #include "zcl/esp_zigbee_zcl_ota.h"
 #include "zcl/esp_zigbee_zcl_power_config.h"
+
+#include "sdf_ota.h"
+#include "sdf_event_router.h"
 
 #define SDF_ZIGBEE_ENDPOINT 1
 #define SDF_ZIGBEE_TASK_NAME "sdf_zigbee"
@@ -86,8 +87,6 @@ static sdf_protocol_zigbee_state_t s_state = {
     .checkin_interval_ms = SDF_ZIGBEE_CHECKIN_INTERVAL_DEFAULT_MS,
 };
 
-static esp_ota_handle_t s_ota_handle = 0;
-static const esp_partition_t *s_ota_partition = NULL;
 static bool s_tagid_received = false;
 
 static void sdf_zigbee_start_commissioning_cb(uint8_t mode_mask) {
@@ -133,8 +132,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
         esp_zb_bdb_start_top_level_commissioning(
             ESP_ZB_BDB_MODE_NETWORK_STEERING);
         ESP_LOGI(TAG, "Device rebooted and using existing network");
-        esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
-                                                     1440); // 24 hours
+esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
+                                                     CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60);
       }
     } else {
       ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status=%s)",
@@ -156,8 +155,8 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
                extended_pan_id[1], extended_pan_id[0], esp_zb_get_pan_id(),
                esp_zb_get_current_channel(), esp_zb_get_short_address());
 
-      esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
-                                                   1440); // 24 hours
+esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
+                                                     CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60);
     } else {
       sdf_zigbee_set_network_joined(false);
       ESP_LOGW(TAG, "Network steering failed (status=%s), scheduling retry",
@@ -335,6 +334,16 @@ static esp_err_t sdf_zigbee_dispatch_command_event(
              (int)event->command);
     return ESP_ERR_INVALID_STATE;
   }
+
+  // Emit event router event for Zigbee command
+  sdf_event_router_event_t evt = {
+      .type = SDF_EVENT_ROUTER_ZIGBEE_COMMAND,
+      .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .payload.zigbee.command_id = event->command,
+      .payload.zigbee.user_id = event->programming_event.user_id,
+  };
+  sdf_event_router_emit(&evt);
 
   return cb(ctx, event);
 }
@@ -615,42 +624,37 @@ static esp_err_t sdf_zigbee_parse_ota_data(uint32_t total_size,
 
 static esp_err_t sdf_zigbee_ota_upgrade_status_handler(
     const esp_zb_zcl_ota_upgrade_value_message_t *message) {
-  static uint32_t total_size = 0;
-  static uint32_t offset = 0;
-  static int64_t start_time = 0;
+  static sdf_ota_handle_t s_ota_session = NULL;
   esp_err_t ret = ESP_OK;
 
   if (message->info.status == ESP_ZB_ZCL_STATUS_SUCCESS) {
     switch (message->upgrade_status) {
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_START:
       ESP_LOGI(TAG, "OTA upgrade start");
-      start_time = esp_timer_get_time();
-      s_ota_partition = esp_ota_get_next_update_partition(NULL);
-      if (s_ota_partition == NULL) {
-        return ESP_FAIL;
+      if (s_ota_session != NULL) {
+        ESP_LOGW(TAG, "OTA session already active, aborting previous");
       }
-      ret = esp_ota_begin(s_ota_partition, 0, &s_ota_handle);
+      ret = sdf_ota_begin(SDF_OTA_SOURCE_ZIGBEE, message->ota_header.image_size, &s_ota_session);
       if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to begin OTA partition, status: %s",
-                 esp_err_to_name(ret));
+        ESP_LOGE(TAG, "Failed to begin OTA session: %s", esp_err_to_name(ret));
       }
       break;
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_RECEIVE:
-      total_size = message->ota_header.image_size;
-      offset += message->payload_size;
+      if (s_ota_session == NULL) {
+        ESP_LOGE(TAG, "OTA receive but no active session");
+        return ESP_ERR_INVALID_STATE;
+      }
       if (message->payload_size && message->payload) {
         uint16_t payload_size = 0;
         void *payload = NULL;
-        ret = sdf_zigbee_parse_ota_data(total_size, message->payload,
+        ret = sdf_zigbee_parse_ota_data(message->ota_header.image_size, message->payload,
                                         message->payload_size, &payload,
                                         &payload_size);
         if (ret == ESP_OK) {
-          ret =
-              esp_ota_write(s_ota_handle, (const void *)payload, payload_size);
+          ret = sdf_ota_write(s_ota_session, payload, payload_size);
           if (ret != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to write OTA data, status: %s",
-                     esp_err_to_name(ret));
+            ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(ret));
           }
         }
       }
@@ -661,29 +665,30 @@ static esp_err_t sdf_zigbee_ota_upgrade_status_handler(
       break;
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_CHECK:
-      ret = offset == total_size ? ESP_OK : ESP_FAIL;
-      offset = 0;
-      total_size = 0;
-      s_tagid_received = false;
-      ESP_LOGI(TAG, "OTA upgrade check status: %s", esp_err_to_name(ret));
+      if (s_ota_session == NULL) {
+        ESP_LOGE(TAG, "OTA check but no active session");
+        return ESP_ERR_INVALID_STATE;
+      }
+      ret = sdf_ota_verify_integrity(s_ota_session);
+      if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "OTA integrity check failed: %s", esp_err_to_name(ret));
+      }
       break;
 
     case ESP_ZB_ZCL_OTA_UPGRADE_STATUS_FINISH:
       ESP_LOGI(TAG, "OTA Finish");
       ESP_LOGI(TAG,
                "OTA Information: version: 0x%lx, manufacturer code: 0x%x, "
-               "image type: 0x%x, total size: %lu bytes, cost time: %lld ms",
+               "image type: 0x%x, total size: %lu bytes",
                message->ota_header.file_version,
                message->ota_header.manufacturer_code,
-               message->ota_header.image_type, message->ota_header.image_size,
-               (esp_timer_get_time() - start_time) / 1000);
-      ret = esp_ota_end(s_ota_handle);
-      if (ret == ESP_OK) {
-        ret = esp_ota_set_boot_partition(s_ota_partition);
-        if (ret == ESP_OK) {
-          ESP_LOGW(TAG, "Prepare to restart system for OTA update");
-          esp_restart();
+               message->ota_header.image_type, message->ota_header.image_size);
+      if (s_ota_session != NULL) {
+        ret = sdf_ota_verify_and_commit(s_ota_session);
+        if (ret != ESP_OK) {
+          ESP_LOGE(TAG, "OTA commit failed: %s", esp_err_to_name(ret));
         }
+        s_ota_session = NULL;
       }
       break;
 
@@ -791,7 +796,7 @@ static esp_err_t sdf_zigbee_register_endpoint(void) {
    * (ESP_ZB_ZCL_ATTR_OTA_UPGRADE_CLIENT_DATA_ID) to be present.
    * Without it, zcl_ota_upgrade_commands.c asserts during init. */
   static esp_zb_zcl_ota_upgrade_client_variable_t s_ota_client_var = {
-      .timer_query = 24 * 60,  /* query interval in minutes (24h) */
+      .timer_query = CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60,  /* query interval in minutes */
       .hw_version = 0x0001,
       .max_data_size = 64,
   };

@@ -29,6 +29,7 @@
 #include "sdf_protocol_ble.h"
 #include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
+#include "sdf_event_router.h"
 #include "sdf_storage.h"
 
 #define SDF_APP_ID 1u
@@ -40,45 +41,7 @@
 #define SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT 0x0004u
 #define SDF_APP_ZB_ALARM_SECURITY_PROTOCOL 0x0008u
 
-#define SDF_APP_FP_UART_PORT 1
-#define SDF_APP_FP_UART_TX_PIN 4
-#define SDF_APP_FP_UART_RX_PIN 5
-#define SDF_APP_FP_MATCH_POLL_MS 400u
-#define SDF_APP_FP_MATCH_COOLDOWN_MS 3000u
-#define SDF_APP_FP_WAKE_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_WAKE_GPIO)
-#define SDF_APP_FP_POWER_EN_GPIO ((gpio_num_t)CONFIG_SDF_POWER_FP_EN_GPIO)
-#define SDF_APP_ENROLLMENT_BTN_GPIO ((gpio_num_t)CONFIG_SDF_ENROLLMENT_BTN_GPIO)
-#define SDF_APP_WS2812_LED_GPIO ((gpio_num_t)CONFIG_SDF_WS2812_LED_GPIO)
-#define SDF_APP_BATTERY_ADC_GPIO 0
-
-#define SDF_APP_POWER_CHECKIN_INTERVAL_MS                                      \
-  ((uint32_t)CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS)
 #define SDF_APP_TWDT_TIMEOUT_MS 15000u
-#define SDF_APP_POWER_IDLE_BEFORE_SLEEP_MS                                     \
-  ((uint32_t)CONFIG_SDF_POWER_IDLE_BEFORE_SLEEP_MS)
-#define SDF_APP_POWER_POST_WAKE_GUARD_MS                                       \
-  ((uint32_t)CONFIG_SDF_POWER_POST_WAKE_GUARD_MS)
-#define SDF_APP_POWER_LOOP_INTERVAL_MS                                         \
-  ((uint32_t)CONFIG_SDF_POWER_LOOP_INTERVAL_MS)
-#define SDF_APP_POWER_BATTERY_REPORT_MS                                        \
-  ((uint32_t)CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS)
-#define SDF_APP_POWER_BATTERY_DEFAULT_PERCENT                                  \
-  ((uint8_t)CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT)
-#define SDF_APP_POWER_ENABLE_LIGHT_SLEEP CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP
-#define SDF_APP_POWER_ENABLE_BLE_RADIO_GATING                                  \
-  CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING
-#ifndef CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND
-#define CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND 0
-#endif
-#define SDF_APP_BLE_CONNECT_ON_DEMAND CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND
-// Leave this all-zero to discover a Nuki by advertisement during pairing.
-// Set it to your lock's BLE address to force matching a specific device.
-// Example for lock address AA:BB:CC:DD:EE:FF (LSB first for NimBLE):
-// {0xFF, 0xEE, 0xDD, 0xCC, 0xBB, 0xAA}
-#define SDF_NUKI_TARGET_ADDR_TYPE BLE_ADDR_RANDOM
-static const ble_addr_t SDF_NUKI_TARGET_ADDR = {
-    .type = SDF_NUKI_TARGET_ADDR_TYPE,
-    .val = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}};
 
 static const char *TAG = "sdf_app";
 
@@ -106,7 +69,7 @@ static uint8_t s_pending_lock_flags;
 
 static sdf_lock_flow_t s_lock_flow;
 
-static void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
+void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
                                int32_t status, uint16_t detail);
 static void sdf_app_start_requested_nuki_pairing(void);
 static void sdf_app_resume_ble_transport(const char *reason);
@@ -163,7 +126,8 @@ static void sdf_app_resume_ble_transport(const char *reason) {
 }
 
 static void sdf_app_release_ble_transport(const char *reason) {
-  if (!SDF_APP_BLE_CONNECT_ON_DEMAND) {
+  const sdf_config_t *cfg = sdf_config_get();
+  if (!cfg->ble_connect_on_demand) {
     return;
   }
   if (s_pairing_active || s_pairing_requested || s_lock_action_pending ||
@@ -535,35 +499,76 @@ static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
     sdf_services_trigger_low_battery_warning();
   }
 
-  ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting direct unlatch",
-           (unsigned)user_id);
+ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting direct unlatch",
+            (unsigned)user_id);
   return sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
 }
 
-static void sdf_app_on_enrollment_state(void *ctx,
-                                        const sdf_enrollment_sm_t *state) {
+static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
   (void)ctx;
-  sdf_power_mark_activity();
-
-  if (state == NULL) {
+  if (event == NULL) {
     return;
   }
 
-  uint8_t current_step = sdf_enrollment_sm_current_step(state);
-  uint8_t current_cmd = sdf_enrollment_sm_current_command(state);
-  ESP_LOGI(TAG,
-           "Enrollment user_id=%u permission=%u state=%s current_step=%u "
-           "current_cmd=0x%02X completed_steps=%u result=%s",
-           (unsigned)state->user_id, (unsigned)state->permission,
-           sdf_app_enrollment_state_name(state->state), (unsigned)current_step,
-           (unsigned)current_cmd,
-           (unsigned)state->completed_steps,
-           sdf_app_enrollment_result_name(state->result));
-
-  if (state->state == SDF_ENROLLMENT_STATE_SUCCESS) {
+  switch (event->type) {
+  case SDF_EVENT_ROUTER_BIOMETRIC_MATCH: {
+    ESP_LOGI(TAG, "Event: Biometric match user_id=%u", (unsigned)event->payload.biometric.user_id);
+    if (!s_has_creds || s_pairing_active) {
+      return;
+    }
+    int percent = sdf_drivers_battery_get_percent();
+    if (percent <= 20) {
+      sdf_services_trigger_low_battery_warning();
+    }
+    sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
+    break;
+  }
+  case SDF_EVENT_ROUTER_SECURITY_LOCKOUT: {
+    if (event->payload.security.failed_attempts > 0) {
+      sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT, 0);
+      sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_LOCKOUT, 0,
+                         (int32_t)event->payload.security.failed_attempts,
+                         (uint16_t)event->payload.security.failed_attempts);
+    } else {
+      sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT);
+      sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_LOCKOUT_CLEARED, 0, 0, 0);
+    }
+    break;
+  }
+  case SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED: {
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_FAILED, 0,
+                       (int32_t)event->payload.security.failed_attempts,
+                       (uint16_t)event->payload.security.failed_attempts);
+    break;
+  }
+  case SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE: {
+    sdf_power_mark_activity();
+    ESP_LOGI(TAG, "Event: Enrollment step=%u status=%u",
+             (unsigned)event->payload.enrollment.step,
+             (unsigned)event->payload.enrollment.status);
+    if (event->payload.enrollment.status == SDF_ENROLLMENT_STATE_SUCCESS) {
+      sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
+    } else if (event->payload.enrollment.status == SDF_ENROLLMENT_STATE_ERROR) {
+      sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+    }
+    break;
+  }
+  case SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE: {
+    sdf_power_mark_activity();
+    ESP_LOGI(TAG, "Event: Enrollment COMPLETE user_id=%u",
+             (unsigned)event->payload.enrollment_complete.user_id);
     sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
-  } else if (state->state == SDF_ENROLLMENT_STATE_ERROR) {
+    break;
+  }
+  case SDF_EVENT_ROUTER_ENROLLMENT_FAILED: {
+    sdf_power_mark_activity();
+    ESP_LOGE(TAG, "Event: Enrollment FAILED step=%u",
+             (unsigned)event->payload.enrollment_failed.step);
     sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+    break;
+  }
+  default:
+    break;
   }
 }
 
@@ -809,7 +814,7 @@ static const char *sdf_app_audit_event_name(sdf_audit_event_type_t type) {
   }
 }
 
-static void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
+void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
                                int32_t status, uint16_t detail) {
   sdf_audit_event_t event = {
       .timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000LL),
@@ -1214,7 +1219,7 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
   }
 }
 
-void sdf_app_init(void) {
+esp_err_t sdf_app_init(void) {
   static const sdf_lock_flow_ops_t lf_ops = {
       .send_challenge = sdf_app_lf_send_challenge,
       .send_action = sdf_app_lf_send_action,
@@ -1283,32 +1288,73 @@ void sdf_app_init(void) {
     s_has_creds = true;
     ESP_LOGI(TAG, "Loaded stored Nuki credentials");
   }
-  mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
+mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   sdf_nuki_client_init(&s_client, &creds, sdf_app_send_encrypted, NULL,
                        sdf_app_send_unencrypted, NULL, sdf_app_on_message,
                        NULL);
 
+  const sdf_config_t *cfg = sdf_config_get();
+
+  // Initialize event router
+  err = sdf_event_router_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize event router: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  // Subscribe to events
+  sdf_event_router_subscriber_t *sub_handle = NULL;
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
+                                   SDF_EVENT_ROUTER_PRIO_HIGH,
+                                   sdf_app_on_event, NULL, &sub_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to biometric match: %s", esp_err_to_name(err));
+  }
+
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
+                                   SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                                   sdf_app_on_event, NULL, &sub_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to security lockout: %s", esp_err_to_name(err));
+  }
+
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,
+                                   SDF_EVENT_ROUTER_PRIO_HIGH,
+                                   sdf_app_on_event, NULL, &sub_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to biometric match failed: %s", esp_err_to_name(err));
+  }
+
+err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     sdf_app_on_event, NULL, &sub_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to enrollment step: %s", esp_err_to_name(err));
+  }
+
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     sdf_app_on_event, NULL, &sub_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
+  }
+
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_FAILED,
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     sdf_app_on_event, NULL, &sub_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
+  }
+
   sdf_services_config_t services_cfg;
   sdf_services_get_default_config(&services_cfg);
-  services_cfg.fingerprint.uart_port = SDF_APP_FP_UART_PORT;
-  services_cfg.fingerprint.tx_pin = SDF_APP_FP_UART_TX_PIN;
-  services_cfg.fingerprint.rx_pin = SDF_APP_FP_UART_RX_PIN;
-  services_cfg.match_poll_interval_ms = SDF_APP_FP_MATCH_POLL_MS;
-  services_cfg.match_cooldown_ms = SDF_APP_FP_MATCH_COOLDOWN_MS;
   services_cfg.unlock_cb = sdf_app_on_fingerprint_unlock;
   services_cfg.unlock_ctx = NULL;
-  services_cfg.enrollment_cb = sdf_app_on_enrollment_state;
-  services_cfg.enrollment_ctx = NULL;
   services_cfg.admin_action_cb = sdf_app_on_admin_action;
   services_cfg.admin_action_ctx = NULL;
   services_cfg.security_event_cb = sdf_app_on_security_event;
   services_cfg.security_event_ctx = NULL;
-  services_cfg.wake_gpio = SDF_APP_FP_WAKE_GPIO;
-  services_cfg.power_en_gpio = SDF_APP_FP_POWER_EN_GPIO;
-  services_cfg.enrollment_btn_gpio = SDF_APP_ENROLLMENT_BTN_GPIO;
-  services_cfg.ws2812_led_gpio = SDF_APP_WS2812_LED_GPIO;
-  services_cfg.battery_adc_pin = SDF_APP_BATTERY_ADC_GPIO;
 
   err = sdf_services_init(&services_cfg);
   if (err != ESP_OK) {
@@ -1317,15 +1363,14 @@ void sdf_app_init(void) {
   }
 
   if (sdf_protocol_zigbee_is_enabled()) {
-    err = sdf_protocol_zigbee_set_checkin_interval_ms(
-        SDF_APP_POWER_CHECKIN_INTERVAL_MS);
+    err = sdf_protocol_zigbee_set_checkin_interval_ms(cfg->checkin_interval_ms);
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to set Zigbee check-in interval: %s",
                esp_err_to_name(err));
     }
 
     err = sdf_protocol_zigbee_set_command_handler(sdf_app_on_zigbee_command,
-                                                  NULL);
+                                                 NULL);
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to set Zigbee command handler: %s",
                esp_err_to_name(err));
@@ -1338,7 +1383,7 @@ void sdf_app_init(void) {
     } else {
       sdf_protocol_zigbee_update_lock_state(
           SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED);
-      sdf_app_update_battery_percent(SDF_APP_POWER_BATTERY_DEFAULT_PERCENT);
+      sdf_app_update_battery_percent(cfg->battery_default_percent);
       sdf_protocol_zigbee_update_alarm_mask(0);
     }
   } else {
@@ -1348,8 +1393,12 @@ void sdf_app_init(void) {
   sdf_nuki_ble_init(&s_ble, sdf_app_on_ble_rx, NULL, sdf_app_on_ble_ready,
                     NULL);
 
-  /* Load BLE target address from NVS, fall back to compile-time default */
-  ble_addr_t ble_target = SDF_NUKI_TARGET_ADDR;
+  /* Load BLE target address from NVS, fall back to config default */
+  ble_addr_t ble_target = {
+      .type = cfg->nuki_target_addr_type,
+      .val = {cfg->nuki_target_addr[0], cfg->nuki_target_addr[1], cfg->nuki_target_addr[2],
+              cfg->nuki_target_addr[3], cfg->nuki_target_addr[4], cfg->nuki_target_addr[5]}
+  };
   {
     uint8_t stored_type = 0;
     uint8_t stored_addr[6] = {0};
@@ -1367,9 +1416,9 @@ void sdf_app_init(void) {
       }
     }
   }
-  if (!sdf_nuki_ble_addr_is_empty(&ble_target)) {
+if (!sdf_nuki_ble_addr_is_empty(&ble_target)) {
     sdf_nuki_ble_set_target_addr(&s_ble, &ble_target);
-    if (SDF_APP_BLE_CONNECT_ON_DEMAND) {
+    if (cfg->ble_connect_on_demand) {
       ESP_LOGI(TAG,
                "BLE target address configured; connect-on-demand mode defers "
                "initial scan");
@@ -1382,25 +1431,25 @@ void sdf_app_init(void) {
              "No BLE target address; scan deferred until pairing requested");
   }
 
-  sdf_power_manager_config_t power_cfg;
-  sdf_power_get_default_power_config(&power_cfg);
-  power_cfg.ble_transport = &s_ble;
-  power_cfg.fingerprint_wake_gpio = SDF_APP_FP_WAKE_GPIO;
-  power_cfg.checkin_interval_ms = SDF_APP_POWER_CHECKIN_INTERVAL_MS;
-  power_cfg.idle_before_sleep_ms = SDF_APP_POWER_IDLE_BEFORE_SLEEP_MS;
-  power_cfg.post_wake_guard_ms = SDF_APP_POWER_POST_WAKE_GUARD_MS;
-  power_cfg.loop_interval_ms = SDF_APP_POWER_LOOP_INTERVAL_MS;
-  power_cfg.battery_report_interval_ms = SDF_APP_POWER_BATTERY_REPORT_MS;
-  power_cfg.enable_light_sleep = SDF_APP_POWER_ENABLE_LIGHT_SLEEP;
-  power_cfg.enable_ble_radio_gating = SDF_APP_POWER_ENABLE_BLE_RADIO_GATING;
-  power_cfg.enable_deep_sleep_fallback = true;
-  power_cfg.battery_percent_default = SDF_APP_POWER_BATTERY_DEFAULT_PERCENT;
-  power_cfg.busy_cb = sdf_app_power_busy;
-  power_cfg.busy_ctx = NULL;
-  power_cfg.wake_cb = sdf_app_power_wakeup;
-  power_cfg.wake_ctx = NULL;
-  power_cfg.battery_cb = sdf_app_power_battery_percent;
-  power_cfg.battery_ctx = NULL;
+  sdf_power_manager_config_t power_cfg = {
+      .ble_transport = &s_ble,
+      .fingerprint_wake_gpio = (gpio_num_t)cfg->fp_wake_gpio,
+      .checkin_interval_ms = cfg->checkin_interval_ms,
+      .idle_before_sleep_ms = cfg->idle_before_sleep_ms,
+      .post_wake_guard_ms = cfg->post_wake_guard_ms,
+      .loop_interval_ms = cfg->power_loop_interval_ms,
+      .battery_report_interval_ms = cfg->battery_report_interval_ms,
+      .enable_light_sleep = cfg->enable_light_sleep,
+      .enable_ble_radio_gating = cfg->enable_ble_radio_gating,
+      .enable_deep_sleep_fallback = cfg->enable_deep_sleep_fallback,
+      .battery_percent_default = cfg->battery_default_percent,
+      .busy_cb = sdf_app_power_busy,
+      .busy_ctx = NULL,
+      .wake_cb = sdf_app_power_wakeup,
+      .wake_ctx = NULL,
+      .battery_cb = sdf_app_power_battery_percent,
+      .battery_ctx = NULL,
+  };
 
   err = sdf_power_init_power_manager(&power_cfg);
   if (err != ESP_OK) {
@@ -1413,6 +1462,20 @@ void sdf_app_init(void) {
   }
 
   sdf_power_mark_activity();
+
+  return ESP_OK;
+}
+
+sdf_nuki_ble_transport_t *sdf_app_get_ble_transport(void) {
+  return &s_ble;
+}
+
+sdf_nuki_client_t *sdf_app_get_nuki_client(void) {
+  return &s_client;
+}
+
+sdf_nuki_pairing_t *sdf_app_get_nuki_pairing(void) {
+  return &s_pairing;
 }
 
 #ifdef SDF_APP_TESTING

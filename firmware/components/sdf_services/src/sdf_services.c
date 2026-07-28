@@ -1,6 +1,8 @@
 #include "sdf_services_internal.h"
 #include "sdf_drivers.h"
 #include "sdf_platform.h"
+#include "sdf_config.h"
+#include "sdf_event_router.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -22,9 +24,28 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "sdf_event_router.h"
+
 #define SDF_SERVICES_TASK_NAME "sdf_fp"
 #define SDF_SERVICES_TASK_STACK 4096
 #define SDF_SERVICES_TASK_PRIORITY 5
+
+/* New task configuration */
+#define SDF_MATCH_TASK_NAME "sdf_match"
+#define SDF_MATCH_TASK_STACK 4096
+#define SDF_MATCH_TASK_PRIORITY 6
+
+#define SDF_ENROLL_TASK_NAME "sdf_enroll"
+#define SDF_ENROLL_TASK_STACK 4096
+#define SDF_ENROLL_TASK_PRIORITY 5
+
+#define SDF_ADMIN_TASK_NAME "sdf_admin"
+#define SDF_ADMIN_TASK_STACK 4096
+#define SDF_ADMIN_TASK_PRIORITY 6
+
+#define SDF_BUTTON_TASK_NAME "sdf_btn"
+#define SDF_BUTTON_TASK_STACK 3072
+#define SDF_BUTTON_TASK_PRIORITY 5
 
 #define SDF_SERVICES_DEFAULT_UART_PORT 1
 #define SDF_SERVICES_DEFAULT_UART_TX_PIN 4
@@ -49,7 +70,7 @@ static const char *TAG = "sdf_services";
 
 static sdf_services_state_t s_state = {0};
 
-static bool sdf_services_try_claim_admin_action(
+bool sdf_services_try_claim_admin_action(
     const sdf_fingerprint_match_t *match);
 
 sdf_services_state_t *sdf_services_state(void) {
@@ -84,7 +105,7 @@ const char *sdf_services_fingerprint_result_name(
   }
 }
 
-static esp_err_t sdf_services_fingerprint_result_to_err(
+esp_err_t sdf_services_fingerprint_result_to_err(
     sdf_fingerprint_op_result_t result) {
   switch (result) {
   case SDF_FINGERPRINT_OP_OK:
@@ -100,7 +121,7 @@ static esp_err_t sdf_services_fingerprint_result_to_err(
   }
 }
 
-static void sdf_services_complete_permission_change(esp_err_t result) {
+void sdf_services_complete_permission_change(esp_err_t result) {
   SemaphoreHandle_t done_sem = NULL;
   bool should_signal = false;
 
@@ -132,6 +153,23 @@ static void sdf_services_complete_permission_change(esp_err_t result) {
 }
 
 static void
+sdf_services_emit_enrollment_event(sdf_event_router_type_t type,
+                                   const sdf_enrollment_sm_t *sm) {
+  if (!sdf_services_is_ready()) {
+    return;
+  }
+
+  sdf_event_router_event_t evt = {
+      .type = type,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+      .payload.enrollment.step = sm->completed_steps,
+      .payload.enrollment.status = sm->state,
+  };
+  sdf_event_router_emit(&evt);
+}
+
+static void
 sdf_services_notify_security_event(const sdf_services_security_event_t *event) {
   if (event == NULL || s_state.lock == NULL) {
     return;
@@ -149,6 +187,47 @@ sdf_services_notify_security_event(const sdf_services_security_event_t *event) {
 
   if (cb != NULL) {
     cb(ctx, event);
+  }
+
+  // Emit corresponding event router event
+  if (!sdf_services_is_ready()) {
+    return;
+  }
+
+  sdf_event_router_event_t evt = {
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+  };
+
+  switch (event->type) {
+  case SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED:
+    evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH;
+    evt.payload.biometric.user_id = event->user_id;
+    evt.payload.biometric.confidence = 100;
+    evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
+    sdf_event_router_emit(&evt);
+    break;
+  case SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED:
+    evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED;
+    evt.payload.security.user_id = event->user_id;
+    evt.payload.security.failed_attempts = event->failed_attempts;
+    evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
+    sdf_event_router_emit(&evt);
+    break;
+  case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED:
+    evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
+    evt.payload.security.user_id = event->user_id;
+    evt.payload.security.failed_attempts = event->failed_attempts;
+    evt.priority = SDF_EVENT_ROUTER_PRIO_CRITICAL;
+    sdf_event_router_emit(&evt);
+    break;
+  case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED:
+    evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
+    evt.payload.security.user_id = 0;
+    evt.payload.security.failed_attempts = 0;
+    evt.priority = SDF_EVENT_ROUTER_PRIO_NORMAL;
+    sdf_event_router_emit(&evt);
+    break;
   }
 }
 
@@ -217,7 +296,7 @@ static void sdf_services_start_local_enrollment_with_permission(
   }
 }
 
-static void sdf_services_execute_admin_action(
+void sdf_services_execute_admin_action(
     sdf_services_admin_action_t action,
     sdf_services_admin_action_cb action_cb, void *action_ctx) {
   ESP_LOGI(TAG, "Authorized action %d!", (int)action);
@@ -544,7 +623,7 @@ static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
  * @return false if no pending admin action exists (caller should proceed
  *               with normal unlock flow).
  */
-static bool sdf_services_try_claim_admin_action(
+bool sdf_services_try_claim_admin_action(
     const sdf_fingerprint_match_t *match) {
   sdf_services_admin_action_t action = SDF_SERVICES_ADMIN_ACTION_NONE;
   sdf_services_admin_action_cb action_cb = NULL;
@@ -793,38 +872,120 @@ static void sdf_services_task(void *arg) {
 }
 
 void sdf_services_get_default_config(sdf_services_config_t *config) {
+  const sdf_config_t *sdf_cfg = sdf_config_get();
   if (config == NULL) {
     return;
   }
 
   memset(config, 0, sizeof(*config));
-  config->fingerprint.uart_port = SDF_SERVICES_DEFAULT_UART_PORT;
-  config->fingerprint.tx_pin = SDF_SERVICES_DEFAULT_UART_TX_PIN;
-  config->fingerprint.rx_pin = SDF_SERVICES_DEFAULT_UART_RX_PIN;
-  config->fingerprint.baud_rate = SDF_SERVICES_DEFAULT_UART_BAUD_RATE;
-  config->fingerprint.response_timeout_ms =
-      SDF_SERVICES_DEFAULT_UART_TIMEOUT_MS;
-  config->fingerprint.rx_buffer_size = SDF_SERVICES_DEFAULT_UART_RX_BUFFER;
-  config->fingerprint.tx_buffer_size = SDF_SERVICES_DEFAULT_UART_TX_BUFFER;
+  config->fingerprint.uart_port = sdf_cfg->fp_uart_port;
+  config->fingerprint.tx_pin = sdf_cfg->fp_tx_pin;
+  config->fingerprint.rx_pin = sdf_cfg->fp_rx_pin;
+  config->fingerprint.baud_rate = sdf_cfg->fp_baud_rate;
+  config->fingerprint.response_timeout_ms = sdf_cfg->fp_response_timeout_ms;
+  config->fingerprint.rx_buffer_size = sdf_cfg->fp_rx_buffer_size;
+  config->fingerprint.tx_buffer_size = sdf_cfg->fp_tx_buffer_size;
 
-  config->match_poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
-  config->match_cooldown_ms = SDF_SERVICES_DEFAULT_MATCH_COOLDOWN_MS;
-  config->failed_attempt_threshold =
-      SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_THRESHOLD;
-  config->failed_attempt_window_ms =
-      SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_WINDOW_MS;
-  config->lockout_duration_ms = SDF_SERVICES_DEFAULT_LOCKOUT_DURATION_MS;
+  config->match_poll_interval_ms = sdf_cfg->match_poll_interval_ms;
+  config->match_cooldown_ms = sdf_cfg->match_cooldown_ms;
+  config->failed_attempt_threshold = sdf_cfg->failed_attempt_threshold;
+  config->failed_attempt_window_ms = sdf_cfg->failed_attempt_window_ms;
+  config->lockout_duration_ms = sdf_cfg->lockout_duration_ms;
   config->unlock_cb = NULL;
   config->unlock_ctx = NULL;
-  config->enrollment_ctx = NULL;
   config->security_event_cb = NULL;
   config->security_event_ctx = NULL;
-  config->wake_gpio = -1;
-  config->power_en_gpio = -1;
-  config->enrollment_btn_gpio = -1;
-  config->ws2812_led_gpio = -1;
-  config->battery_adc_pin = -1;
+  config->wake_gpio = (gpio_num_t)sdf_cfg->fp_wake_gpio;
+  config->power_en_gpio = (gpio_num_t)sdf_cfg->fp_en_gpio;
+  config->enrollment_btn_gpio = (gpio_num_t)sdf_cfg->enrollment_btn_gpio;
+  config->ws2812_led_gpio = (gpio_num_t)sdf_cfg->ws2812_led_gpio;
+  config->battery_adc_pin = sdf_cfg->battery_adc_pin;
 }
+
+/* New task start/stop functions */
+esp_err_t sdf_services_start_tasks(void) {
+    sdf_services_state_t *s = &s_state;
+
+    if (!sdf_services_is_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Create match task */
+    BaseType_t task_ok = xTaskCreate(sdf_match_task, SDF_MATCH_TASK_NAME,
+                                     SDF_MATCH_TASK_STACK, NULL,
+                                     SDF_MATCH_TASK_PRIORITY, &s->match_task);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create match task");
+        return ESP_FAIL;
+    }
+
+    /* Create enrollment task */
+    task_ok = xTaskCreate(sdf_enroll_task, SDF_ENROLL_TASK_NAME,
+                          SDF_ENROLL_TASK_STACK, NULL,
+                          SDF_ENROLL_TASK_PRIORITY, &s->enroll_task);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create enroll task");
+        vTaskDelete(s->match_task);
+        s->match_task = NULL;
+        return ESP_FAIL;
+    }
+
+    /* Create admin task */
+    task_ok = xTaskCreate(sdf_admin_task, SDF_ADMIN_TASK_NAME,
+                          SDF_ADMIN_TASK_STACK, NULL,
+                          SDF_ADMIN_TASK_PRIORITY, &s->admin_task);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create admin task");
+        vTaskDelete(s->match_task);
+        vTaskDelete(s->enroll_task);
+        s->match_task = NULL;
+        s->enroll_task = NULL;
+        return ESP_FAIL;
+    }
+
+    /* Create button task */
+    task_ok = xTaskCreate(sdf_button_task, SDF_BUTTON_TASK_NAME,
+                          SDF_BUTTON_TASK_STACK, NULL,
+                          SDF_BUTTON_TASK_PRIORITY, &s->button_task);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create button task");
+        vTaskDelete(s->match_task);
+        vTaskDelete(s->enroll_task);
+        vTaskDelete(s->admin_task);
+        s->match_task = NULL;
+        s->enroll_task = NULL;
+        s->admin_task = NULL;
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "All 4 services tasks started");
+    return ESP_OK;
+}
+
+esp_err_t sdf_services_stop_tasks(void) {
+    sdf_services_state_t *s = &s_state;
+
+    if (s->match_task) {
+        vTaskDelete(s->match_task);
+        s->match_task = NULL;
+    }
+    if (s->enroll_task) {
+        vTaskDelete(s->enroll_task);
+        s->enroll_task = NULL;
+    }
+    if (s->admin_task) {
+        vTaskDelete(s->admin_task);
+        s->admin_task = NULL;
+    }
+    if (s->button_task) {
+        vTaskDelete(s->button_task);
+        s->button_task = NULL;
+    }
+
+    ESP_LOGI(TAG, "All services tasks stopped");
+    return ESP_OK;
+}
+
 
 esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   if (config == NULL || config->match_poll_interval_ms == 0 ||
@@ -886,12 +1047,11 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
     return err;
   }
 
-  BaseType_t task_ok = xTaskCreate(sdf_services_task, SDF_SERVICES_TASK_NAME,
-                                   SDF_SERVICES_TASK_STACK, NULL,
-                                   SDF_SERVICES_TASK_PRIORITY, &s_state.task);
-  if (task_ok != pdPASS) {
+  /* Start new tasks instead of legacy single task */
+  err = sdf_services_start_tasks();
+  if (err != ESP_OK) {
     sdf_drivers_deinit();
-    return ESP_FAIL;
+    return err;
   }
 
   if (config->wake_gpio >= 0) {
@@ -907,49 +1067,7 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
     }
   }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-  if (config->enrollment_btn_gpio >= 0) {
-    button_config_t btn_config = {
-        .long_press_time = 3000,
-        .short_press_time = 180,
-    };
-    button_gpio_config_t gpio_config = {
-        .gpio_num = config->enrollment_btn_gpio,
-        .active_level = 0,
-        .enable_power_save = false,
-        .disable_pull = false,
-    };
-    if (iot_button_new_gpio_device(&btn_config, &gpio_config,
-                                   &s_state.btn_handle) == ESP_OK) {
-      iot_button_register_cb(s_state.btn_handle, BUTTON_SINGLE_CLICK, NULL,
-                             sdf_services_btn_cb,
-                             (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL);
-
-      button_event_args_t arg_3click = {
-          .multiple_clicks = {.clicks = 3},
-      };
-      iot_button_register_cb(s_state.btn_handle, BUTTON_MULTIPLE_CLICK,
-                             &arg_3click, sdf_services_btn_cb,
-                             (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN);
-
-      iot_button_register_cb(s_state.btn_handle, BUTTON_DOUBLE_CLICK, NULL,
-                             sdf_services_btn_cb,
-                             (void *)SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
-
-      button_event_args_t arg_3s = {.long_press = {.press_time = 3000}};
-      iot_button_register_cb(s_state.btn_handle, BUTTON_LONG_PRESS_START,
-                             &arg_3s, sdf_services_btn_cb,
-                             (void *)SDF_SERVICES_ADMIN_ACTION_ZB_JOIN);
-
-      button_event_args_t arg_8s = {.long_press = {.press_time = 8000}};
-      iot_button_register_cb(s_state.btn_handle, BUTTON_LONG_PRESS_START,
-                             &arg_8s, sdf_services_btn_cb,
-                             (void *)SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
-    } else {
-      ESP_LOGW(TAG, "Failed to create enrollment iot_button");
-    }
-  }
-#endif
+  /* Button is now handled by sdf_button_task */
 
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
       pdTRUE) {
@@ -1179,4 +1297,120 @@ esp_err_t sdf_services_reset_state(void) {
   led_off();
 
   return ESP_OK;
+}
+
+esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission) {
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
+      user_id > SDF_FINGERPRINT_USER_ID_MAX || permission < 1u ||
+      permission > 3u) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  if (!s_state.initialized || s_state.enrollment_request_pending ||
+      sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+    xSemaphoreGive(s_state.lock);
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  s_state.request_user_id = user_id;
+  s_state.request_permission = permission;
+  s_state.enrollment_request_pending = true;
+  xSemaphoreGive(s_state.lock);
+
+  if (s_state.wake_sem != NULL) {
+    xSemaphoreGive(s_state.wake_sem);
+  }
+  return ESP_OK;
+}
+
+bool sdf_services_is_enrollment_active(void) {
+  if (s_state.lock == NULL) {
+    return false;
+  }
+
+  bool active = false;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired == pdTRUE) {
+      active = sdf_enrollment_sm_is_active(&s_state.enrollment) ||
+               s_state.enrollment_request_pending;
+    }
+  }
+  return active;
+}
+
+sdf_enrollment_sm_t sdf_services_get_enrollment_state(void) {
+  sdf_enrollment_sm_t snapshot;
+  sdf_enrollment_sm_init(&snapshot);
+
+  if (s_state.lock == NULL) {
+    return snapshot;
+  }
+
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired == pdTRUE) {
+      snapshot = s_state.enrollment;
+    }
+  }
+  return snapshot;
+}
+
+void sdf_services_start_pending_enrollment_if_any(void) {
+  bool started = false;
+  bool failed = false;
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
+      pdTRUE) {
+    return;
+  }
+
+  if (!s_state.enrollment_request_pending ||
+      sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+    xSemaphoreGive(s_state.lock);
+    return;
+  }
+
+  esp_err_t err = sdf_enrollment_sm_start(&s_state.enrollment, s_state.request_user_id,
+                                          s_state.request_permission);
+  s_state.enrollment_request_pending = false;
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Unable to start enrollment state machine: %s",
+             esp_err_to_name(err));
+    failed = true;
+    xSemaphoreGive(s_state.lock);
+  } else {
+    ESP_LOGI(TAG, "Enrollment started user_id=%u permission=%u step=%u cmd=0x%02X",
+             (unsigned)s_state.enrollment.user_id,
+             (unsigned)s_state.enrollment.permission,
+             (unsigned)sdf_enrollment_sm_current_step(&s_state.enrollment),
+             (unsigned)sdf_enrollment_sm_current_command(&s_state.enrollment));
+    started = true;
+    xSemaphoreGive(s_state.lock);
+  }
+
+  if (started) {
+    esp_err_t power_hold_err = fp_set_keep_power_on(true);
+    if (power_hold_err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to enable enrollment power hold: %s",
+               esp_err_to_name(power_hold_err));
+    }
+    led_pulse_blue();
+    sdf_services_emit_enrollment_event(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                                       &s_state.enrollment);
+    return;
+  }
+
+  if (failed) {
+    sdf_services_emit_enrollment_event(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                                       &s_state.enrollment);
+  }
 }

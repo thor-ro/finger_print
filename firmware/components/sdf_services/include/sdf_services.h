@@ -13,7 +13,7 @@
 #include "esp_err.h"
 
 #include "fingerprint.h"
-#include "sdf_services_enrollment.h"
+#include "sdf_state_machines.h"
 
 typedef int (*sdf_services_unlock_cb)(void *ctx, uint16_t user_id);
 
@@ -56,8 +56,6 @@ typedef struct {
   uint32_t lockout_duration_ms;
   sdf_services_unlock_cb unlock_cb;
   void *unlock_ctx;
-  sdf_services_enrollment_cb enrollment_cb;
-  void *enrollment_ctx;
   sdf_services_admin_action_cb admin_action_cb;
   void *admin_action_ctx;
   sdf_services_security_event_cb security_event_cb;
@@ -74,6 +72,10 @@ void sdf_services_get_default_config(sdf_services_config_t *config);
 esp_err_t sdf_services_init(const sdf_services_config_t *config);
 bool sdf_services_is_ready(void);
 
+/* New task-based API */
+esp_err_t sdf_services_start_tasks(void);
+esp_err_t sdf_services_stop_tasks(void);
+
 esp_err_t sdf_services_delete_user(uint16_t user_id);
 esp_err_t sdf_services_clear_all_users(void);
 esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
@@ -84,5 +86,10 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
 void sdf_services_trigger_low_battery_warning(void);
 
 esp_err_t sdf_services_reset_state(void);
+
+/* Enrollment API - event-driven */
+esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission);
+bool sdf_services_is_enrollment_active(void);
+sdf_enrollment_sm_t sdf_services_get_enrollment_state(void);
 
 #endif /* SDF_SERVICES_H */

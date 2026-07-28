@@ -3,6 +3,8 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "soc/gpio_num.h"
+#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -39,27 +41,6 @@ uint64_t esp_sleep_get_gpio_wakeup_status_mock(void);
 #define esp_deep_sleep_enable_gpio_wakeup esp_deep_sleep_enable_gpio_wakeup_mock
 #define esp_sleep_get_wakeup_cause esp_sleep_get_wakeup_cause_mock
 #define esp_sleep_get_gpio_wakeup_status esp_sleep_get_gpio_wakeup_status_mock
-
-typedef enum {
-    ESP_OK = 0,
-    ESP_ERR_INVALID_ARG = -1,
-    ESP_ERR_INVALID_STATE = -2,
-    ESP_ERR_SLEEP_REJECTED = -3,
-} esp_err_t;
-
-typedef enum {
-    GPIO_NUM_0 = 0,
-    GPIO_NUM_1 = 1,
-    GPIO_NUM_2 = 2,
-    GPIO_NUM_3 = 3,
-    GPIO_NUM_4 = 4,
-    GPIO_NUM_5 = 5,
-    GPIO_NUM_6 = 6,
-    GPIO_NUM_7 = 7,
-    GPIO_NUM_8 = 8,
-    GPIO_NUM_9 = 9,
-    GPIO_NUM_NC = -1,
-} gpio_num_t;
 
 typedef enum {
     GPIO_INTR_DISABLE = 0,

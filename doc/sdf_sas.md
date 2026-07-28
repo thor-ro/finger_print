@@ -142,9 +142,11 @@ package "sdf_app" {
   [Application Logic] as app
 }
 package "sdf_services" {
-  [Event Router\n& Security] as svc
-  [Enrollment\nState Machine] as enroll
+  [Security\n& Enrollment] as svc
   [Admin Action\nHandler] as admin
+}
+package "sdf_event_router" {
+  [Event Router] as evt
 }
 package "sdf_protocol_ble" {
   [Nuki BLE\nClient] as ble
@@ -174,9 +176,14 @@ package "sdf_cli" {
   [Debug CLI] as cli
 }
 
-app --> svc : request_enrollment\nlock_action\ndelete_user
+app --> evt : subscribe/emit events
 app --> ble : send lock action\nsend pairing
 app --> zb : update state\nalarm mask
+evt --> svc : route events
+evt --> admin : route events
+evt --> ble : route events
+evt --> zb : route events
+evt --> pwr : route events
 svc --> fp : match_1n\nenroll_step\ndelete_user
 svc --> led : pulse/flash/breathe
 svc --> sm : start/apply_step
@@ -193,6 +200,7 @@ common <-- zb
 common <-- sm
 common <-- nvs
 common <-- pwr
+common <-- evt
 @enduml
 ```
 
@@ -200,14 +208,15 @@ common <-- pwr
 
 | Component | Responsibility |
 |---|---|
-| **sdf_app** | Application orchestration: biometric unlock flow, Zigbee bridge flow, Nuki pairing flow, enrollment trigger, lock action queuing, audit event emission |
-| **sdf_services** | Core services: fingerprint match polling cycle, enrollment step execution, admin action authorization (10s timeout), security rate limiting, LED feedback dispatch |
-| **sdf_protocol_ble** | BLE/Nuki protocol: encrypted/unencrypted message framing, Curve25519 ECDH key exchange, challenge-response, lock action encoding, nonce replay detection |
-| **sdf_protocol_zigbee** | Zigbee Door Lock Cluster (0x0101): command reception (Lock/Unlock/Latch/Programming), attribute reporting (Lock State, Battery, Alarm Mask, User List) |
+| **sdf_app** | Application orchestration: biometric unlock flow, Zigbee bridge flow, Nuki pairing flow, enrollment trigger, lock action queuing, event subscription, audit event emission |
+| **sdf_services** | Core services: fingerprint match polling cycle, enrollment executor (event-driven, retries), admin action authorization (10s timeout), security rate limiting, LED feedback dispatch, event emission for biometric/security/enrollment events |
+| **sdf_event_router** | Central event bus: typed event emission, priority-based dispatch (CRITICAL/HIGH/NORMAL/LOW), subscription management with filtering, audit logging |
+| **sdf_protocol_ble** | BLE/Nuki protocol: encrypted/unencrypted message framing, Curve25519 ECDH key exchange, challenge-response, lock action encoding, nonce replay detection, event emission for lock actions |
+| **sdf_protocol_zigbee** | Zigbee Door Lock Cluster (0x0101): command reception (Lock/Unlock/Latch/Programming), attribute reporting (Lock State, Battery, Alarm Mask, User List), event emission for Zigbee commands |
 | **sdf_drivers** | Hardware abstraction: fingerprint UART (19200 baud, command framing, checksum), WS2812 LED ring (color animations), battery ADC |
-| **sdf_state_machines** | Pure logic enrollment state machine: IDLE → STEP_1 → STEP_2 → STEP_3 → SUCCESS/ERROR |
+| **sdf_state_machines** | Pure logic enrollment state machine (self-contained retry policy): IDLE → STEP_1 → STEP_2 → STEP_3 → SUCCESS/ERROR; exposes `next_action` API for executor |
 | **sdf_storage** | NVS persistence: Nuki credentials, BLE target address, NVS security verification |
-| **sdf_power** | FreeRTOS power manager: sleep/wake scheduling, Zigbee check-in coordination, BLE radio gating, battery reporting |
+| **sdf_power** | FreeRTOS power manager: sleep/wake scheduling, Zigbee check-in coordination, BLE radio gating, battery reporting, event emission for sleep/wake/battery |
 | **sdf_common** | Shared types: lock action enums, keyturner state, event/audit structs, error codes |
 | **sdf_cli** | Debug CLI for interactive testing and diagnostics |
 
@@ -217,7 +226,7 @@ common <-- pwr
 @startuml
 rectangle "sdf_services" {
   rectangle "Match Cycle" as match
-  rectangle "Enrollment\nExecution" as enroll_exec
+  rectangle "Enrollment\nExecutor" as enroll_exec
   rectangle "Admin Auth\nCycle" as admin_auth
   rectangle "Security\nManager" as sec
   rectangle "LED Feedback\nDispatch" as led_fb
@@ -235,13 +244,15 @@ rectangle "sdf_services" {
 @enduml
 ```
 
-**Match Cycle:** Polls `fp_match_1n()` every 400ms. On match, checks for pending admin action first; if none, calls `unlock_cb`. On failure, increments failed attempt counter and triggers lockout after threshold.
+**Match Cycle:** Polls `fp_match_1n()` every 400ms in dedicated `sdf_match_task` (prio 5). On match, checks for pending admin action first; if none, emits `BIOMETRIC_MATCH` (HIGH). On failure, increments failed attempt counter and triggers lockout after threshold.
 
-**Enrollment Execution:** Runs enrollment steps in a loop, calling `fp_enroll_step()` for each step. Advances the state machine on ACK success. Retries on ACK_FAIL (step 1-2) or fails on step 3.
+**Enrollment Executor:** Runs in dedicated `sdf_enroll_task` (prio 4). Calls `sdf_enrollment_sm_apply_step_result()` after each driver result to get the next action (`EXECUTE_STEP`, `RETRY_STEP`, `COMPLETE`, `FAIL`). Executes the returned action via `fp_enroll_step()` or LED feedback. All retry policy is encapsulated in `sdf_enrollment_sm`; the executor has no retry logic.
 
-**Admin Auth Cycle:** After button press, waits for fingerprint match with `permission == 3`. On match, claims the pending action and executes it. On non-admin match, flashes red.
+**Admin Auth Cycle:** Runs in dedicated `sdf_admin_task` (prio 5). After button press, waits for fingerprint match with `permission == 3`. On match, claims pending action and executes. On non-admin match, flashes red.
 
-**Security Manager:** Tracks failed attempts within a configurable window (default: 5 in 60s). Triggers lockout (default: 120s) and emits Zigbee alarm bits.
+**Button Handler:** Runs in dedicated `sdf_button_task` (prio 4). GPIO ISR + software debounce. Detects multi-press (single/double/triple/long). Maps to admin actions.
+
+**Security Manager:** Tracks failed attempts within configurable window (default: 5 in 60s). Triggers lockout (default: 120s) and emits Zigbee alarm bits.
 
 ## 5.3 Level 2 — sdf_app (White Box)
 
@@ -296,12 +307,43 @@ rectangle "sdf_protocol_ble" {
 
 # 6. Runtime View
 
-## 6.1 Biometric Unlock Flow
+## 6.1 FreeRTOS Task Architecture
+
+The following table documents the canonical FreeRTOS task architecture for SDF v2.0. This is the single source of truth for task priorities, stacks, triggers, and ownership. See `doc/rtos_tasks.md` for full specifications.
+
+| Task | Priority | Stack | Core | Trigger | Comm | Owner |
+|------|----------|-------|------|---------|------|-------|
+| sdf_power | 4 (NORMAL) | 4 KB | 0 | Timer (250ms) | Events | sdf_power |
+| sdf_zigbee | 5 (HIGH) | 8 KB | 0 | Event queue | Callbacks + Events | sdf_protocol_zigbee |
+| sdf_match | 5 (HIGH) | 6 KB | 0 | 400ms poll | Events | sdf_services |
+| sdf_enroll | 4 (NORMAL) | 4 KB | 0 | Event-driven | Events | sdf_services |
+| sdf_admin | 5 (HIGH) | 4 KB | 0 | Event-driven | Events | sdf_services |
+| sdf_button | 4 (NORMAL) | 3 KB | 0 | GPIO ISR | Events | sdf_services |
+| sdf_ota (future) | 3 (LOW) | 8 KB | 0 | Event-driven | Events | sdf_ota |
+
+**Total RAM (stacks):** ~37 KB + overhead
+
+**Priority Mapping:**
+- CRITICAL (6): `SECURITY_LOCKOUT_ENTERED`, `BIOMETRIC_MATCH` (admin)
+- HIGH (5): `BIOMETRIC_MATCH` (user), `ZIGBEE_COMMAND`, `ADMIN_ACTION_REQUEST`
+- NORMAL (4): `ENROLLMENT_START`, `POWER_SLEEP/WAKE`
+- LOW (3): `BATTERY_REPORT`, `OTA_PROGRESS`
+
+**Queue Depths:**
+- sdf_match: 16 (drop oldest)
+- sdf_enroll: 8 (block)
+- sdf_admin: 8 (drop)
+- sdf_button: 4 (drop)
+- sdf_zigbee: 32 (block)
+- sdf_power: 8 (drop)
+
+## 6.2 Biometric Unlock Flow
 
 ```plantuml
 @startuml
 participant "Fingerprint\nSensor" as FPS
 participant "sdf_services\n(Match Cycle)" as SVC
+participant "sdf_event_router" as EVT
 participant "sdf_app\n(Unlock Flow)" as APP
 participant "sdf_protocol_ble\n(Nuki Client)" as BLE
 participant "Nuki Smart\nLock" as NUKI
@@ -309,7 +351,8 @@ participant "Nuki Smart\nLock" as NUKI
 FPS -> SVC : WAKE pin interrupt
 SVC -> SVC : fp_match_1n()
 SVC -> SVC : match.user_id = 5\nmatch.permission = 1
-SVC -> APP : unlock_cb(user_id=5)
+SVC -> EVT : emit BIOMETRIC_MATCH (HIGH)
+EVT -> APP : subscribe callback
 APP -> APP : sdf_app_lock_action(UNLATCH)
 APP -> BLE : sdf_lock_flow_begin()
 BLE -> NUKI : send challenge request
@@ -317,9 +360,26 @@ NUKI -> BLE : challenge nonce (32 bytes)
 BLE -> BLE : compute authenticator
 BLE -> NUKI : send lock action (encrypted)
 NUKI -> BLE : status = COMPLETE
+BLE -> EVT : emit BLE_LOCK_ACTION_COMPLETE (HIGH)
 BLE -> APP : on_complete(UNLATCH)
 APP -> APP : update Zigbee lock state
 APP -> APP : release BLE transport
+@enduml
+```
+
+## 6.1.1 Event Router Processing
+
+```plantuml
+@startuml
+participant "sdf_services" as SVC
+participant "sdf_event_router" as EVT
+participant "sdf_app" as APP
+
+SVC -> EVT : emit_async(BIOMETRIC_MATCH)
+EVT -> EVT : queue event (HIGH prio)
+EVT -> EVT : process task dequeues
+EVT -> APP : sync callback\nBIOMETRIC_MATCH
+note right of EVT : CRITICAL events: sync dispatch\nHIGH/NORMAL/LOW: async queue
 @enduml
 ```
 
@@ -330,18 +390,21 @@ APP -> APP : release BLE transport
 participant "Smart Home\nApp" as HA
 participant "Zigbee\nCoordinator" as ZC
 participant "sdf_protocol_zigbee\n(Cluster)" as ZB
+participant "sdf_event_router" as EVT
 participant "sdf_app\n(Bridge Flow)" as APP
 participant "sdf_protocol_ble\n(Nuki Client)" as BLE
 participant "Nuki Smart\nLock" as NUKI
 
 HA -> ZC : Unlock Door command
 ZC -> ZB : ZCL command (0x0101)
-ZB -> APP : command_cb(UNLOCK)
+ZB -> EVT : emit(ZIGBEE_COMMAND, HIGH)
+EVT -> APP : subscribe/emit BIOMETRIC_MATCH
 APP -> APP : sdf_app_lock_action(UNLOCK)
 APP -> BLE : sdf_lock_flow_begin()
 BLE -> NUKI : challenge + lock action
 NUKI -> BLE : status = COMPLETE
-BLE -> APP : on_complete(UNLOCK)
+BLE -> EVT : emit(BLE_LOCK_ACTION_COMPLETE, HIGH)
+EVT -> APP : on_lock_action_complete
 APP -> ZB : update_lock_state(UNLOCKED)
 ZB -> ZC : attribute report
 ZC -> HA : lock state updated
@@ -354,8 +417,11 @@ ZC -> HA : lock state updated
 @startuml
 participant "User" as U
 participant "Button\nGPIO" as BTN
+participant "sdf_event_router" as EVT
+participant "sdf_app" as APP
 participant "sdf_services\n(Admin Auth)" as SVC
-participant "sdf_services\n(Enrollment)" as ENR
+participant "sdf_services\n(Enrollment Executor)" as ENR
+participant "sdf_state_machines\n(Enrollment SM)" as SM
 participant "Fingerprint\nSensor" as FPS
 participant "LED Ring" as LED
 
@@ -370,20 +436,37 @@ alt Claimed (>0 users)
   SVC -> LED : admin_auth_green()
 end
 SVC -> ENR : request_enrollment(lowest_id, 1)
+ENR -> SM : sdf_enrollment_sm_start(user_id, perm)
+SM --> ENR : next_action = EXECUTE_STEP(cmd=STEP_1)
 ENR -> FPS : fp_enroll_step(1, user_id, perm)
 FPS -> LED : flash_green()
 FPS -> ENR : ACK OK
+ENR -> SM : apply_step_result(ACK_OK)
+SM --> ENR : next_action = EXECUTE_STEP(cmd=STEP_2)
 ENR -> FPS : fp_enroll_step(2, user_id, perm)
 FPS -> LED : flash_green()
 FPS -> ENR : ACK OK
+ENR -> SM : apply_step_result(ACK_OK)
+SM --> ENR : next_action = EXECUTE_STEP(cmd=STEP_3)
 ENR -> FPS : fp_enroll_step(3, user_id, perm)
 FPS -> LED : solid_green()
 FPS -> ENR : ACK OK
-ENR -> ENR : state = SUCCESS
+ENR -> SM : apply_step_result(ACK_OK)
+SM --> ENR : next_action = COMPLETE
+ENR -> EVT : emit ENROLLMENT_COMPLETE
+EVT -> APP : subscribe callback
+APP -> APP : update Zigbee user list
+note over SM : Retry policy (steps 1-2: 3x ACK_FAIL\nstep 3: immediate fail)
 @enduml
 ```
 
-## 6.4 First-Time Setup (Unclaimed Device)
+**Event-driven enrollment:** The `sdf_enrollment_sm` in `sdf_state_machines` is the single source of truth for enrollment state and retry logic. The `sdf_services` enrollment executor is a thin driver that:
+1. Starts the SM on enrollment request
+2. After each driver result, calls `apply_step_result()` to get the next action
+3. Executes the returned action (driver call, LED, or event emission)
+4. On COMPLETE/FAIL, emits `ENROLLMENT_COMPLETE` / `ENROLLMENT_FAILED` events via event router
+
+This replaces the old callback-based design where `sdf_app` subscribed to `enrollment_cb` in `sdf_services_config_t`. Now `sdf_app` subscribes to `ENROLLMENT_COMPLETE` and `ENROLLMENT_FAILED` events from the event router.
 
 ```plantuml
 @startuml
@@ -531,9 +614,87 @@ mcu --> bat : ADC GPIO 0\n(voltage divider)
 ## 8.4 Observability
 
 - **ESP_LOG** at configurable levels (DEBUG=4, INFO=3, WARN=2)
-- **Audit events** via `sdf_app_set_audit_callback()`: biometric match/fail/lockout, nonce replay, protocol error, pairing complete/failed
+- **Audit events** via `sdf_app_set_audit_callback()`: biometric match/fail/lockout, nonce replay, protocol error, pairing complete/failed, OTA triggered/started/verifying/committed/rolled back/failed, OTA signature invalid/missing, OTA version upgrade/downgrade
 - **Zigbee alarm mask** bits: `0x0001` (ACTION_FAILURE), `0x0002` (LOW_BATTERY), `0x0004` (BIOMETRIC_LOCKOUT), `0x0008` (SECURITY_PROTOCOL)
 - **Diagnostic counters** in `sdf_app`: `s_app_audit_err_biometric_failed`, `s_app_audit_err_auth_lockout`, `s_app_audit_err_nonce_replay`, `s_app_audit_err_protocol`
+- **Event Router**: Central event bus for all cross-component communication with priority-based dispatch and built-in audit logging
+
+---
+
+# 9. Architecture Decisions
+
+The `sdf_event_router` component provides a central event bus that decouples components through typed events with priority-based dispatch.
+
+### Features
+- **Event types**: Biometric match/fail, Zigbee commands, BLE lock actions, Power sleep/wake, Security lockout, Admin actions, Enrollment steps
+- **Priority levels**: CRITICAL (security), HIGH (lock actions), NORMAL (enrollment), LOW (telemetry)
+- **Dispatch modes**: Synchronous (CRITICAL), Asynchronous via FreeRTOS queue (other priorities)
+- **Subscription**: Component-level with event type and minimum priority filters
+- **Audit logging**: All events automatically logged when `CONFIG_SDF_EVENT_ROUTER_ENABLE_AUDIT` is enabled
+
+### Migration from Callbacks
+Previously, `sdf_app` registered direct callbacks with `sdf_services` (`unlock_cb`, `enrollment_cb`, `security_event_cb`). The event router replaces this with:
+1. `sdf_services` emits typed events via `sdf_event_router_emit()`
+2. `sdf_app` subscribes to relevant events at init
+3. Zigbee, BLE, and Power components emit their own events
+4. All cross-component communication routes through the event bus
+
+### Event Structure
+```c
+typedef struct {
+    sdf_event_router_type_t type;      // Event category
+    sdf_event_router_priority_t priority;  // Processing priority
+    uint32_t timestamp_ms;             // Event timestamp
+    union {
+        sdf_event_router_biometric_payload_t biometric;
+        sdf_event_router_zigbee_payload_t zigbee;
+        sdf_event_router_ble_payload_t ble;
+        sdf_event_router_power_payload_t power;
+        sdf_event_router_security_payload_t security;
+        sdf_event_router_admin_payload_t admin;
+        sdf_event_router_enrollment_payload_t enrollment;
+    } payload;
+} sdf_event_router_event_t;
+```
+
+---
+
+## 8.2 OTA Update Mechanism
+
+The OTA update mechanism is implemented in the `sdf_ota` component and provides:
+
+### Trigger Paths
+- **Zigbee OTA** (existing, enhanced): Coordinator pushes image via Zigbee OTA cluster; device delegates to `sdf_ota` for version check, signature verification, and commit
+- **CLI**: `ota trigger zigbee://` initiates immediate Zigbee OTA query; future paths for HTTP/BLE planned
+- **BLE Peripheral** (architecture only): Future GATT service for smartphone-initiated updates
+
+### Version Management
+- Semantic version from git tags: `v<major>.<minor>.<patch>[-<commit-count>-g<short-hash>]`
+- Embedded at build time via CMake (`git describe --tags --always --dirty`)
+- Accessible at runtime via `sdf_ota_get_version()` and `esp_app_get_description()->version`
+- Comparison: major.minor.patch numerically; pre-release suffixes compare lower than release
+
+### Signature Verification
+- Ed25519 (mandatory, enforced by `CONFIG_SDF_OTA_SIGNATURE_VERIFY=y`)
+- Public key (32 bytes) embedded in firmware `.rodata`
+- Private key held offline; images signed with `tools/sdf_sign_ota.py` (appends 64-byte signature + 4-byte magic `SDF\x01`)
+- Verification happens in app before `esp_ota_end()`; bootloader does NOT verify
+
+### Rollback
+- **Automatic**: Bootloader rollback enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`); on boot failure (WDT, crash loop) reverts to previous partition
+- **Manual**: CLI `ota rollback` → `esp_ota_mark_app_invalid_rollback_and_reboot()`
+
+### Zigbee Integration
+- Query interval configurable via `CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS` (default 24h)
+- Progress reporting to coordinator via `esp_zb_ota_upgrade_client_progress_report()` during download
+- Manufacturer code: 0x1011, Image type: 0x1111
+
+### Audit Events
+All OTA lifecycle events emitted via `sdf_app` audit callback:
+`OTA_TRIGGERED`, `OTA_STARTED`, `OTA_VERIFYING`, `OTA_COMMITTED`, `OTA_ROLLED_BACK`, `OTA_FAILED`, `OTA_SIGNATURE_INVALID`, `OTA_SIGNATURE_MISSING`, `OTA_VERSION_DOWNGRADE`, `OTA_VERSION_UPGRADE`
+
+### Partition Table
+Dual OTA slots (ota_0, ota_1) + otadata for swap state; nvs_keys for encrypted NVS.
 
 ---
 
@@ -549,6 +710,7 @@ mcu --> bat : ADC GPIO 0\n(voltage divider)
 | ADR-6 | **All-zero BLE target address for discovery** | `SDF_NUKI_TARGET_ADDR` defaults to `{0x00,...}` which triggers advertisement-based Nuki discovery during pairing; allows pairing without pre-configuring the lock address |
 | ADR-7 | **Custom partition table with NVS keys** | Required for encrypted NVS; `nvs_keys` partition stores HMAC key for encryption |
 | ADR-8 | **State machine pattern for enrollment** | Decouples enrollment logic from hardware timing; `apply_step_result()` allows synchronous advancement from async UART responses |
+| ADR-9 | **Central event router for cross-component communication** | Replaces direct callback chains with typed event bus; supports priority ordering (CRITICAL/HIGH/NORMAL/LOW), audit logging, and decoupled async dispatch; enables observability and testability |
 
 ---
 
@@ -605,7 +767,7 @@ mcu --> bat : ADC GPIO 0\n(voltage divider)
 | **Placeholder BLE address** | High | `SDF_NUKI_TARGET_ADDR` must be set to real lock address before pairing |
 | **Fingerprint LED command tuning** | Medium | `Control LED (0x3C)` payload bytes are module-variant specific; defaults may need hardware calibration |
 | **Factory reset incomplete** | Resolved | Complete factory reset implemented (NVS erase, template deletion, Zigbee reset, services state clear, CLI `factory_reset YES`) |
-| **No OTA update mechanism** | Medium | Partition table supports dual OTA slots, but OTA logic not implemented |
+| **No OTA update mechanism** | Resolved | Implemented in `sdf_ota` component: Zigbee/CLI triggers, Ed25519 verification, version check, rollback |
 | **Zigbee check-in latency trade-off** | Low | 15s default balances battery life vs. remote command responsiveness |
 | **`sdf_platform` and `sdf_config` components implemented** | Low | Components now exist providing HAL wrappers and centralized configuration management |
 

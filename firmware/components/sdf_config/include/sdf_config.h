@@ -131,6 +131,54 @@ esp_err_t sdf_config_validate(const sdf_config_t *config);
  */
 void sdf_config_dump(const sdf_config_t *config, const char *tag);
 
+/**
+ * @brief Set check-in interval (updates Zigbee if running).
+ *
+ * @param interval_ms New interval in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_checkin_interval(uint32_t interval_ms);
+
+/**
+ * @brief Set match poll interval.
+ *
+ * @param interval_ms New interval in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_match_poll_interval(uint32_t interval_ms);
+
+/**
+ * @brief Set Zigbee enabled state.
+ *
+ * @param enabled New enabled state.
+ * @return ESP_OK on success.
+ */
+esp_err_t sdf_config_set_zigbee_enabled(bool enabled);
+
+/**
+ * @brief Set battery report interval.
+ *
+ * @param interval_ms New interval in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_battery_report_interval(uint32_t interval_ms);
+
+/**
+ * @brief Set idle before sleep.
+ *
+ * @param interval_ms New interval in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_idle_before_sleep(uint32_t interval_ms);
+
+/**
+ * @brief Set post-wake guard.
+ *
+ * @param interval_ms New interval in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_post_wake_guard(uint32_t interval_ms);
+
 #ifdef __cplusplus
 }
 #endif

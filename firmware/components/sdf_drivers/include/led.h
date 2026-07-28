@@ -17,6 +17,8 @@ void led_flash_green(void);
 void led_solid_green(void);
 void led_enrollment_step_green(void);
 void led_enrollment_success_green(void);
+void led_enrollment_step_retry(void);
+void led_enrollment_failed(void);
 void led_pulse_yellow(void);
 void led_rapid_yellow(void);
 void led_pulse_purple(void);

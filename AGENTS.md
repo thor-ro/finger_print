@@ -40,14 +40,15 @@ Each component exposes public API in `include/` and internals in `src/`:
 - `sdf_app` — Application flows (biometric unlock, zigbee bridge, enrollment)
 - `sdf_drivers` — Hardware drivers (fingerprint UART, LED, battery, GPIO)
 - `sdf_protocol_ble` — BLE/Nuki protocol adaptor
-- `sdf_protocol_zigbee` — Zigbee Door Lock cluster adaptor
-- `sdf_services` — Core services (event router, power, security, config)
+- `sdf_protocol_zigbee` — Zigbee Door Lock cluster adaptor (owns `sdf_zigbee_task`)
+- `sdf_services` — Core services (owns `sdf_match_task`, `sdf_enroll_task`, `sdf_admin_task`, `sdf_button_task`)
 - `sdf_state_machines` — Enrollment and device state machines
-- `sdf_power` — FreeRTOS task definitions and scheduling
+- `sdf_power` — Power manager & sleep (owns `sdf_power_task`)
 - `sdf_platform` — ESP32-C6 HAL wrappers
 - `sdf_storage` — NVS storage and persistence
 - `sdf_config` — Static configuration and defaults
 - `sdf_common` — Shared types and utilities
+- `sdf_ota` — OTA update mechanism (version, signature, rollback) (owns `sdf_ota_task`, future)
 
 ## Critical Setup Steps
 1. **Set real lock BLE address** in `firmware/components/sdf_app/src/sdf_app.c` (`SDF_NUKI_TARGET_ADDR_TYPE` and `SDF_NUKI_TARGET_ADDR`). Current values are placeholders.
@@ -59,6 +60,18 @@ Configured in `firmware/sdkconfig.defaults`:
 - Nonce replay window: 8 entries
 - Biometric fail threshold: 5 attempts in 60s → 120s lockout
 - Encrypted NVS required at boot
+- OTA signature verification: Ed25519 (mandatory)
+- OTA downgrade: allowed with warning
+- Bootloader rollback: enabled (WDT 90s)
+
+## OTA Commands (CLI)
+```bash
+ota version          # Print firmware version + build info
+ota status           # Show OTA state, partitions, versions
+ota trigger zigbee://  # Trigger Zigbee OTA query
+ota rollback         # Manual rollback to previous firmware (requires confirmation)
+ota verify           # Verify pending OTA partition (version + signature)
+```
 
 ## Documentation Sync Rule
 

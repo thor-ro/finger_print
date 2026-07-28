@@ -20,7 +20,11 @@ typedef struct {
   SemaphoreHandle_t lock;
   SemaphoreHandle_t wake_sem;
   SemaphoreHandle_t admin_action_done_sem;
-  TaskHandle_t task;
+  TaskHandle_t task;              /* Legacy task handle for backward compat */
+  TaskHandle_t match_task;
+  TaskHandle_t enroll_task;
+  TaskHandle_t admin_task;
+  TaskHandle_t button_task;
   bool initialized;
   sdf_services_config_t config;
   sdf_enrollment_sm_t enrollment;
@@ -48,5 +52,23 @@ const char *sdf_services_fingerprint_result_name(
     sdf_fingerprint_op_result_t result);
 void sdf_services_run_enrollment_step(void);
 void sdf_services_start_pending_enrollment_if_any(void);
+
+/* Shared internal functions (moved from static) */
+esp_err_t sdf_services_fingerprint_result_to_err(sdf_fingerprint_op_result_t result);
+bool sdf_services_try_claim_admin_action(const sdf_fingerprint_match_t *match);
+void sdf_services_complete_permission_change(esp_err_t result);
+void sdf_services_execute_admin_action(sdf_services_admin_action_t action,
+                                       sdf_services_admin_action_cb action_cb,
+                                       void *action_ctx);
+
+/* New task declarations */
+void sdf_match_task(void *arg);
+void sdf_enroll_task(void *arg);
+void sdf_admin_task(void *arg);
+void sdf_button_task(void *arg);
+
+/* Task start/stop */
+esp_err_t sdf_services_start_tasks(void);
+esp_err_t sdf_services_stop_tasks(void);
 
 #endif /* SDF_SERVICES_INTERNAL_H */

@@ -235,7 +235,7 @@ void test_enrollment_sm_failure_at_step3(void) {
 void test_enrollment_sm_apply_on_idle(void) {
   sdf_enrollment_sm_t sm;
   sdf_enrollment_sm_init(&sm);
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_IDLE, sm.state);
 }
 
@@ -243,13 +243,13 @@ void test_enrollment_sm_apply_after_success(void) {
   sdf_enrollment_sm_t sm;
   sdf_enrollment_sm_init(&sm);
   sdf_enrollment_sm_start(&sm, 1, 1);
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_SUCCESS, sm.state);
 
   /* Applying again should be a no-op */
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_TIMEOUT);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_TIMEOUT);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_SUCCESS, sm.state);
 }
 
@@ -282,43 +282,216 @@ void test_enrollment_sm_finger_occupied(void) {
   sdf_enrollment_sm_init(&sm);
   sdf_enrollment_sm_start(&sm, 1, 1);
 
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FINGER_OCCUPIED);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FINGER_OCCUPIED);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_RESULT_FINGER_OCCUPIED, sm.result);
 }
 
-void test_enrollment_sm_ignore_failed(void) {
+/* ---------- ACK_FAIL retry logic ---------- */
+
+void test_enrollment_sm_retry_on_ack_fail_step1(void) {
   sdf_enrollment_sm_t sm;
   sdf_enrollment_sm_init(&sm);
   sdf_enrollment_sm_start(&sm, 1, 1);
 
-  // ACK_FAIL on step 1 should be silently retried (finger not lifted)
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
+  // ACK_FAIL on step 1 should trigger retry
+  sdf_enroll_next_t next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_RETRY_STEP, next.action);
+  TEST_ASSERT_EQUAL(SDF_FINGERPRINT_ENROLL_STEP_1, next.cmd);
+  TEST_ASSERT_EQUAL(1, next.user_id);
+  TEST_ASSERT_EQUAL(1, next.permission);
+  TEST_ASSERT_EQUAL(1, next.retry_count);
   TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_1, sm.state);
+}
 
-  // Advance to step 2 and verify retry still works there
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+void test_enrollment_sm_retry_on_ack_fail_step2(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 1, 1);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK); // Step 1 OK
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_2, sm.state);
-  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
+
+  // ACK_FAIL on step 2 should trigger retry
+  sdf_enroll_next_t next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_RETRY_STEP, next.action);
+  TEST_ASSERT_EQUAL(SDF_FINGERPRINT_ENROLL_STEP_2, next.cmd);
+  TEST_ASSERT_EQUAL(1, next.retry_count);
   TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_2, sm.state);
 }
 
-void test_enrollment_sm_failed_on_step3_is_error(void) {
+void test_enrollment_sm_max_retries_exceeded_step1(void) {
   sdf_enrollment_sm_t sm;
   sdf_enrollment_sm_init(&sm);
   sdf_enrollment_sm_start(&sm, 1, 1);
 
-  // Complete scans 1 and 2
+  // Default max_retries_step1 = 3
+  // Retry 1
+  sdf_enroll_next_t next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_RETRY_STEP, next.action);
+  TEST_ASSERT_EQUAL(1, next.retry_count);
+
+  // Retry 2
+  next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_RETRY_STEP, next.action);
+  TEST_ASSERT_EQUAL(2, next.retry_count);
+
+  // Retry 3
+  next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_RETRY_STEP, next.action);
+  TEST_ASSERT_EQUAL(3, next.retry_count);
+
+  // 4th failure should exceed max retries and fail
+  next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_FAIL, next.action);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);
+  TEST_ASSERT_FALSE(sdf_enrollment_sm_is_active(&sm));
+}
+
+void test_enrollment_sm_ack_fail_step3_fails_immediately(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 1, 1);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK); // Step 1
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK); // Step 2
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_3, sm.state);
+
+  // ACK_FAIL on step 3 should fail immediately (no retry)
+  sdf_enroll_next_t next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_FAIL, next.action);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);
+  TEST_ASSERT_FALSE(sdf_enrollment_sm_is_active(&sm));
+}
+
+/* ---------- Enhanced API action tests ---------- */
+
+void test_enrollment_sm_enhanced_api_success_sequence(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 5, 2);
+
+  // Step 1 OK -> should return EXECUTE_STEP for step 2
+  sdf_enroll_next_t next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_EXECUTE_STEP, next.action);
+  TEST_ASSERT_EQUAL(SDF_FINGERPRINT_ENROLL_STEP_2, next.cmd);
+  TEST_ASSERT_EQUAL(5, next.user_id);
+  TEST_ASSERT_EQUAL(2, next.permission);
+
+  // Step 2 OK -> should return EXECUTE_STEP for step 3
+  next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_EXECUTE_STEP, next.action);
+  TEST_ASSERT_EQUAL(SDF_FINGERPRINT_ENROLL_STEP_3, next.cmd);
+
+  // Step 3 OK -> should return COMPLETE
+  next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_COMPLETE, next.action);
+  TEST_ASSERT_EQUAL(5, next.user_id);
+  TEST_ASSERT_EQUAL(2, next.permission);
+}
+
+void test_enrollment_sm_enhanced_api_failure_at_step2(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 10, 1);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK); // Step 1 OK
+
+  // Failure at step 2
+  sdf_enroll_next_t next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FULL);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_FAIL, next.action);
+  TEST_ASSERT_EQUAL(10, next.user_id);
+  TEST_ASSERT_EQUAL(1, next.permission);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_RESULT_FULL, sm.result);
+}
+
+/* ---------- Custom retry policy ---------- */
+
+void test_enrollment_sm_custom_retry_policy(void) {
+  sdf_enrollment_retry_policy_t policy = {
+      .max_retries_step1 = 1,
+      .max_retries_step2 = 2,
+      .max_retries_step3 = 0,
+  };
+
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init_with_policy(&sm, &policy);
+  sdf_enrollment_sm_start(&sm, 1, 1);
+
+  // Only 1 retry allowed on step 1
+  sdf_enroll_next_t next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_RETRY_STEP, next.action);
+  TEST_ASSERT_EQUAL(1, next.retry_count);
+
+  // 2nd failure should fail
+  next = sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_EQUAL(SDF_ENROLL_ACT_FAIL, next.action);
+}
+
+void test_enrollment_sm_default_retry_policy(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm); // Default policy
+  TEST_ASSERT_EQUAL(3, sm.retry_policy.max_retries_step1);
+  TEST_ASSERT_EQUAL(3, sm.retry_policy.max_retries_step2);
+  TEST_ASSERT_EQUAL(0, sm.retry_policy.max_retries_step3);
+}
+
+/* ---------- New API getters ---------- */
+
+void test_enrollment_sm_get_state(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_IDLE, sdf_enrollment_sm_get_state(&sm));
+
+  sdf_enrollment_sm_start(&sm, 1, 1);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_1, sdf_enrollment_sm_get_state(&sm));
+}
+
+void test_enrollment_sm_get_completed_steps(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  TEST_ASSERT_EQUAL_UINT8(0, sdf_enrollment_sm_get_completed_steps(&sm));
+
+  sdf_enrollment_sm_start(&sm, 1, 1);
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL_UINT8(1, sdf_enrollment_sm_get_completed_steps(&sm));
+
+  sdf_enrollment_sm_apply_step_result_ex(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL_UINT8(2, sdf_enrollment_sm_get_completed_steps(&sm));
+}
+
+/* ---------- Legacy API compatibility ---------- */
+
+void test_enrollment_sm_legacy_api_still_works(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 1, 1);
+
+  // Using legacy API
   sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_2, sm.state);
+
   sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_3, sm.state);
 
-  // ACK_FAIL on step 3 (store/combine command) must fail enrollment,
-  // not retry, because the templates are incompatible.
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_SUCCESS, sm.state);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_RESULT_SUCCESS, sm.result);
+}
+
+void test_enrollment_sm_legacy_api_retry_behavior(void) {
+  sdf_enrollment_sm_t sm;
+  sdf_enrollment_sm_init(&sm);
+  sdf_enrollment_sm_start(&sm, 1, 1);
+
+  // Legacy API should still silently retry on ACK_FAIL
   sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
-  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);
-  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_RESULT_FAILED, sm.result);
-  TEST_ASSERT_FALSE(sdf_enrollment_sm_is_active(&sm));
+  TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_1, sm.state);
+
+  // Advance and test step 2 retry
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_OK);
+  sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_FAILED);
+  TEST_ASSERT_TRUE(sdf_enrollment_sm_is_active(&sm));
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_2, sm.state);
 }

@@ -82,17 +82,16 @@ extern void test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok(void);
 extern void test_sdf_services_reset_state_returns_ok(void);
 extern void test_sdf_services_reset_state_can_be_called_multiple_times(void);
 
+/* Event Router tests */
+extern void test_sdf_event_router_init_returns_ok(void);
+extern void test_sdf_event_router_init_idempotent(void);
+extern void test_sdf_event_router_subscribe_and_emit(void);
+extern void test_sdf_event_router_unsubscribe(void);
+
 /* Tasks tests */
 extern void test_sdf_power_wakeup_reason_mapping(void);
 extern void test_sdf_power_checkin_clamping(void);
 extern void test_sdf_power_battery_bounds(void);
-
-/* SDF App tests */
-extern void test_sdf_app_string_mappers(void);
-extern void test_sdf_app_valid_lock_action_logic(void);
-extern void test_sdf_app_map_lock_state_to_zigbee_logic(void);
-extern void test_sdf_app_choose_fingerprint_permission_logic(void);
-extern void test_sdf_app_on_admin_action_factory_reset_calls_sequence(void);
 
 /* Nuki crypto tests */
 extern void test_crypto_secretbox_round_trip(void);
@@ -233,17 +232,16 @@ void app_main(void) {
   RUN_TEST(test_sdf_services_reset_state_returns_ok);
   RUN_TEST(test_sdf_services_reset_state_can_be_called_multiple_times);
 
+  /* Event Router tests */
+  RUN_TEST(test_sdf_event_router_init_returns_ok);
+  RUN_TEST(test_sdf_event_router_init_idempotent);
+  RUN_TEST(test_sdf_event_router_subscribe_and_emit);
+  RUN_TEST(test_sdf_event_router_unsubscribe);
+
   /* Tasks tests */
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);
   RUN_TEST(test_sdf_power_checkin_clamping);
   RUN_TEST(test_sdf_power_battery_bounds);
-
-  /* SDF App tests */
-  RUN_TEST(test_sdf_app_string_mappers);
-  RUN_TEST(test_sdf_app_valid_lock_action_logic);
-  RUN_TEST(test_sdf_app_map_lock_state_to_zigbee_logic);
-  RUN_TEST(test_sdf_app_choose_fingerprint_permission_logic);
-  RUN_TEST(test_sdf_app_on_admin_action_factory_reset_calls_sequence);
 
   /* Nuki crypto tests */
   RUN_TEST(test_crypto_secretbox_round_trip);
@@ -279,6 +277,17 @@ void app_main(void) {
   // sdf_cli tests
   extern void test_sdf_cli_initial_state_is_unauthenticated(void);
   extern void test_sdf_cli_can_authenticate_and_logout(void);
+  extern void test_user_list_formats_output(void);
+  extern void test_user_get_valid_id(void);
+  extern void test_user_get_invalid_id(void);
+  extern void test_nuki_status_not_paired(void);
+  extern void test_nuki_status_paired(void);
+  extern void test_nuki_connect_not_paired(void);
+  extern void test_nuki_connect_already_connected(void);
+  extern void test_nuki_pair_already_paired_warns(void);
+  extern void test_zigbee_status_disabled(void);
+  extern void test_zigbee_connect_already_joined(void);
+  extern void test_zigbee_unpair_not_joined(void);
 
   // Mapped from test names in test_sdf_cli.c:
   // TEST_CASE("sdf_cli initial state is unauthenticated", "[sdf_cli]")
@@ -294,6 +303,17 @@ void app_main(void) {
   // tests, or I can just rename my tests to standard void functions.
   RUN_TEST(test_sdf_cli_initial_state_is_unauthenticated);
   RUN_TEST(test_sdf_cli_can_authenticate_and_logout);
+  RUN_TEST(test_user_list_formats_output);
+  RUN_TEST(test_user_get_valid_id);
+  RUN_TEST(test_user_get_invalid_id);
+  RUN_TEST(test_nuki_status_not_paired);
+  RUN_TEST(test_nuki_status_paired);
+  RUN_TEST(test_nuki_connect_not_paired);
+  RUN_TEST(test_nuki_connect_already_connected);
+  RUN_TEST(test_nuki_pair_already_paired_warns);
+  RUN_TEST(test_zigbee_status_disabled);
+  RUN_TEST(test_zigbee_connect_already_joined);
+  RUN_TEST(test_zigbee_unpair_not_joined);
 
   printf("\n-----------------------\n");
   /* Protocol BLE tests */

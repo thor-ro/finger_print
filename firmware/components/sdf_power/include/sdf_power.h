@@ -51,7 +51,6 @@ typedef struct {
 
 void sdf_power_init(void);
 
-void sdf_power_get_default_power_config(sdf_power_manager_config_t *config);
 esp_err_t
 sdf_power_init_power_manager(const sdf_power_manager_config_t *config);
 

@@ -39,6 +39,8 @@ typedef enum {
   LED_CMD_FLASH_ORANGE,
   LED_CMD_ADMIN_AUTH_GREEN,
   LED_CMD_ADMIN_AUTH_RED,
+  LED_CMD_ENROLLMENT_STEP_RETRY,
+  LED_CMD_ENROLLMENT_FAILED,
 } led_cmd_t;
 
 typedef struct {
@@ -175,6 +177,12 @@ static void led_execute_cmd(led_cmd_t cmd) {
   case LED_CMD_ADMIN_AUTH_RED:
     led_hold_color(255, 0, 0, 800);
     break;
+  case LED_CMD_ENROLLMENT_STEP_RETRY:
+    led_play_pattern(255, 165, 0, 200, 200, 3);  // Orange blink for retry
+    break;
+  case LED_CMD_ENROLLMENT_FAILED:
+    led_play_pattern(255, 0, 0, 300, 300, 5);  // Red flash for failure
+    break;
   }
 }
 
@@ -303,6 +311,14 @@ void led_enrollment_success_green(void) {
   led_post_cmd(LED_CMD_ENROLLMENT_SUCCESS_GREEN);
 }
 
+void led_enrollment_step_retry(void) {
+  led_post_cmd(LED_CMD_ENROLLMENT_STEP_RETRY);
+}
+
+void led_enrollment_failed(void) {
+  led_post_cmd(LED_CMD_ENROLLMENT_FAILED);
+}
+
 void led_pulse_yellow(void) { led_post_cmd(LED_CMD_PULSE_YELLOW); }
 
 void led_rapid_yellow(void) { led_post_cmd(LED_CMD_RAPID_YELLOW); }
@@ -337,6 +353,8 @@ void led_flash_green(void) {}
 void led_solid_green(void) {}
 void led_enrollment_step_green(void) {}
 void led_enrollment_success_green(void) {}
+void led_enrollment_step_retry(void) {}
+void led_enrollment_failed(void) {}
 void led_pulse_yellow(void) {}
 void led_rapid_yellow(void) {}
 void led_pulse_purple(void) {}

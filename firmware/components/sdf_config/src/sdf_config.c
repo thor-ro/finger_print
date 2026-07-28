@@ -1,4 +1,5 @@
 #include "sdf_config.h"
+#include "sdf_protocol_zigbee.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -245,4 +246,77 @@ void sdf_config_dump(const sdf_config_t *config, const char *tag) {
     ESP_LOGI(tag, "Button: enrollment=%d", config->enrollment_btn_gpio);
     ESP_LOGI(tag, "WDT: timeout=%ums", config->wdt_timeout_ms);
     ESP_LOGI(tag, "==========================");
+}
+
+esp_err_t sdf_config_set_checkin_interval(uint32_t interval_ms) {
+    if (interval_ms < 1000 || interval_ms > 600000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->checkin_interval_ms = interval_ms;
+    /* Propagate to Zigbee if running */
+    if (sdf_protocol_zigbee_is_enabled() && sdf_protocol_zigbee_is_ready()) {
+        sdf_protocol_zigbee_set_checkin_interval_ms(interval_ms);
+    }
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_match_poll_interval(uint32_t interval_ms) {
+    if (interval_ms < 100 || interval_ms > 10000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->match_poll_interval_ms = interval_ms;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_zigbee_enabled(bool enabled) {
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->zigbee_enabled = enabled;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_battery_report_interval(uint32_t interval_ms) {
+    if (interval_ms < 1000 || interval_ms > 86400000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->battery_report_interval_ms = interval_ms;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_idle_before_sleep(uint32_t interval_ms) {
+    if (interval_ms < 500 || interval_ms > 600000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->idle_before_sleep_ms = interval_ms;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_post_wake_guard(uint32_t interval_ms) {
+    if (interval_ms < 100 || interval_ms > 60000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->post_wake_guard_ms = interval_ms;
+    return ESP_OK;
 }

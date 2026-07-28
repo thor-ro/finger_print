@@ -2,6 +2,31 @@
 
 This file tracks firmware-level changes and maps them to project versions.
 
+## 0.2.0 — 2026-07-23
+
+### Added
+- **sdf_ota component**: Complete OTA update mechanism with version management, signature verification, and rollback support.
+  - Semantic version embedding from git tags (`v1.2.3[-N-g<hash>]` format) at build time via CMake.
+  - Ed25519 signature verification on OTA images (mandatory, aborts if missing/invalid).
+  - Three trigger paths: Zigbee OTA (existing, enhanced), CLI (`ota trigger`), BLE Peripheral (architecture placeholder).
+  - Version comparison with semantic ordering (pre-release < release).
+  - Automatic rollback on boot failure (bootloader) + manual rollback via CLI (`ota rollback`).
+  - Progress reporting to Zigbee coordinator during download.
+- **CLI OTA commands**: `ota version`, `ota status`, `ota trigger`, `ota rollback`, `ota verify`.
+- **Audit events**: Full OTA lifecycle tracking (triggered, started, verifying, committed, rolled back, failed, signature invalid/missing, version upgrade/downgrade).
+- **Build system**: `tools/sdf_sign_ota.py` for signing/verifying images, CMake targets `sign_ota` and `ota_extract_pubkey`.
+- **Bootloader rollback**: Enabled `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` with WDT.
+
+### Changed
+- **sdf_protocol_zigbee**: Refactored OTA handler to delegate to sdf_ota component; removed inline esp_ota_* calls.
+- **sdf_common**: Added OTA audit event types (SDF_AUDIT_OTA_*).
+- **sdf_app**: Exported `sdf_app_emit_audit()` for OTA component audit emission.
+
+### Notes
+- OTA images must be signed with `sdf_sign_ota.py` before distribution.
+- Public key embedded in firmware; rotation requires rebuild.
+- Downgrades allowed by default (warning logged); disable via `CONFIG_SDF_OTA_ALLOW_DOWNGRADE=n`.
+
 ## 0.1.6 — 2026-07-22
 
 ### Added

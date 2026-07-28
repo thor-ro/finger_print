@@ -189,3 +189,82 @@ A factory reset can be triggered via two methods:
 - **Admin Action Authorization:** 10 seconds to provide Admin fingerprint after button press.
 - **Fingerprint Match Cooldown:** 3 seconds between match attempts.
 - **Fingerprint Sensor UART Timeout:** 12 seconds for sensor response.
+
+## USB-C CLI Commands
+
+The device provides a USB-C serial console (USB-Serial-JTAG) for local device management, diagnostics, and provisioning without a Zigbee coordinator.
+
+### Accessing the CLI
+1. Connect the device to a computer via USB-C.
+2. Open a serial terminal (e.g., `screen`, `minicom`, `putty`) at **115200 baud**, 8N1.
+3. You will see the `SDF>` prompt.
+
+### Authentication
+Most commands require an authenticated session:
+```
+login <password>
+```
+The default password is configured at build time (see `CONFIG_SDF_CLI_PASSWORD`). After successful login, the session remains active for a configurable idle timeout (default 300 seconds). Use `logout` to end the session early.
+
+### User Management
+Requires: `login` (CLI authentication)
+
+| Command | Description | Auth |
+|---------|-------------|------|
+| `user list` | List all enrolled users (ID, Permission name) | CLI login |
+| `user get <id>` | Show details for a specific user | CLI login |
+| `user add <id> <perm>` | Enroll new user locally (3 scans, requires Admin FP) | CLI login + Admin FP |
+| `user del <id>` | Delete user (requires Admin FP) | CLI login + Admin FP |
+| `user permission <id> <perm>` | Change user permission level (requires Admin FP) | CLI login + Admin FP |
+
+**Permission levels:** 1 = Standard, 2 = Elevated, 3 = Admin
+
+**Example:**
+```
+SDF> login mypassword
+Authenticated
+SDF> user add 42 1
+Scan an admin fingerprint to authorize enrollment of user 42 with permission 1...
+Place finger on sensor (scan 1 of 3)...
+Scan 1 OK.
+Remove finger and place again for next scan.
+...
+User 42 enrolled successfully with permission 1 (Standard).
+```
+
+### Nuki Management
+Requires: `login` (CLI authentication)
+
+| Command | Description | Auth |
+|---------|-------------|------|
+| `nuki status` | Show pairing status, auth ID, BLE transport state | CLI login |
+| `nuki connect` | Initiate BLE connection to paired Nuki lock | CLI login |
+| `nuki pair` | Pair with Nuki lock (requires Nuki in pairing mode, Admin FP) | CLI login + Admin FP |
+| `nuki unpair` | Unpair from Nuki lock, clear credentials (requires Admin FP) | CLI login + Admin FP |
+
+**Pairing flow:**
+1. Put Nuki lock into pairing mode (hold button 5s until LED solid).
+2. Run `nuki pair` and authorize with Admin fingerprint.
+3. On success, authorization ID is displayed and stored.
+
+### Zigbee Management
+Requires: `login` (CLI authentication)
+
+| Command | Description | Auth |
+|---------|-------------|------|
+| `zigbee status` | Show network status (enabled, joined, PAN ID, channel, address) | CLI login |
+| `zigbee connect` | Start network steering / permit join (requires Admin FP) | CLI login + Admin FP |
+| `zigbee unpair` | Leave network and clear NVRAM (requires Admin FP) | CLI login + Admin FP |
+
+> [!NOTE]
+> If Zigbee is disabled in the build config (`CONFIG_ZB_ENABLED=n`), status will show "Disabled in build config" and connect/unpair will return an error.
+
+### Factory Reset
+Requires: `login` (CLI authentication)
+
+| Command | Description | Auth |
+|---------|-------------|------|
+| `factory_reset YES` | Complete factory reset (erases NVS, users, Zigbee, reboots) | CLI login |
+
+> [!CAUTION]
+> Factory reset is destructive and non-reversible. All enrolled fingerprints and paired credentials will be permanently erased.

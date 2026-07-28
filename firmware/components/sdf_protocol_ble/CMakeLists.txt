@@ -1,4 +1,4 @@
-set(ble_reqs sdf_common)
+set(ble_reqs sdf_common sdf_event_router)
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND ble_reqs bt)
 endif()
