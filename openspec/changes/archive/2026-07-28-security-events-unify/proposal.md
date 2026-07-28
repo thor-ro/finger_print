@@ -1,62 +1,28 @@
-# Proposal: Unify Dual-Path Security Event Emission
+## Why
 
-## Summary
+Security events (biometric match, match failure, lockout enter/clear) currently have two emission paths: the event router (`sdf_event_router_emit()`) and legacy callbacks in `sdf_app.c` (`sdf_app_emit_event()`, `sdf_app_emit_audit()`). This dual-path design risks duplicate audit entries and inconsistent event delivery, making it hard to reason about security audit trails. Unifying all security events through the event router eliminates the legacy callback path and ensures exactly-one audit per event.
 
-Consolidate the two separate security event emission paths into a single unified path through the event router. Currently, security events (match success/fail, lockout entered/cleared) are emitted through both the legacy callback mechanism (`sdf_services_notify_security_event()`) and the event router (`sdf_match_task_notify_security_event()`), creating duplicated audit logging and potential inconsistency.
+## What Changes
 
-## Problem
+- Remove the legacy event and audit callback mechanism from `sdf_app.c` (`sdf_app_set_event_callback`, `sdf_app_set_audit_callback`)
+- Route all `sdf_app_emit_audit()` calls through the event router via a dedicated audit event type instead of direct callback invocation
+- Ensure `sdf_services_emit_security_event()` is the single source of truth for security event emission
+- Remove any remaining direct `sdf_app_emit_event()` / `sdf_app_emit_audit()` calls from the security event path in `sdf_app_on_event()` and replace with event-router-first flow
+- Update `sdf_app_on_event()` to rely exclusively on event-router-delivered security events
 
-Security events are emitted through two independent code paths:
+## Capabilities
 
-1. **Legacy path**: `sdf_services.c:sdf_services_notify_security_event()` — calls registered callback AND emits event router event
-2. **Task path**: `sdf_services_match.c:sdf_match_task_notify_security_event()` — emits event router event directly
+### New Capabilities
+- `security-event-unification`: Remove legacy callback paths and unify all security event emission through `sdf_event_router_emit()`
 
-This causes:
-- **Duplicate audit entries**: The same security event is logged twice (once via callback in `sdf_app`, once via event router audit logging)
-- **Inconsistency risk**: If the callback is not set or fails, the event router path still fires, but with different context
-- **Maintenance burden**: Every security event change requires updating both paths
-- **Testing complexity**: Must verify both paths emit correctly
+### Modified Capabilities
+- `security-event-emission`: Tighten the requirement — the system SHALL NOT use legacy callbacks for any security event; all must flow through the event router
 
-## Solution
+## Impact
 
-Remove the legacy callback-based security event path (`sdf_services_notify_security_event()`) and route all security events exclusively through the event router. The `sdf_app` subscribes to security events via `sdf_event_router_subscribe()` and handles audit logging there.
-
-## Architecture Impact
-
-### Remove
-- `sdf_services_notify_security_event()` and its helper `sdf_match_task_notify_security_event()`
-- `sdf_services_security_event_cb` callback type and `security_event_cb` / `security_event_ctx` config fields
-
-### Simplify
-- `sdf_services.c` no longer needs `sdf_audit_cb` for security events (already handled by event router)
-- `sdf_app.c` replaces `sdf_app_on_security_event()` callback with event router subscription
-
-### Add
-- Event router subscription for `SDF_EVENT_ROUTER_SECURITY_LOCKOUT` in `sdf_app` init
-- Event router subscription for `SDF_EVENT_ROUTER_BIOMETRIC_MATCH` (already exists)
-
-## API Design
-
-No new API changes. The existing event router already supports all event types needed:
-- `SDF_EVENT_ROUTER_BIOMETRIC_MATCH` (HIGH)
-- `SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED` (HIGH)
-- `SDF_EVENT_ROUTER_SECURITY_LOCKOUT` (CRITICAL)
-
-## Benefits
-
-1. **Single source of truth**: One emission path per event type
-2. **No duplicate audit**: Audit logging happens once per event
-3. **Simpler code**: Remove ~80 lines of duplicated event emission logic
-4. **Testability**: Only one emission path to verify
-5. **Consistency**: All subscribers receive the same event regardless of source
-
-## Acceptance Criteria
-
-- [ ] sdf_services_notify_security_event() removed
-- [ ] sdf_match_task_notify_security_event() removed
-- [ ] sdf_app_on_security_event() replaced with event router subscription
-- [ ] All security events (match success/fail, lockout entered/cleared) emit exactly once
-- [ ] Audit counters still increment correctly
-- [ ] Zigbee alarm bits still set correctly on lockout
-- [ ] Low battery warning still triggers on match success (via event router)
-- [ ] Unit tests updated to cover single emission path
+- `firmware/components/sdf_app/src/sdf_app.c`: Remove `sdf_app_set_event_callback`, `sdf_app_set_audit_callback`, and `sdf_app_emit_event`/`sdf_app_emit_audit` from the security event path; update `sdf_app_on_event()` to depend solely on event router delivery
+- `firmware/components/sdf_event_router/`: May need a new audit event type in `sdf_event_router_type_t` for audit events routed through the router
+- `firmware/components/sdf_services/src/sdf_services.c`: `sdf_services_emit_security_event()` becomes the sole security event emitter
+- `firmware/components/sdf_common/`: Event type enum may need an `SDF_EVENT_ROUTER_AUDIT` entry
+- Documentation: `doc/sdf_sas.md` and `doc/user_manual.md` may need updates if event flow changes are visible
+- Tests: `firmware/components/sdf_event_router/test/` and `firmware/components/sdf_app/test/` need updates for legacy callback removal

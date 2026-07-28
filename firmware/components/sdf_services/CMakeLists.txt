@@ -1,4 +1,4 @@
-set(service_reqs sdf_common sdf_storage sdf_drivers sdf_state_machines esp_timer sdf_platform sdf_config sdf_event_router)
+set(service_reqs sdf_common sdf_storage sdf_drivers sdf_state_machines esp_timer sdf_platform sdf_config sdf_event_router sdf_app)
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND service_reqs button)
 endif()

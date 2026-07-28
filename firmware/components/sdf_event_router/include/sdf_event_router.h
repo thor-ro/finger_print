@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "esp_err.h"
+#include "sdf_common.h"
 
 typedef enum {
     SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
@@ -29,10 +30,13 @@ typedef enum {
     SDF_EVENT_ROUTER_ADMIN_AUTH_RESULT,
     SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
 
-    /* Button */
-    SDF_EVENT_ROUTER_BUTTON_PRESS,
-    SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,
-    SDF_EVENT_ROUTER_BUTTON_MULTI_PRESS
+  /* Button */
+  SDF_EVENT_ROUTER_BUTTON_PRESS,
+  SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,
+  SDF_EVENT_ROUTER_BUTTON_MULTI_PRESS,
+
+  /* Audit */
+  SDF_EVENT_ROUTER_AUDIT
 } sdf_event_router_type_t;
 
 typedef enum {
@@ -108,9 +112,16 @@ typedef struct {
 } sdf_event_router_admin_action_complete_payload_t;
 
 typedef struct {
-    uint8_t press_type;  // 1=single, 2=double, 3=triple, etc.
-    uint32_t press_duration_ms;
+  uint8_t press_type;  // 1=single, 2=double, 3=triple, etc.
+  uint32_t press_duration_ms;
 } sdf_event_router_button_payload_t;
+
+typedef struct {
+  sdf_audit_event_type_t type;
+  uint16_t user_id;
+  int32_t status;
+  uint16_t detail;
+} sdf_event_router_audit_payload_t;
 
 typedef struct {
     sdf_event_router_type_t type;
@@ -131,6 +142,7 @@ typedef struct {
         sdf_event_router_admin_auth_payload_t admin_auth;
         sdf_event_router_admin_action_complete_payload_t admin_action_complete;
         sdf_event_router_button_payload_t button;
+        sdf_event_router_audit_payload_t audit;
     } payload;
 } sdf_event_router_event_t;
 

@@ -50,27 +50,6 @@ typedef struct {
 } sdf_error_report_t;
 
 typedef enum {
-  SDF_EVENT_STATUS = 0,
-  SDF_EVENT_KEYTURNER_STATE = 1,
-  SDF_EVENT_ERROR = 2,
-  SDF_EVENT_LOCK_ACTION_PROGRESS = 3
-} sdf_event_type_t;
-
-typedef struct {
-  sdf_event_type_t type;
-  union {
-    uint8_t status;
-    sdf_keyturner_state_t keyturner_state;
-    sdf_error_report_t error_report;
-  } data;
-  bool lock_action_in_progress;
-  uint8_t lock_action;
-  uint8_t retry_count;
-} sdf_event_t;
-
-typedef void (*sdf_event_cb)(void *ctx, const sdf_event_t *event);
-
-typedef enum {
   SDF_AUDIT_STORAGE_POLICY_OK = 0,
   SDF_AUDIT_STORAGE_POLICY_FAILED = 1,
   SDF_AUDIT_BIOMETRIC_FAILED = 2,
@@ -92,16 +71,6 @@ typedef enum {
   SDF_AUDIT_OTA_VERSION_DOWNGRADE = 18,
   SDF_AUDIT_OTA_VERSION_UPGRADE = 19
 } sdf_audit_event_type_t;
-
-typedef struct {
-  uint64_t timestamp_ms;
-  sdf_audit_event_type_t type;
-  sdf_user_id_t user_id;
-  int32_t status;
-  uint16_t detail;
-} sdf_audit_event_t;
-
-typedef void (*sdf_audit_cb)(void *ctx, const sdf_audit_event_t *event);
 
 void sdf_common_init(void);
 

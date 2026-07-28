@@ -643,7 +643,7 @@ Power management is split into two components for separation of concerns:
 ## 8.4 Observability
 
 - **ESP_LOG** at configurable levels (DEBUG=4, INFO=3, WARN=2)
-- **Audit events** via `sdf_app_set_audit_callback()`: biometric match/fail/lockout, nonce replay, protocol error, pairing complete/failed, OTA triggered/started/verifying/committed/rolled back/failed, OTA signature invalid/missing, OTA version upgrade/downgrade
+- **Audit events** via `sdf_event_router_emit()` with `SDF_EVENT_ROUTER_AUDIT`: biometric match/fail/lockout, nonce replay, protocol error, pairing complete/failed, OTA triggered/started/verifying/committed/rolled back/failed, OTA signature invalid/missing, OTA version upgrade/downgrade
 - **Zigbee alarm mask** bits: `0x0001` (ACTION_FAILURE), `0x0002` (LOW_BATTERY), `0x0004` (BIOMETRIC_LOCKOUT), `0x0008` (SECURITY_PROTOCOL)
 - **Diagnostic counters** in `sdf_app`: `s_app_audit_err_biometric_failed`, `s_app_audit_err_auth_lockout`, `s_app_audit_err_nonce_replay`, `s_app_audit_err_protocol`
 - **Event Router**: Central event bus for all cross-component communication with priority-based dispatch and built-in audit logging

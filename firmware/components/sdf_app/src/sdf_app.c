@@ -48,17 +48,15 @@ static const char *TAG = "sdf_app";
 static sdf_nuki_ble_transport_t s_ble;
 static sdf_nuki_client_t s_client;
 static sdf_nuki_pairing_t s_pairing;
-static sdf_event_cb s_event_cb;
-static void *s_event_ctx;
-static sdf_audit_cb s_audit_cb;
-static void *s_audit_ctx;
-
+static bool s_has_creds;
+static bool s_pairing_active;
+static bool s_pairing_requested;
+static uint16_t s_zigbee_alarm_mask;
 // Diagnostic counters
 static uint32_t s_app_audit_err_biometric_failed = 0;
 static uint32_t s_app_audit_err_auth_lockout = 0;
 static uint32_t s_app_audit_err_nonce_replay = 0;
 static uint32_t s_app_audit_err_protocol = 0;
-static bool s_has_creds;
 static bool s_pairing_active;
 static bool s_pairing_requested;
 static uint16_t s_zigbee_alarm_mask;
@@ -71,6 +69,7 @@ static sdf_lock_flow_t s_lock_flow;
 
 void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
                                int32_t status, uint16_t detail);
+static const char *sdf_app_audit_event_name(sdf_audit_event_type_t type);
 static void sdf_app_start_requested_nuki_pairing(void);
 static void sdf_app_resume_ble_transport(const char *reason);
 static void sdf_app_release_ble_transport(const char *reason);
@@ -524,11 +523,28 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
     sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
     break;
   }
-  case SDF_EVENT_ROUTER_ENROLLMENT_FAILED: {
-    sdf_power_mark_activity();
-    ESP_LOGE(TAG, "Event: Enrollment FAILED step=%u",
-             (unsigned)event->payload.enrollment_failed.step);
-    sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+  case SDF_EVENT_ROUTER_AUDIT: {
+    ESP_LOGI(TAG, "AUDIT %s user=%u status=%ld detail=%u",
+             sdf_app_audit_event_name(event->payload.audit.type),
+             (unsigned)event->payload.audit.user_id,
+             event->payload.audit.status,
+             (unsigned)event->payload.audit.detail);
+    switch (event->payload.audit.type) {
+    case SDF_AUDIT_BIOMETRIC_FAILED:
+      s_app_audit_err_biometric_failed++;
+      break;
+    case SDF_AUDIT_BIOMETRIC_LOCKOUT:
+      s_app_audit_err_auth_lockout++;
+      break;
+    case SDF_AUDIT_NONCE_REPLAY_BLOCKED:
+      s_app_audit_err_nonce_replay++;
+      break;
+    case SDF_AUDIT_PROTOCOL_ERROR:
+      s_app_audit_err_protocol++;
+      break;
+    default:
+      break;
+    }
     break;
   }
   default:
@@ -745,12 +761,6 @@ static bool sdf_app_valid_lock_action(uint8_t lock_action) {
   }
 }
 
-static void sdf_app_emit_event(const sdf_event_t *event) {
-  if (s_event_cb != NULL && event != NULL) {
-    s_event_cb(s_event_ctx, event);
-  }
-}
-
 static const char *sdf_app_audit_event_name(sdf_audit_event_type_t type) {
   switch (type) {
   case SDF_AUDIT_STORAGE_POLICY_OK:
@@ -779,39 +789,17 @@ static const char *sdf_app_audit_event_name(sdf_audit_event_type_t type) {
 }
 
 void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
-                               int32_t status, uint16_t detail) {
-  sdf_audit_event_t event = {
-      .timestamp_ms = (uint64_t)(esp_timer_get_time() / 1000LL),
-      .type = type,
-      .user_id = user_id,
-      .status = status,
-      .detail = detail,
+                                int32_t status, uint16_t detail) {
+  sdf_event_router_event_t event = {
+      .type = SDF_EVENT_ROUTER_AUDIT,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+      .payload.audit.type = type,
+      .payload.audit.user_id = user_id,
+      .payload.audit.status = status,
+      .payload.audit.detail = detail,
   };
-
-  ESP_LOGI(TAG, "AUDIT %s user=%u status=%ld detail=%u",
-           sdf_app_audit_event_name(type), (unsigned)event.user_id,
-           event.status, (unsigned)event.detail);
-
-  switch (type) {
-  case SDF_AUDIT_BIOMETRIC_FAILED:
-    s_app_audit_err_biometric_failed++;
-    break;
-  case SDF_AUDIT_BIOMETRIC_LOCKOUT:
-    s_app_audit_err_auth_lockout++;
-    break;
-  case SDF_AUDIT_NONCE_REPLAY_BLOCKED:
-    s_app_audit_err_nonce_replay++;
-    break;
-  case SDF_AUDIT_PROTOCOL_ERROR:
-    s_app_audit_err_protocol++;
-    break;
-  default:
-    break;
-  }
-
-  if (s_audit_cb != NULL) {
-    s_audit_cb(s_audit_ctx, &event);
-  }
+  sdf_event_router_emit(&event);
 }
 
 /* ---- Lock flow callbacks (bridge to app-level state) ---- */
@@ -840,13 +828,9 @@ static void sdf_app_lf_on_fail(void *ctx, const char *reason) {
 static void sdf_app_lf_on_progress(void *ctx, bool in_progress, uint8_t action,
                                    uint8_t retries) {
   (void)ctx;
-  sdf_event_t event;
-  memset(&event, 0, sizeof(event));
-  event.type = SDF_EVENT_LOCK_ACTION_PROGRESS;
-  event.lock_action_in_progress = in_progress;
-  event.lock_action = action;
-  event.retry_count = retries;
-  sdf_app_emit_event(&event);
+  (void)in_progress;
+  (void)action;
+  (void)retries;
 }
 
 static void sdf_app_lf_on_complete(void *ctx, uint8_t action) {
@@ -915,16 +899,6 @@ int sdf_app_lock_action(uint8_t lock_action, uint8_t flags) {
   return sdf_lock_flow_begin(&s_lock_flow, lock_action, flags);
 }
 
-void sdf_app_set_event_callback(sdf_event_cb cb, void *ctx) {
-  s_event_cb = cb;
-  s_event_ctx = ctx;
-}
-
-void sdf_app_set_audit_callback(sdf_audit_cb cb, void *ctx) {
-  s_audit_cb = cb;
-  s_audit_ctx = ctx;
-}
-
 static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
   (void)ctx;
   sdf_power_mark_activity();
@@ -948,15 +922,6 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
 
     ESP_LOGI(TAG, "Status 0x%02X (%s)", status, sdf_app_status_name(status));
 
-    sdf_event_t event;
-    memset(&event, 0, sizeof(event));
-    event.type = SDF_EVENT_STATUS;
-    event.data.status = status;
-    event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
-    event.lock_action = s_lock_flow.requested_action;
-    event.retry_count = s_lock_flow.retry_count;
-    sdf_app_emit_event(&event);
-
     sdf_lock_flow_on_status(&s_lock_flow, status);
     return;
   }
@@ -971,15 +936,6 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
              "Keyturner state: nuki=%u lock=%u trigger=%u battery_critical=%u",
              (unsigned)state.nuki_state, (unsigned)state.lock_state,
              (unsigned)state.trigger, (unsigned)state.critical_battery_state);
-
-    sdf_event_t event;
-    memset(&event, 0, sizeof(event));
-    event.type = SDF_EVENT_KEYTURNER_STATE;
-    event.data.keyturner_state = state;
-    event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
-    event.lock_action = s_lock_flow.requested_action;
-    event.retry_count = s_lock_flow.retry_count;
-    sdf_app_emit_event(&event);
 
     sdf_protocol_zigbee_update_lock_state(
         sdf_app_map_lock_state_to_zigbee(state.lock_state));
@@ -1002,14 +958,6 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
              (unsigned)((uint8_t)report.error_code),
              sdf_app_error_name(report.error_code), report.command_identifier);
 
-    sdf_event_t event;
-    memset(&event, 0, sizeof(event));
-    event.type = SDF_EVENT_ERROR;
-    event.data.error_report = report;
-    event.lock_action_in_progress = s_lock_flow.state != SDF_LOCK_FLOW_IDLE;
-    event.lock_action = s_lock_flow.requested_action;
-    event.retry_count = s_lock_flow.retry_count;
-    sdf_app_emit_event(&event);
     sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
 
     sdf_lock_flow_on_error(&s_lock_flow);
@@ -1309,6 +1257,13 @@ err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
                                      sdf_app_on_event, NULL, &sub_handle);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
+  }
+
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_AUDIT,
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     sdf_app_on_event, NULL, &sub_handle);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to audit: %s", esp_err_to_name(err));
   }
 
   sdf_services_config_t services_cfg;

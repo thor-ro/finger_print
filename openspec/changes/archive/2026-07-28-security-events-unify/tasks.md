@@ -1,37 +1,37 @@
-## Security Events Unification Tasks
+## 1. Remove Legacy Callback Infrastructure
 
-### 1. Remove Legacy Callback from sdf_services Config
-- [x] Remove `sdf_services_security_event_cb` from `sdf_services_config_t` in `sdf_services.h`
-- [x] Remove `security_event_cb` and `security_event_ctx` fields from config struct
-- [x] Remove `sdf_services_get_default_config()` initialization of security_event_cb
+- [x] 1.1 Remove `sdf_app_set_event_callback()` and `sdf_app_set_audit_callback()` from `sdf_app.c`
+- [x] 1.2 Remove `sdf_app_emit_event()` and make `sdf_app_emit_audit()` route through the event router
+- [x] 1.3 Remove `SDF_APP_ZB_ALARM_SECURITY_PROTOCOL` macro if only used by legacy callback path (not removed — used by non-legacy BLE message handler)
 
-### 2. Remove sdf_services_notify_security_event()
-- [x] Delete `sdf_services_notify_security_event()` from `sdf_services.c`
-- [x] Update `sdf_services_run_match_cycle()` to emit security events directly via event router
-- [x] Update match success/failure/lockout emission paths in match cycle
+## 2. Unify Security Event Emission Through Event Router
 
-### 3. Remove sdf_match_task_notify_security_event()
-- [x] Delete `sdf_match_task_notify_security_event()` from `sdf_services_match.c`
-- [x] Update match cycle in `sdf_match_task_run_match_cycle()` to emit events directly via event router
-- [x] Ensure lockout cleared events still emitted correctly
+- [x] 2.1 Verify `sdf_services_emit_security_event()` is the only function emitting security events via `sdf_event_router_emit()`
+- [x] 2.2 Add `SDF_EVENT_ROUTER_AUDIT` event type to `sdf_event_router_type_t` enum in `sdf_common.h`
+- [x] 2.3 Add audit payload to the event router payload union in `sdf_event_router.h`
+- [x] 2.4 Route `sdf_app_emit_audit()` calls for security events through `sdf_event_router_emit()` with `SDF_EVENT_ROUTER_AUDIT` type
 
-### 4. Update sdf_app Security Event Handling
-- [x] Replace `sdf_on_security_event` callback with event router subscription
-- [x] Subscribe to `SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED` at HIGH priority
-- [x] Subscribe to `SDF_EVENT_ROUTER_SECURITY_LOCKOUT` at CRITICAL priority
-- [x] Route alarm mask and audit logic through subscription callbacks
+## 3. Update sdf_app Event Handler
 
-### 5. Update sdf_services_start_tasks()
-- [x] Remove any task creation dependencies on legacy callback paths
+- [x] 3.1 Update `sdf_app_on_event()` to handle `SDF_EVENT_ROUTER_AUDIT` events for audit logging
+- [x] 3.2 Remove any direct `sdf_app_emit_audit()` calls from the security event handling path in `sdf_app_on_event()` (now routed through event router)
+- [x] 3.3 Verify `sdf_app_on_event()` subscribes to all security event types (BIOMETRIC_MATCH, BIOMETRIC_MATCH_FAILED, SECURITY_LOCKOUT, AUDIT)
 
-### 6. Update Documentation
-- [x] Update `doc/sdf_sas.md` §7 to reflect single-path security events
-- [x] Update `doc/rtos_tasks.md` if security event flow changes
-- [x] Update `doc/system-architecture.md` event flow diagrams
+## 4. Clean Up Legacy Code
 
-### 7. Hardware Validation
-- [ ] Build with debug config and flash to hardware
-- [ ] Verify lockout triggers correctly (5 failures in 60s)
-- [ ] Verify alarm bits set correctly on Zigbee
-- [ ] Verify no duplicate audit entries
-- [ ] Verify match success events still trigger unlock flow
+- [x] 4.1 Remove unused callback type declarations (`sdf_event_cb`, `sdf_audit_cb`) from headers
+- [x] 4.2 Remove callback-related fields from `sdf_app` internal state struct
+- [x] 4.3 Update `sdf_app_init()` to not register legacy callbacks
+
+## 5. Update Tests
+
+- [ ] 5.1 Remove or update tests that rely on legacy callback mechanism in `sdf_app/test/`
+- [ ] 5.2 Add test: verify no duplicate audit entries for single security event
+- [ ] 5.3 Add test: verify legacy callback path is no longer invoked for security events
+- [ ] 5.4 Update `test_sdf_event_router.c` to verify audit event delivery
+
+## 6. Update Documentation
+
+- [ ] 6.1 Update `doc/sdf_sas.md` §6 Runtime View to reflect unified event flow
+- [ ] 6.2 Update `doc/software-architecture.md` if it shows legacy callback paths
+- [ ] 6.3 Update `AGENTS.md` Component Structure if callback removal changes component boundaries

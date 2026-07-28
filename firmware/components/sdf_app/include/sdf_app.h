@@ -9,8 +9,6 @@
 #include "sdf_nuki_pairing.h"
 
 esp_err_t sdf_app_init(void);
-void sdf_app_set_event_callback(sdf_event_cb cb, void *ctx);
-void sdf_app_set_audit_callback(sdf_audit_cb cb, void *ctx);
 void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id, int32_t status, uint16_t detail);
 int sdf_app_request_keyturner_state(void);
 int sdf_app_lock_action(uint8_t lock_action, uint8_t flags);
