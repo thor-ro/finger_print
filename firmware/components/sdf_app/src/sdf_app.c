@@ -380,42 +380,6 @@ static int sdf_app_power_battery_percent(void *ctx) {
   return sdf_drivers_battery_get_percent();
 }
 
-static void
-sdf_app_on_security_event(void *ctx,
-                          const sdf_services_security_event_t *event) {
-  (void)ctx;
-  if (event == NULL) {
-    return;
-  }
-
-  switch (event->type) {
-  case SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED:
-    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_FAILED, 0,
-                       (int32_t)event->failed_attempts,
-                       (uint16_t)(event->lockout_remaining_ms > 0xFFFFu
-                                      ? 0xFFFFu
-                                      : event->lockout_remaining_ms));
-    break;
-  case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED:
-    sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT, 0);
-    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_LOCKOUT, 0,
-                       (int32_t)event->failed_attempts,
-                       (uint16_t)(event->lockout_remaining_ms > 0xFFFFu
-                                      ? 0xFFFFu
-                                      : event->lockout_remaining_ms));
-    break;
-  case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED:
-    sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT);
-    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_LOCKOUT_CLEARED, 0, 0, 0);
-    break;
-  case SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED:
-    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_MATCH_SUCCESS, event->user_id, 0, 0);
-    break;
-  default:
-    break;
-  }
-}
-
 static void sdf_app_on_admin_action(void *ctx,
                                     sdf_services_admin_action_t action) {
   (void)ctx;
@@ -1353,8 +1317,6 @@ err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
   services_cfg.unlock_ctx = NULL;
   services_cfg.admin_action_cb = sdf_app_on_admin_action;
   services_cfg.admin_action_ctx = NULL;
-  services_cfg.security_event_cb = sdf_app_on_security_event;
-  services_cfg.security_event_ctx = NULL;
 
   err = sdf_services_init(&services_cfg);
   if (err != ESP_OK) {

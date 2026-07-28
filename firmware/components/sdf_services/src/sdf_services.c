@@ -3,6 +3,7 @@
 #include "sdf_platform.h"
 #include "sdf_config.h"
 #include "sdf_event_router.h"
+#include "sdf_app.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +62,11 @@
 #define SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS 15000u
 
 static const char *TAG = "sdf_services";
+
+static uint16_t s_enrollment_user_buf[512];
+static uint8_t s_enrollment_perm_buf[512];
+static uint16_t s_perm_user_buf[512];
+static uint8_t s_perm_perm_buf[512];
 
 static sdf_services_state_t s_state = {0};
 
@@ -164,85 +170,66 @@ sdf_services_emit_enrollment_event(sdf_event_router_type_t type,
 }
 
 static void
-sdf_services_notify_security_event(const sdf_services_security_event_t *event) {
-  if (event == NULL || s_state.lock == NULL) {
-    return;
-  }
-
-  sdf_services_security_event_cb cb = NULL;
-  void *ctx = NULL;
-  {
-    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired != pdTRUE)
-      return;
-    cb = s_state.config.security_event_cb;
-    ctx = s_state.config.security_event_ctx;
-  }
-
-  if (cb != NULL) {
-    cb(ctx, event);
-  }
-
-  // Emit corresponding event router event
+sdf_services_emit_security_event(sdf_services_security_event_type_t type,
+                                     uint16_t user_id,
+                                     uint32_t failed_attempts,
+                                     uint32_t lockout_remaining_ms) {
   if (!sdf_services_is_ready()) {
     return;
   }
 
   sdf_event_router_event_t evt = {
+      .type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
       .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
   };
 
-  switch (event->type) {
+  switch (type) {
   case SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED:
     evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH;
-    evt.payload.biometric.user_id = event->user_id;
+    evt.payload.biometric.user_id = user_id;
     evt.payload.biometric.confidence = 100;
     evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
-    sdf_event_router_emit(&evt);
     break;
   case SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED:
     evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED;
-    evt.payload.security.user_id = event->user_id;
-    evt.payload.security.failed_attempts = event->failed_attempts;
+    evt.payload.security.user_id = user_id;
+    evt.payload.security.failed_attempts = failed_attempts;
     evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
-    sdf_event_router_emit(&evt);
     break;
   case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED:
     evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
-    evt.payload.security.user_id = event->user_id;
-    evt.payload.security.failed_attempts = event->failed_attempts;
+    evt.payload.security.user_id = user_id;
+    evt.payload.security.failed_attempts = failed_attempts;
     evt.priority = SDF_EVENT_ROUTER_PRIO_CRITICAL;
-    sdf_event_router_emit(&evt);
     break;
   case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED:
     evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
     evt.payload.security.user_id = 0;
     evt.payload.security.failed_attempts = 0;
     evt.priority = SDF_EVENT_ROUTER_PRIO_NORMAL;
-    sdf_event_router_emit(&evt);
     break;
   }
+  sdf_event_router_emit(&evt);
 }
-
-static void sdf_services_start_local_enrollment_with_permission(
+static void
+sdf_services_start_local_enrollment_with_permission(
     uint8_t permission) {
   const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
-  uint16_t *users = calloc(max_users, sizeof(*users));
-  uint8_t *perms = calloc(max_users, sizeof(*perms));
   size_t count = 0;
   uint16_t new_id = 0;
-  esp_err_t err = ESP_OK;
+esp_err_t err = ESP_OK;
 
-  if (users == NULL || perms == NULL) {
-    ESP_LOGE(TAG, "Failed to allocate local enrollment query buffers");
-    free(perms);
-    free(users);
+  if (esp_get_free_heap_size() < 4096) {
+    ESP_LOGE(TAG, "Insufficient heap for enrollment query");
+    sdf_app_emit_audit(SDF_AUDIT_PROTOCOL_ERROR, 0, ESP_ERR_NO_MEM, 0);
     led_flash_red();
     return;
   }
 
-  err = sdf_services_query_users(users, perms, &count, max_users);
+  err = sdf_services_query_users(s_enrollment_user_buf,
+                                        s_enrollment_perm_buf,
+                                        &count, max_users);
   // query_users involves a sensor UART exchange that can be slow.
   // Reset the watchdog here because this function is called from
   // sdf_services_execute_admin_action which itself follows fp_match_1n(),
@@ -254,7 +241,7 @@ static void sdf_services_start_local_enrollment_with_permission(
     for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
       bool in_use = false;
       for (size_t i = 0; i < count; i++) {
-        if (users[i] == id) {
+        if (s_enrollment_user_buf[i] == id) {
           in_use = true;
           break;
         }
@@ -268,9 +255,6 @@ static void sdf_services_start_local_enrollment_with_permission(
     ESP_LOGW(TAG, "Failed to query users for local enrollment: %s",
              esp_err_to_name(err));
   }
-
-  free(perms);
-  free(users);
 
   if (new_id == 0) {
     if (err == ESP_OK) {
@@ -443,20 +427,15 @@ static void sdf_services_run_match_cycle(void) {
   if (now_us < s_state.match_cooldown_until_us ||
       sdf_enrollment_sm_is_active(&s_state.enrollment) ||
       s_state.enrollment_request_pending || now_us < s_state.lockout_until_us) {
-    xSemaphoreGive(s_state.lock);
-    if (lockout_cleared) {
-      sdf_services_security_event_t event = {
-          .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
-          .user_id = 0,
-          .failed_attempts = 0,
-          .lockout_remaining_ms = 0,
-      };
-      sdf_services_notify_security_event(&event);
+      xSemaphoreGive(s_state.lock);
+      if (lockout_cleared) {
+        sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
+                                             0, 0, 0);
+      }
+      return;
     }
-    return;
-  }
 
-  unlock_cb = s_state.config.unlock_cb;
+    unlock_cb = s_state.config.unlock_cb;
   unlock_ctx = s_state.config.unlock_ctx;
   cooldown_ms = s_state.config.match_cooldown_ms;
   failed_attempt_threshold = s_state.config.failed_attempt_threshold;
@@ -465,13 +444,8 @@ static void sdf_services_run_match_cycle(void) {
   xSemaphoreGive(s_state.lock);
 
   if (lockout_cleared) {
-    sdf_services_security_event_t event = {
-        .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
-        .user_id = 0,
-        .failed_attempts = 0,
-        .lockout_remaining_ms = 0,
-    };
-    sdf_services_notify_security_event(&event);
+    sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
+                                         0, 0, 0);
   }
 
   if (unlock_cb == NULL) {
@@ -526,23 +500,13 @@ static void sdf_services_run_match_cycle(void) {
     }
 
     if (emit_failed_attempt) {
-      sdf_services_security_event_t event = {
-          .type = SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED,
-          .user_id = 0,
-          .failed_attempts = failed_attempts,
-          .lockout_remaining_ms = lockout_remaining_ms,
-      };
-      sdf_services_notify_security_event(&event);
+      sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED,
+                                              0, failed_attempts, lockout_remaining_ms);
     }
 
     if (emit_lockout) {
-      sdf_services_security_event_t event = {
-          .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED,
-          .user_id = 0,
-          .failed_attempts = failed_attempt_threshold,
-          .lockout_remaining_ms = lockout_remaining_ms,
-      };
-      sdf_services_notify_security_event(&event);
+      sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED,
+                                              0, failed_attempt_threshold, lockout_remaining_ms);
     }
     return;
   }
@@ -580,13 +544,8 @@ static void sdf_services_run_match_cycle(void) {
     xSemaphoreGive(s_state.lock);
   }
 
-  sdf_services_security_event_t event = {
-      .type = SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED,
-      .user_id = match.user_id,
-      .failed_attempts = 0,
-      .lockout_remaining_ms = 0,
-  };
-  sdf_services_notify_security_event(&event);
+  sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED,
+                                         match.user_id, 0, 0);
 }
 
 static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
@@ -723,8 +682,6 @@ void sdf_services_get_default_config(sdf_services_config_t *config) {
   config->lockout_duration_ms = sdf_cfg->lockout_duration_ms;
   config->unlock_cb = NULL;
   config->unlock_ctx = NULL;
-  config->security_event_cb = NULL;
-  config->security_event_ctx = NULL;
   config->wake_gpio = (gpio_num_t)sdf_cfg->fp_wake_gpio;
   config->power_en_gpio = (gpio_num_t)sdf_cfg->fp_en_gpio;
   config->enrollment_btn_gpio = (gpio_num_t)sdf_cfg->enrollment_btn_gpio;
@@ -1006,20 +963,18 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
   }
 
   const size_t query_capacity = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
-  uint16_t *user_ids = calloc(query_capacity, sizeof(*user_ids));
-  uint8_t *permissions = calloc(query_capacity, sizeof(*permissions));
-  if (user_ids == NULL || permissions == NULL) {
-    free(permissions);
-    free(user_ids);
+  size_t count = query_capacity;
+  esp_err_t err;
+
+  if (esp_get_free_heap_size() < 4096) {
+    ESP_LOGE(TAG, "Insufficient heap for permission change query");
+    sdf_app_emit_audit(SDF_AUDIT_PROTOCOL_ERROR, 0, ESP_ERR_NO_MEM, 0);
     return ESP_ERR_NO_MEM;
   }
 
-  size_t count = query_capacity;
-  esp_err_t err =
-      sdf_services_query_users(user_ids, permissions, &count, query_capacity);
+  err = sdf_services_query_users(s_perm_user_buf, s_perm_perm_buf,
+                                      &count, query_capacity);
   if (err != ESP_OK) {
-    free(permissions);
-    free(user_ids);
     return err;
   }
 
@@ -1027,17 +982,14 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
   uint8_t current_permission = 0;
   size_t admin_count = 0;
   for (size_t i = 0; i < count; ++i) {
-    if (permissions[i] == 3u) {
+    if (s_perm_perm_buf[i] == 3u) {
       admin_count++;
     }
-    if (user_ids[i] == user_id) {
+    if (s_perm_user_buf[i] == user_id) {
       found = true;
-      current_permission = permissions[i];
+      current_permission = s_perm_perm_buf[i];
     }
   }
-
-  free(permissions);
-  free(user_ids);
 
   if (!found) {
     return ESP_ERR_NOT_FOUND;

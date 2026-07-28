@@ -44,9 +44,6 @@ typedef struct {
   uint32_t lockout_remaining_ms;
 } sdf_services_security_event_t;
 
-typedef void (*sdf_services_security_event_cb)(
-    void *ctx, const sdf_services_security_event_t *event);
-
 typedef struct {
   sdf_fingerprint_driver_config_t fingerprint;
   uint32_t match_poll_interval_ms;
@@ -58,8 +55,6 @@ typedef struct {
   void *unlock_ctx;
   sdf_services_admin_action_cb admin_action_cb;
   void *admin_action_ctx;
-  sdf_services_security_event_cb security_event_cb;
-  void *security_event_ctx;
   gpio_num_t wake_gpio;
   gpio_num_t power_en_gpio;
   gpio_num_t enrollment_btn_gpio;

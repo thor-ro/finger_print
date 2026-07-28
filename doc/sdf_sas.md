@@ -124,7 +124,7 @@ hw --> fw : Match/Enroll results
 | **Component-based ESP-IDF architecture** | Each module is an ESP-IDF component with `include/` + `src/`; enables independent compilation and testing via `test_runner` |
 | **Event-driven FreeRTOS tasks** | Single `sdf_fp` task handles fingerprint polling, enrollment, and admin auth; power manager task handles sleep/wake; Zigbee callback-driven |
 | **State machine pattern for enrollment** | `sdf_enrollment_sm` decouples enrollment logic from hardware; step results fed back via `apply_step_result()` |
-| **Callback-based decoupling** | `sdf_app` registers callbacks with `sdf_services` for unlock, enrollment, admin actions, and security events — no circular dependencies |
+| **Callback-based decoupling** | `sdf_app` registers callbacks with `sdf_services` for unlock, enrollment, and admin actions — no circular dependencies |
 | **NimBLE Central with on-demand BLE** | BLE radio is gated to save power; only enabled during active lock actions or pairing |
 | **Sensor-side template storage** | Fingerprint templates never leave the sensor; ESP32 only stores User ID ↔ permission mapping |
 | **NVS for credential persistence** | Nuki authorization_id + shared_key, BLE target address, and security policy stored in encrypted NVS |
@@ -662,7 +662,7 @@ The `sdf_event_router` component provides a central event bus that decouples com
 - **Audit logging**: All events automatically logged when `CONFIG_SDF_EVENT_ROUTER_ENABLE_AUDIT` is enabled
 
 ### Migration from Callbacks
-Previously, `sdf_app` registered direct callbacks with `sdf_services` (`unlock_cb`, `enrollment_cb`, `security_event_cb`). The event router replaces this with:
+Previously, `sdf_app` registered direct callbacks with `sdf_services` (`unlock_cb`, `enrollment_cb`). The event router replaces this with:
 1. `sdf_services` emits typed events via `sdf_event_router_emit()`
 2. `sdf_app` subscribes to relevant events at init
 3. Zigbee, BLE, and Power components emit their own events
@@ -796,6 +796,7 @@ Dual OTA slots (ota_0, ota_1) + otadata for swap state; nvs_keys for encrypted N
 | **Placeholder BLE address** | High | `SDF_NUKI_TARGET_ADDR` must be set to real lock address before pairing |
 | **Fingerprint LED command tuning** | Medium | `Control LED (0x3C)` payload bytes are module-variant specific; defaults may need hardware calibration |
 | **Factory reset incomplete** | Resolved | Complete factory reset implemented (NVS erase, template deletion, Zigbee reset, services state clear, CLI `factory_reset YES`) |
+| **Memory safety in hot paths** | Resolved | Replaced `calloc()` in enrollment and permission change paths with static pre-allocated buffers; added `esp_get_free_heap_size()` OOM guard with audit event emission |
 | **Power policy migration in progress** | Medium | `sdf_power` being refactored to `sdf_power_policy` + `sdf_platform_power`; test on hardware before full deployment |
 | **Zigbee check-in latency trade-off** | Low | 15s default balances battery life vs. remote command responsiveness |
 | **`sdf_platform` and `sdf_config` components implemented** | Low | Components now exist providing HAL wrappers and centralized configuration management |

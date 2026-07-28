@@ -69,69 +69,6 @@ static void sdf_match_task_deinit_subscriptions(sdf_match_task_state_t *state) {
     state->event_queue = NULL;
 }
 
-static void sdf_match_task_notify_security_event(sdf_services_security_event_type_t type,
-                                                  uint16_t user_id,
-                                                  uint32_t failed_attempts,
-                                                  uint32_t lockout_remaining_ms) {
-    sdf_services_security_event_t event = {
-        .type = type,
-        .user_id = user_id,
-        .failed_attempts = failed_attempts,
-        .lockout_remaining_ms = lockout_remaining_ms
-    };
-
-    sdf_services_security_event_cb cb = NULL;
-    void *ctx = NULL;
-    sdf_services_state_t *s = sdf_services_state();
-
-    if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-        cb = s->config.security_event_cb;
-        ctx = s->config.security_event_ctx;
-        xSemaphoreGive(s->lock);
-    }
-
-    if (cb) {
-        cb(ctx, &event);
-    }
-
-    if (!sdf_services_is_ready()) {
-        return;
-    }
-
-    sdf_event_router_event_t evt = {
-        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-    };
-
-    switch (type) {
-        case SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED:
-            evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH;
-            evt.payload.biometric.user_id = user_id;
-            evt.payload.biometric.confidence = 100;
-            evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
-            break;
-        case SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED:
-            evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED;
-            evt.payload.security.user_id = user_id;
-            evt.payload.security.failed_attempts = failed_attempts;
-            evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
-            break;
-        case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED:
-            evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
-            evt.payload.security.user_id = user_id;
-            evt.payload.security.failed_attempts = failed_attempts;
-            evt.priority = SDF_EVENT_ROUTER_PRIO_CRITICAL;
-            break;
-        case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED:
-            evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
-            evt.payload.security.user_id = 0;
-            evt.payload.security.failed_attempts = 0;
-            evt.priority = SDF_EVENT_ROUTER_PRIO_NORMAL;
-            break;
-    }
-
-    sdf_event_router_emit(&evt);
-}
-
 static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) {
     sdf_services_state_t *s = sdf_services_state();
     sdf_services_unlock_cb unlock_cb = NULL;
@@ -168,14 +105,17 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         now_us < s->lockout_until_us) {
         xSemaphoreGive(s->lock);
         if (lockout_cleared) {
-            sdf_services_security_event_t event = {
-                .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
-                .user_id = 0,
-                .failed_attempts = 0,
-                .lockout_remaining_ms = 0,
+            if (!sdf_services_is_ready()) {
+                return;
+            }
+            sdf_event_router_event_t evt = {
+                .type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
+                .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+                .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+                .payload.security.user_id = 0,
+                .payload.security.failed_attempts = 0,
             };
-            sdf_match_task_notify_security_event(event.type, event.user_id,
-                                                  event.failed_attempts, event.lockout_remaining_ms);
+            sdf_event_router_emit(&evt);
         }
         return;
     }
@@ -189,14 +129,17 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     xSemaphoreGive(s->lock);
 
     if (lockout_cleared) {
-        sdf_services_security_event_t event = {
-            .type = SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
-            .user_id = 0,
-            .failed_attempts = 0,
-            .lockout_remaining_ms = 0,
+        if (!sdf_services_is_ready()) {
+            return;
+        }
+        sdf_event_router_event_t evt = {
+            .type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
+            .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+            .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+            .payload.security.user_id = 0,
+            .payload.security.failed_attempts = 0,
         };
-        sdf_match_task_notify_security_event(event.type, event.user_id,
-                                              event.failed_attempts, event.lockout_remaining_ms);
+        sdf_event_router_emit(&evt);
     }
 
     if (unlock_cb == NULL) {
@@ -245,13 +188,31 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         }
 
         if (emit_failed_attempt) {
-            sdf_match_task_notify_security_event(SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED,
-                                                  0, failed_attempts, lockout_remaining_ms);
+            if (!sdf_services_is_ready()) {
+                return;
+            }
+            sdf_event_router_event_t evt = {
+                .type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,
+                .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+                .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+                .payload.security.user_id = 0,
+                .payload.security.failed_attempts = failed_attempts,
+            };
+            sdf_event_router_emit(&evt);
         }
 
         if (emit_lockout) {
-            sdf_match_task_notify_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED,
-                                                  0, failed_attempt_threshold, lockout_remaining_ms);
+            if (!sdf_services_is_ready()) {
+                return;
+            }
+            sdf_event_router_event_t evt = {
+                .type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
+                .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+                .priority = SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                .payload.security.user_id = 0,
+                .payload.security.failed_attempts = failed_attempt_threshold,
+            };
+            sdf_event_router_emit(&evt);
         }
         return;
     }
@@ -287,8 +248,17 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         xSemaphoreGive(s->lock);
     }
 
-    sdf_match_task_notify_security_event(SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED,
-                                          match.user_id, 0, 0);
+    if (!sdf_services_is_ready()) {
+        return;
+    }
+    sdf_event_router_event_t evt = {
+        .type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+        .payload.biometric.user_id = match.user_id,
+        .payload.biometric.confidence = 100,
+    };
+    sdf_event_router_emit(&evt);
 }
 
 void sdf_match_task(void *arg) {
