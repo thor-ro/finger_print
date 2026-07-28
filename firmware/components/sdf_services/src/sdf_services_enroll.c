@@ -18,7 +18,7 @@
 
 #define SDF_ENROLL_TASK_NAME "sdf_enroll"
 #define SDF_ENROLL_TASK_STACK 4096
-#define SDF_ENROLL_TASK_PRIORITY 5
+#define SDF_ENROLL_TASK_PRIORITY 4
 #define SDF_ENROLL_POLL_INTERVAL_MS 100
 
 static const char *TAG = "sdf_services_enroll";

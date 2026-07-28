@@ -22,7 +22,7 @@
 
 #define SDF_ADMIN_TASK_NAME "sdf_admin"
 #define SDF_ADMIN_TASK_STACK 4096
-#define SDF_ADMIN_TASK_PRIORITY 6
+#define SDF_ADMIN_TASK_PRIORITY 5
 #define SDF_ADMIN_ACTION_TIMEOUT_MS 10000
 
 static const char *TAG = "sdf_services_admin";

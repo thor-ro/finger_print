@@ -26,7 +26,7 @@
 
 #define SDF_BUTTON_TASK_NAME "sdf_btn"
 #define SDF_BUTTON_TASK_STACK 3072
-#define SDF_BUTTON_TASK_PRIORITY 5
+#define SDF_BUTTON_TASK_PRIORITY 4
 
 static const char *TAG = "sdf_services_button";
 

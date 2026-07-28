@@ -20,7 +20,7 @@
 
 #define SDF_MATCH_TASK_NAME "sdf_match"
 #define SDF_MATCH_TASK_STACK 4096
-#define SDF_MATCH_TASK_PRIORITY 6
+#define SDF_MATCH_TASK_PRIORITY 5
 #define SDF_MATCH_POLL_MS 400
 
 static const char *TAG = "sdf_services_match";
