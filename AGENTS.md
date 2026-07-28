@@ -64,6 +64,21 @@ Configured in `firmware/sdkconfig.defaults`:
 - OTA downgrade: allowed with warning
 - Bootloader rollback: enabled (WDT 90s)
 
+## Power Management Defaults
+Configured in `firmware/sdkconfig.defaults`:
+- Zigbee check-in interval: 15s
+- Idle before sleep: 5s
+- Post-wake guard: 1.5s
+- Power loop interval: 250ms
+- Battery report interval: 60s
+- Light sleep: enabled
+- BLE radio gating: enabled
+- Deep sleep fallback: enabled
+- Adaptive check-in: enabled
+- Retention memory size: 256 bytes
+- Deep sleep min duration: 30s
+- Wake sources: Timer, Fingerprint GPIO, USB
+
 ## OTA Commands (CLI)
 ```bash
 ota version          # Print firmware version + build info

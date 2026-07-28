@@ -166,8 +166,11 @@ package "sdf_state_machines" {
 package "sdf_storage" {
   [NVS Storage] as nvs
 }
-package "sdf_power" {
-  [Power Manager\n& Sleep] as pwr
+package "sdf_power_policy" {
+  [Power Policy\n(Sleep decisions)] as pwr_policy
+}
+package "sdf_platform_power" {
+  [Platform Power\n(Sleep mechanisms)] as pwr_plat
 }
 package "sdf_common" {
   [Shared Types\n& Events] as common
@@ -183,23 +186,23 @@ evt --> svc : route events
 evt --> admin : route events
 evt --> ble : route events
 evt --> zb : route events
-evt --> pwr : route events
+evt --> pwr_policy : route events
 svc --> fp : match_1n\nenroll_step\ndelete_user
 svc --> led : pulse/flash/breathe
 svc --> sm : start/apply_step
 svc --> admin : authorize action
-svc --> pwr : mark_activity
+svc --> pwr_policy : mark_activity
 ble --> nvs : load/save credentials
 zb --> nvs : (indirect via app)
-pwr --> fp : power gating
-pwr --> ble : radio gating
+pwr_plat --> fp : power gating
+pwr_plat --> ble : radio gating
 common <-- app
 common <-- svc
 common <-- ble
 common <-- zb
 common <-- sm
 common <-- nvs
-common <-- pwr
+common <-- pwr_plat
 common <-- evt
 @enduml
 ```
@@ -216,7 +219,8 @@ common <-- evt
 | **sdf_drivers** | Hardware abstraction: fingerprint UART (19200 baud, command framing, checksum), WS2812 LED ring (color animations), battery ADC |
 | **sdf_state_machines** | Pure logic enrollment state machine (self-contained retry policy): IDLE → STEP_1 → STEP_2 → STEP_3 → SUCCESS/ERROR; exposes `next_action` API for executor |
 | **sdf_storage** | NVS persistence: Nuki credentials, BLE target address, NVS security verification |
-| **sdf_power** | FreeRTOS power manager: sleep/wake scheduling, Zigbee check-in coordination, BLE radio gating, battery reporting, event emission for sleep/wake/battery |
+| **sdf_power_policy** | Portable sleep/wake policy: evaluates sleep conditions, manages wake guard timing, battery report scheduling, policy callbacks (busy, wake, battery, zigbee_ready) |
+| **sdf_platform_power** | Platform-specific sleep mechanisms: ESP-IDF light/deep sleep entry, GPIO wake configuration, timer wake setup, BLE radio gating, RTC retention memory |
 | **sdf_common** | Shared types: lock action enums, keyturner state, event/audit structs, error codes |
 | **sdf_cli** | Debug CLI for interactive testing and diagnostics |
 
@@ -584,6 +588,13 @@ mcu --> bat : ADC GPIO 0\n(voltage divider)
 
 ## 8.2 Power Management
 
+Power management is split into two components for separation of concerns:
+
+| Component | Responsibility |
+|---|---|
+| **sdf_power_policy** | Sleep/wake decisions, wake guard timing, battery report scheduling, policy callbacks |
+| **sdf_platform_power** | ESP-IDF sleep entry, GPIO wake configuration, timer wake setup, BLE radio gating, RTC retention |
+
 | Parameter | Default | Config Key |
 |---|---|---|
 | Zigbee check-in interval | 15s | `CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS` |
@@ -593,10 +604,28 @@ mcu --> bat : ADC GPIO 0\n(voltage divider)
 | Battery report interval | 60s | `CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS` |
 | Light sleep | enabled | `CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP` |
 | BLE radio gating | enabled | `CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING` |
+| Adaptive check-in | enabled | `CONFIG_SDF_POWER_ADAPTIVE_CHECKIN` |
+| Deep sleep min duration | 30s | `CONFIG_SDF_POWER_DEEP_SLEEP_MIN_MS` |
 
-**Wake sources:** Fingerprint WAKE pin (GPIO 3, interrupt-driven), Zigbee check-in timer.
+**Wake sources:** 
+- Timer (Zigbee check-in): `CONFIG_SDF_POWER_WAKE_SOURCE_TIMER`
+- Fingerprint GPIO (GPIO 3): `CONFIG_SDF_POWER_WAKE_SOURCE_FINGERPRINT`
+- USB connection detect: `CONFIG_SDF_POWER_WAKE_SOURCE_USB`
+- BLE activity (experimental): `CONFIG_SDF_POWER_WAKE_SOURCE_BLE`
+- Zigbee RX (radio IRQ): `CONFIG_SDF_POWER_WAKE_SOURCE_ZIGBEE`
+- Enrollment button: `CONFIG_SDF_POWER_WAKE_SOURCE_BUTTON`
 
-**Sleep behavior:** Deep sleep by default. BLE radio disabled when idle. Fingerprint sensor powered off between match cycles. LED off during sleep.
+**RTC Retention Memory:** Preserves fast-resume state across deep sleep (magic, BLE/Zigbee state, battery, security counters, timestamps). CRC16-validated. Size: `CONFIG_SDF_POWER_RETENTION_SIZE` (default 256 bytes).
+
+**Staged Wake Sequence:**
+1. **Critical**: Restore NVS security context, re-enable interrupts, start TWDT
+2. **Fast Path** (fingerprint/BLE wake): Power on sensor, enable BLE radio, skip Zigbee init
+3. **Full Path** (timer/Zigbee wake): Init Zigbee stack, process commands, update attributes
+4. **Housekeeping**: Battery ADC, sensor calibration check, NVS sync
+
+**Adaptive Check-in Interval:** Scales base interval (15s) by battery: <20% → 4x (60s), <40% → 2x (30s), <60% → 1.5x (22s), else base.
+
+**Sleep behavior:** Deep sleep with configurable wake sources. BLE radio disabled when idle. Fingerprint sensor powered off between match cycles. LED off during sleep. Retention state enables <100ms unlock from fingerprint wake.
 
 ## 8.3 Error Handling
 
@@ -767,7 +796,7 @@ Dual OTA slots (ota_0, ota_1) + otadata for swap state; nvs_keys for encrypted N
 | **Placeholder BLE address** | High | `SDF_NUKI_TARGET_ADDR` must be set to real lock address before pairing |
 | **Fingerprint LED command tuning** | Medium | `Control LED (0x3C)` payload bytes are module-variant specific; defaults may need hardware calibration |
 | **Factory reset incomplete** | Resolved | Complete factory reset implemented (NVS erase, template deletion, Zigbee reset, services state clear, CLI `factory_reset YES`) |
-| **No OTA update mechanism** | Resolved | Implemented in `sdf_ota` component: Zigbee/CLI triggers, Ed25519 verification, version check, rollback |
+| **Power policy migration in progress** | Medium | `sdf_power` being refactored to `sdf_power_policy` + `sdf_platform_power`; test on hardware before full deployment |
 | **Zigbee check-in latency trade-off** | Low | 15s default balances battery life vs. remote command responsiveness |
 | **`sdf_platform` and `sdf_config` components implemented** | Low | Components now exist providing HAL wrappers and centralized configuration management |
 

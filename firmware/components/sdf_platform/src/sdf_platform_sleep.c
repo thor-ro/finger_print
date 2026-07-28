@@ -1,4 +1,5 @@
 #include "sdf_platform_sleep.h"
+#include "sdkconfig.h"
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_sleep.h"
@@ -10,7 +11,30 @@
 #include "sdf_mock_linux_sleep.h"
 #endif
 
+#define SDF_POWER_RETENTION_MAGIC 0x5FDEC3A1
+#define SDF_POWER_RETENTION_SIZE CONFIG_SDF_POWER_RETENTION_SIZE
+#define SDF_POWER_DEFAULT_CHECKIN_INTERVAL_MS 15000
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+#include "soc/rtc.h"
+#endif
+
+static uint8_t *s_retention_base = NULL;
+
 static const char *TAG = "sdf_platform_sleep";
+
+esp_err_t sdf_power_crc16_ccitt(const void *data, size_t len, uint16_t *crc) {
+    uint16_t c = 0xFFFF;
+    const uint8_t *p = (const uint8_t *)data;
+    for (size_t i = 0; i < len; i++) {
+        c ^= p[i] << 8;
+        for (int j = 0; j < 8; j++) {
+            c = (c & 0x8000) ? (c << 1) ^ 0x1021 : (c << 1);
+        }
+    }
+    *crc = c;
+    return ESP_OK;
+}
 
 sdf_platform_wake_reason_t sdf_platform_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
     switch (cause) {
@@ -93,8 +117,6 @@ esp_err_t sdf_platform_sleep_deep(void) {
 }
 
 uint64_t sdf_platform_sleep_get_sleep_duration_us(void) {
-    // ESP-IDF doesn't directly provide sleep duration; return 0 as placeholder
-    // For actual implementation, would need RTC memory to store sleep start time
     return 0;
 }
 
@@ -111,4 +133,68 @@ bool sdf_platform_sleep_wakeup_from_gpio(gpio_num_t *gpio_num) {
     }
 #endif
     return false;
+}
+
+bool sdf_platform_sleep_wakeup_from_timer(void) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+    return esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
+#else
+    return false;
+#endif
+}
+
+bool sdf_platform_sleep_wakeup_from_usb(void) {
+#if defined(CONFIG_IDF_TARGET_LINUX)
+    return false;
+#elif defined(ESP_SLEEP_WAKEUP_USB)
+    return esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_USB;
+#else
+    return false;
+#endif
+}
+
+esp_err_t sdf_platform_sleep_configure_wake_sources(uint32_t sources) {
+    esp_err_t err = ESP_OK;
+    if (sources & SDF_WAKE_SRC_TIMER) {
+        err = sdf_platform_sleep_enable_timer_wakeup(SDF_POWER_DEFAULT_CHECKIN_INTERVAL_MS);
+    }
+    return err;
+}
+
+esp_err_t sdf_platform_sleep_retention_write(const void *data, size_t len) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+    if (len > SDF_POWER_RETENTION_SIZE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_retention_base == NULL) {
+        s_retention_base = (uint8_t*)SOC_RTC_DATA_LOW;
+    }
+    memcpy(s_retention_base, data, len);
+#endif
+    return ESP_OK;
+}
+
+esp_err_t sdf_platform_sleep_retention_read(void *data, size_t len) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+    if (len > SDF_POWER_RETENTION_SIZE) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_retention_base == NULL) {
+        s_retention_base = (uint8_t*)SOC_RTC_DATA_LOW;
+    }
+    memcpy(data, s_retention_base, len);
+#endif
+    return ESP_OK;
+}
+
+bool sdf_platform_sleep_retention_valid(void) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+    if (s_retention_base == NULL) {
+        s_retention_base = (uint8_t*)SOC_RTC_DATA_LOW;
+    }
+    sdf_power_retention_t *retention = (sdf_power_retention_t *)s_retention_base;
+    return retention->magic == SDF_POWER_RETENTION_MAGIC;
+#else
+    return false;
+#endif
 }

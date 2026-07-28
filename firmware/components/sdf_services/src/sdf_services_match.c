@@ -18,8 +18,6 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-#include "sdf_event_router.h"
-
 #define SDF_MATCH_TASK_NAME "sdf_match"
 #define SDF_MATCH_TASK_STACK 4096
 #define SDF_MATCH_TASK_PRIORITY 6

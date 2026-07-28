@@ -1,6 +1,9 @@
 #include "sdf_power.h"
 #include "sdf_platform.h"
 #include "sdf_config.h"
+#include "sdf_platform_sleep.h"
+#include "sdf_power_policy.h"
+#include "sdf_platform_power.h"
 
 #include <string.h>
 
@@ -42,6 +45,12 @@ typedef struct {
   TaskHandle_t task;
   bool initialized;
   sdf_power_manager_config_t config;
+  // Wake configuration
+  uint32_t enabled_sources;
+  uint32_t finger_wake_debounce_ms;
+  bool enable_ble_wake;
+  bool enable_zigbee_wake;
+  uint32_t deep_sleep_min_duration_ms;
   int64_t last_activity_us;
   int64_t wake_guard_until_us;
   int64_t next_battery_report_us;
@@ -216,11 +225,17 @@ static void sdf_power_task(void *arg) {
       continue;
     }
 
+    /* Update policy state from platform state */
+    sdf_power_policy_mark_activity();
+
+    /* Evaluate policy decision */
+    sdf_power_policy_decision_t decision = sdf_power_policy_evaluate(
+        now_us, last_activity_us, wake_guard_until_us, next_battery_report_us);
+
     if (now_us >= next_battery_report_us) {
       int battery_cb_result = -1;
       if (config_snapshot.battery_cb != NULL) {
-        battery_cb_result =
-            config_snapshot.battery_cb(config_snapshot.battery_ctx);
+        battery_cb_result = config_snapshot.battery_cb(config_snapshot.battery_ctx);
       }
 
       if (battery_cb_result >= 0 && battery_cb_result <= 100) {
@@ -233,8 +248,6 @@ static void sdf_power_task(void *arg) {
         s_state.next_battery_report_us =
             now_us +
             ((int64_t)config_snapshot.battery_report_interval_ms * 1000LL);
-        /* Hold wake guard while the Zigbee battery push completes so the
-           device doesn't enter sleep mid-report. */
         s_state.wake_guard_until_us =
             esp_timer_get_time() +
             ((int64_t)config_snapshot.post_wake_guard_ms * 1000LL);
@@ -243,47 +256,66 @@ static void sdf_power_task(void *arg) {
       sdf_power_push_battery_percent(battery_percent);
     }
 
-    bool allow_sleep = config_snapshot.enable_light_sleep;
-    if (allow_sleep && now_us < wake_guard_until_us) {
-      allow_sleep = false;
-    }
-    if (allow_sleep &&
-        (now_us - last_activity_us) <
-            ((int64_t)config_snapshot.idle_before_sleep_ms * 1000LL)) {
-      allow_sleep = false;
-    }
-    if (allow_sleep && sdf_power_busy_now(&config_snapshot)) {
-      allow_sleep = false;
-    }
-
 #ifndef CONFIG_IDF_TARGET_LINUX
-    if (allow_sleep && usb_serial_jtag_is_connected()) {
-      allow_sleep = false;
+    if (decision == SDF_POWER_POLICY_DECISION_SLEEP_LIGHT || 
+        decision == SDF_POWER_POLICY_DECISION_SLEEP_DEEP) {
+      if (usb_serial_jtag_is_connected()) {
+        decision = SDF_POWER_POLICY_DECISION_STAY_AWAKE;
+      }
     }
 #endif
 
-    if (allow_sleep) {
-      bool zigbee_enabled = sdf_protocol_zigbee_is_enabled();
-      if (config_snapshot.enable_deep_sleep_fallback &&
-          zigbee_enabled && !sdf_protocol_zigbee_is_ready()) {
-        ESP_LOGI(TAG, "Entering deep sleep (Zigbee not joined)");
-        sdf_platform_sleep_disable_all_wakeup_sources();
+    if (decision == SDF_POWER_POLICY_DECISION_SLEEP_LIGHT) {
+      sdf_event_router_event_t sleep_evt = {
+          .type = SDF_EVENT_ROUTER_POWER_SLEEP,
+          .priority = SDF_EVENT_ROUTER_PRIO_LOW,
+          .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+          .payload.power.remaining_ms = config_snapshot.checkin_interval_ms,
+      };
+      sdf_event_router_emit(&sleep_evt);
 
-        if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio)) {
-          sdf_platform_sleep_enable_gpio_wakeup_deep(config_snapshot.fingerprint_wake_gpio, 1);
-        }
-        sdf_platform_sleep_deep();
+      sdf_platform_power_enable_timer_wake(config_snapshot.checkin_interval_ms);
+      if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio)) {
+        sdf_platform_power_enable_gpio_wake(config_snapshot.fingerprint_wake_gpio, 1);
       }
 
-      sdf_power_sleep_once(&config_snapshot);
-      int64_t wake_us = esp_timer_get_time();
-      if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
-          pdTRUE) {
-        s_state.last_activity_us = wake_us;
-        s_state.wake_guard_until_us =
-            wake_us + ((int64_t)config_snapshot.post_wake_guard_ms * 1000LL);
-        xSemaphoreGive(s_state.lock);
+#ifndef CONFIG_IDF_TARGET_LINUX
+      bool ble_was_gated = false;
+      if (config_snapshot.enable_ble_radio_gating && config_snapshot.ble_transport != NULL) {
+        sdf_platform_power_gate_ble_radio(false);
+        ble_was_gated = true;
       }
+#endif
+
+sdf_platform_power_enter_light();
+
+#ifndef CONFIG_IDF_TARGET_LINUX
+      if (ble_was_gated) {
+        sdf_platform_power_gate_ble_radio(true);
+      }
+#endif
+
+      sdf_power_policy_handle_wake(SDF_POWER_POLICY_WAKE_REASON_TIMER);
+    }
+
+    if (decision == SDF_POWER_POLICY_DECISION_SLEEP_DEEP) {
+      sdf_platform_power_disable_all_wake();
+      if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio) &&
+          (s_state.enabled_sources & SDF_WAKE_SRC_FINGERPRINT_GPIO)) {
+        sdf_platform_sleep_enable_gpio_wakeup_deep(config_snapshot.fingerprint_wake_gpio, 1);
+      }
+      if (s_state.enabled_sources & SDF_WAKE_SRC_TIMER) {
+        sdf_platform_sleep_enable_timer_wakeup(config_snapshot.checkin_interval_ms);
+      }
+
+      sdf_power_retention_t retention = {0};
+      retention.magic = 0x5FDEC3A1;
+      retention.last_activity_us = esp_timer_get_time();
+      retention.next_checkin_us = retention.last_activity_us +
+          ((int64_t)config_snapshot.checkin_interval_ms * 1000LL);
+      sdf_platform_sleep_retention_write(&retention, sizeof(retention));
+
+      sdf_platform_power_enter_deep();
     }
 
     vTaskDelay(pdMS_TO_TICKS(config_snapshot.loop_interval_ms));
@@ -292,6 +324,29 @@ static void sdf_power_task(void *arg) {
 
 void sdf_power_init(void) {
   const sdf_config_t *cfg = sdf_config_get();
+  
+  /* Initialize platform power first */
+  sdf_platform_power_init();
+  
+  /* Initialize policy component */
+  sdf_power_policy_config_t policy_cfg = {
+      .checkin_interval_ms = cfg->checkin_interval_ms,
+      .idle_before_sleep_ms = cfg->idle_before_sleep_ms,
+      .post_wake_guard_ms = cfg->post_wake_guard_ms,
+      .loop_interval_ms = cfg->power_loop_interval_ms,
+      .battery_report_interval_ms = cfg->battery_report_interval_ms,
+      .enable_light_sleep = cfg->enable_light_sleep,
+      .enable_ble_radio_gating = cfg->enable_ble_radio_gating,
+      .enable_deep_sleep_fallback = cfg->enable_deep_sleep_fallback,
+      .fp_wake_gpio = cfg->fp_wake_gpio,
+      .busy_cb = NULL,
+      .wake_cb = NULL,
+      .battery_cb = NULL,
+      .zigbee_ready_cb = NULL,
+      .ctx = NULL,
+  };
+  sdf_power_policy_init(&policy_cfg);
+  
   sdf_power_manager_config_t config = {
       .ble_transport = NULL,
       .fingerprint_wake_gpio = (gpio_num_t)cfg->fp_wake_gpio,
@@ -347,6 +402,11 @@ sdf_power_init_power_manager(const sdf_power_manager_config_t *config) {
 
   s_state.config = *config;
   s_state.battery_percent = config->battery_percent_default;
+  s_state.enabled_sources = SDF_WAKE_SRC_TIMER | SDF_WAKE_SRC_FINGERPRINT_GPIO | SDF_WAKE_SRC_USB;
+  s_state.finger_wake_debounce_ms = 100;
+  s_state.enable_ble_wake = false;
+  s_state.enable_zigbee_wake = false;
+  s_state.deep_sleep_min_duration_ms = 30000;  // 30 seconds minimum
   s_state.last_activity_us = esp_timer_get_time();
   s_state.wake_guard_until_us =
       s_state.last_activity_us + ((int64_t)config->post_wake_guard_ms * 1000LL);
@@ -474,4 +534,152 @@ uint8_t sdf_power_get_battery_percent(void) {
   }
 
   return s_state.battery_percent;
+}
+
+esp_err_t sdf_power_set_wake_config(const sdf_power_wake_config_t *config) {
+  if (config == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+  if (config->checkin_interval_ms < SDF_POWER_CHECKIN_INTERVAL_MIN_MS ||
+      config->checkin_interval_ms > SDF_POWER_CHECKIN_INTERVAL_MAX_MS) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock != NULL &&
+      xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
+          pdTRUE) {
+    s_state.enabled_sources = config->enabled_sources;
+    s_state.finger_wake_debounce_ms = config->finger_wake_debounce_ms;
+    s_state.enable_ble_wake = config->enable_ble_wake;
+    s_state.enable_zigbee_wake = config->enable_zigbee_wake;
+    s_state.deep_sleep_min_duration_ms = config->deep_sleep_min_duration_ms;
+    xSemaphoreGive(s_state.lock);
+  }
+
+  return ESP_OK;
+}
+
+esp_err_t sdf_power_get_wake_config(sdf_power_wake_config_t *config) {
+  if (config == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock != NULL &&
+      xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
+          pdTRUE) {
+    config->enabled_sources = s_state.enabled_sources;
+    config->checkin_interval_ms = s_state.config.checkin_interval_ms;
+    config->finger_wake_debounce_ms = s_state.finger_wake_debounce_ms;
+    config->enable_ble_wake = s_state.enable_ble_wake;
+    config->enable_zigbee_wake = s_state.enable_zigbee_wake;
+    config->deep_sleep_min_duration_ms = s_state.deep_sleep_min_duration_ms;
+    xSemaphoreGive(s_state.lock);
+    return ESP_OK;
+  }
+
+  return ESP_FAIL;
+}
+
+static uint16_t sdf_power_crc16(const void *data, size_t len) {
+  uint16_t crc = 0xFFFF;
+  const uint8_t *p = (const uint8_t *)data;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= p[i] << 8;
+    for (int j = 0; j < 8; j++) {
+      crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : (crc << 1);
+    }
+  }
+  return crc;
+}
+
+esp_err_t sdf_power_save_retention(const sdf_power_retention_t *state) {
+  if (state == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  sdf_power_retention_t save_state = *state;
+  save_state.magic = 0x5FDEC3A1;
+  save_state.crc16 = sdf_power_crc16(&save_state, sizeof(sdf_power_retention_t) - sizeof(save_state.crc16));
+
+  return sdf_platform_sleep_retention_write(&save_state, sizeof(sdf_power_retention_t));
+}
+
+esp_err_t sdf_power_load_retention(sdf_power_retention_t *state) {
+  if (state == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t err = sdf_platform_sleep_retention_read(state, sizeof(sdf_power_retention_t));
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint16_t expected_crc = sdf_power_crc16(state, sizeof(sdf_power_retention_t) - sizeof(state->crc16));
+  if (state->magic != 0x5FDEC3A1 || state->crc16 != expected_crc) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  return ESP_OK;
+}
+
+bool sdf_power_retention_valid(void) {
+  return sdf_platform_sleep_retention_valid();
+}
+
+esp_err_t sdf_power_prepare_deep_sleep(sdf_power_retention_t *state) {
+  if (state == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Populate retention state
+  state->magic = 0x5FDEC3A1;
+  state->last_activity_us = s_state.last_activity_us;
+  state->next_checkin_us = esp_timer_get_time() + ((int64_t)s_state.config.checkin_interval_ms * 1000LL);
+  state->ble_transport_state = 0;  // Would need to get from BLE module
+  state->zigbee_join_state = 0;    // Would need to get from Zigbee module
+  state->sensor_power_state = 0;   // Would need to get from sensor driver
+  state->enrolled_user_count = 0;  // Would need to get from enrollment module
+  state->failed_attempts = 0;      // Would need to get from security module
+
+  state->crc16 = sdf_power_crc16(state, sizeof(sdf_power_retention_t) - sizeof(state->crc16));
+
+  return sdf_platform_sleep_retention_write(state, sizeof(sdf_power_retention_t));
+}
+
+esp_err_t sdf_power_resume_from_deep_sleep(sdf_wake_source_t *src) {
+  if (src == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  // Determine wake source
+  if (sdf_platform_sleep_wakeup_from_timer()) {
+    *src = SDF_WAKE_SRC_TIMER;
+  } else if (sdf_platform_sleep_wakeup_from_gpio(NULL)) {
+    *src = SDF_WAKE_SRC_FINGERPRINT_GPIO;
+  } else if (sdf_platform_sleep_wakeup_from_usb()) {
+    *src = SDF_WAKE_SRC_USB;
+  } else {
+    *src = SDF_WAKE_SRC_TIMER;
+  }
+
+  // Emit wake event with source info
+  sdf_event_router_event_t evt = {
+      .type = SDF_EVENT_ROUTER_POWER_WAKE,
+      .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .payload.power.remaining_ms = 0,  // Would carry source info
+  };
+  sdf_event_router_emit(&evt);
+
+  return ESP_OK;
+}
+
+uint32_t sdf_power_calculate_checkin_interval(void) {
+  uint8_t battery = sdf_power_get_battery_percent();
+  uint32_t base = s_state.config.checkin_interval_ms;
+
+  if (battery < 20) return base * 4;      // 60s - critical
+  if (battery < 40) return base * 2;      // 30s - low
+  if (battery < 60) return (base * 3) / 2; // 22s - medium
+  return base;                             // 15s - normal
 }

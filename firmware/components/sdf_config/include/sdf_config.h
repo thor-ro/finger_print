@@ -56,6 +56,10 @@ typedef struct {
     bool enable_light_sleep;
     bool enable_ble_radio_gating;
     bool enable_deep_sleep_fallback;
+    bool enable_deep_sleep;
+    uint32_t retention_size;
+    bool adaptive_checkin;
+    bool staged_wake;
 
     /* Zigbee */
     bool zigbee_enabled;

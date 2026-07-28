@@ -24,13 +24,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
-#include "sdf_event_router.h"
-
-#define SDF_SERVICES_TASK_NAME "sdf_fp"
-#define SDF_SERVICES_TASK_STACK 4096
-#define SDF_SERVICES_TASK_PRIORITY 5
-
-/* New task configuration */
+/* Task configuration constants */
 #define SDF_MATCH_TASK_NAME "sdf_match"
 #define SDF_MATCH_TASK_STACK 4096
 #define SDF_MATCH_TASK_PRIORITY 6
@@ -700,176 +694,12 @@ static void sdf_services_run_admin_auth_cycle(void) {
     return;
   }
 
-  ESP_LOGI(TAG, "Admin Auth Match: user_id=%u, permission=%u",
+ESP_LOGI(TAG, "Admin Auth Match: user_id=%u, permission=%u",
            (unsigned)match.user_id, (unsigned)match.permission);
   sdf_services_try_claim_admin_action(&match);
 }
 
-static void sdf_services_task(void *arg) {
-  (void)arg;
-  bool is_powered = true;
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_add(NULL);
-#endif
-
-  // Wait for the initialization to complete before querying users
-  while (!sdf_services_is_ready()) {
-    vTaskDelay(pdMS_TO_TICKS(10));
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
-  }
-
-  // Reset watchdog before boot query – the fingerprint sensor query can take
-  // up to 12 s when the sensor is unresponsive (UART read timeout).  Without
-  // this reset the accumulated time from init spin-wait + query can exceed
-  // the 15 s TWDT limit and cause a SW_CPU reset.
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_reset();
-#endif
-
-  // Fast connectivity check – retries with increasing power-settle delays.
-  // If the sensor never responds, skip the slow user query entirely.
-  esp_err_t probe_err = fp_probe();
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_reset();
-#endif
-
-  // Check unclaimed state on boot and breathe white LED if true
-  uint16_t users[1];
-  uint8_t perms[1];
-  size_t count = 0;
-  esp_err_t query_err = ESP_FAIL;
-  if (probe_err == ESP_OK) {
-    query_err = sdf_services_query_users(users, perms, &count, 1);
-  } else {
-    ESP_LOGW(TAG, "Skipping user query – sensor probe failed");
-  }
-  
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-    s_state.enrolled_user_count = count;
-    xSemaphoreGive(s_state.lock);
-  }
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_reset();
-#endif
-
-  if (query_err == ESP_OK && count > 0) {
-    led_off();
-    ESP_LOGI(TAG, "===============================================");
-    ESP_LOGI(TAG, "DEVICE STATE: CLAIMED (%zu enrolled users)", count);
-    ESP_LOGI(TAG, "===============================================");
-    ESP_LOGI(TAG, "AVAILABLE CONFIGURATION ACTIONS:");
-    ESP_LOGI(TAG, " -> Short press: Enroll a new standard user.");
-    ESP_LOGI(TAG, " -> Triple press: Enroll a new admin user.");
-    ESP_LOGI(TAG, " -> Double press: Pair to Nuki Smart Lock (Phase 2).");
-    ESP_LOGI(TAG, " -> Hold 3 sec: Join Zigbee Network (Phase 3).");
-    ESP_LOGI(TAG, " -> Hold 8 sec: Factory Reset.");
-    ESP_LOGI(TAG, "(All actions require your Admin fingerprint validation!)");
-    ESP_LOGI(TAG, "===============================================");
-  } else {
-    if (query_err != ESP_OK) {
-      ESP_LOGW(TAG, "Failed to query fingerprint sensor on boot. Error code: %d", query_err);
-      ESP_LOGW(TAG, "(Assuming UNCLAIMED state for setup purposes)");
-    }
-    
-    ESP_LOGI(TAG, "===============================================");
-    ESP_LOGI(TAG, "DEVICE STATE: UNCLAIMED (0 enrolled users)");
-    ESP_LOGI(TAG, "===============================================");
-    ESP_LOGI(TAG, "NEXT STEP (PHASE 1):");
-    ESP_LOGI(TAG, " -> Short press Configuration Button once to begin Admin Enrollment.");
-    ESP_LOGI(TAG, " -> Place finger 3 times. LED flashes green after each scan.");
-    ESP_LOGI(TAG, " -> LED breathes WHITE until the button is pressed.");
-    ESP_LOGI(TAG, "===============================================");
-
-    led_breathe_white();
-  }
-
-  while (true) {
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
-    uint32_t poll_interval_ms = SDF_SERVICES_DEFAULT_MATCH_POLL_MS;
-    int64_t now_us = esp_timer_get_time();
-    bool is_pending_admin_action = false;
-    sdf_services_admin_action_t timed_out_action =
-        SDF_SERVICES_ADMIN_ACTION_NONE;
-
-    if (xSemaphoreTake(s_state.lock,
-                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-      poll_interval_ms = s_state.config.match_poll_interval_ms;
-
-      // Check for config button timeout
-      if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE &&
-          s_state.pending_admin_action_start_us > 0) {
-        if ((now_us - s_state.pending_admin_action_start_us) >
-            ((int64_t)SDF_SERVICES_ADMIN_ACTION_TIMEOUT_MS * 1000LL)) {
-          ESP_LOGW(TAG, "Admin Action Timeout. Resetting state.");
-          timed_out_action = s_state.pending_admin_action;
-          s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-          s_state.pending_admin_action_start_us = 0;
-        }
-      }
-
-      is_pending_admin_action =
-          (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE);
-      xSemaphoreGive(s_state.lock);
-    }
-
-    if (timed_out_action != SDF_SERVICES_ADMIN_ACTION_NONE) {
-      led_flash_red();
-      if (timed_out_action == SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION) {
-        sdf_services_complete_permission_change(ESP_ERR_TIMEOUT);
-      }
-    }
-
-    sdf_services_start_pending_enrollment_if_any();
-
-    if (is_pending_admin_action) {
-      sdf_services_run_admin_auth_cycle();
-    } else {
-      sdf_services_run_enrollment_step();
-      sdf_services_run_match_cycle();
-    }
-
-    bool should_block = false;
-    if (xSemaphoreTake(s_state.lock,
-                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-      int64_t now_us = esp_timer_get_time();
-      should_block = !sdf_enrollment_sm_is_active(&s_state.enrollment) &&
-                     !s_state.enrollment_request_pending &&
-                     (s_state.match_cooldown_until_us == 0 || now_us >= s_state.match_cooldown_until_us) &&
-                     (s_state.lockout_until_us == 0 || now_us >= s_state.lockout_until_us);
-      xSemaphoreGive(s_state.lock);
-    }
-
-    if (should_block && s_state.config.wake_gpio >= 0) {
-      if (is_powered) {
-        led_off();
-        fp_set_power(false);
-        is_powered = false;
-      }
-#ifndef CONFIG_IDF_TARGET_LINUX
-      esp_task_wdt_delete(NULL);
-#endif
-      xSemaphoreTake(s_state.wake_sem, portMAX_DELAY);
-#ifndef CONFIG_IDF_TARGET_LINUX
-      esp_task_wdt_add(NULL);
-#endif
-      if (!is_powered) {
-        fp_set_power(true);
-        is_powered = true;
-        vTaskDelay(
-            pdMS_TO_TICKS(200)); /* Boot delay for FP sensor after power up */
-      }
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
-    }
-  }
-}
+/* Legacy task removed - boot init now handled by sdf_match_task, enrollment by sdf_enroll_task */
 
 void sdf_services_get_default_config(sdf_services_config_t *config) {
   const sdf_config_t *sdf_cfg = sdf_config_get();

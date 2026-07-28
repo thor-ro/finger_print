@@ -82,4 +82,57 @@ config SDF_POWER_ENABLE_BLE_RADIO_GATING
     help
         Temporarily disables BLE scanning/connection while sleeping.
 
+menu "SDF Power Manager - Deep Sleep"
+
+config SDF_POWER_ENABLE_DEEP_SLEEP
+    bool "Enable deep sleep (vs light sleep only)"
+    default y
+    help
+        Enable deep sleep with configurable wake sources and retention memory.
+
+config SDF_POWER_WAKE_SOURCE_TIMER
+    bool "Timer wake source (Zigbee check-in)"
+    default y
+    help
+        Enable timer-based wake for Zigbee check-in.
+
+config SDF_POWER_WAKE_SOURCE_FINGERPRINT
+    bool "Fingerprint GPIO wake source"
+    default y
+    help
+        Enable fingerprint sensor WAKE pin as deep sleep wake source.
+
+config SDF_POWER_WAKE_SOURCE_USB
+    bool "USB connection wake source"
+    default y
+    help
+        Enable USB connection as wake source.
+
+config SDF_POWER_WAKE_SOURCE_BLE
+    bool "BLE activity wake source (experimental)"
+    default n
+    help
+        Enable BLE activity as wake source.
+
+config SDF_POWER_RETENTION_SIZE
+    int "RTC retention memory size (bytes)"
+    range 64 4096
+    default 256
+    help
+        Size of RTC slow memory reserved for retention state.
+
+config SDF_POWER_ADAPTIVE_CHECKIN
+    bool "Adaptive check-in interval based on battery"
+    default y
+    help
+        Adjust check-in interval based on battery level.
+
+config SDF_POWER_STAGED_WAKE
+    bool "Enable staged wake sequence"
+    default y
+    help
+        Enable staged wake: critical -> fast path (BLE) -> full path (Zigbee).
+
+endmenu
+
 endmenu

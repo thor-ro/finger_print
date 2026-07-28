@@ -4,6 +4,7 @@
 #include "sdkconfig.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_sleep.h"
@@ -14,13 +15,34 @@
 
 #include "esp_err.h"
 
+typedef enum {
+    SDF_WAKE_SRC_TIMER = 0x01,
+    SDF_WAKE_SRC_FINGERPRINT_GPIO = 0x02,
+    SDF_WAKE_SRC_USB = 0x04,
+    SDF_WAKE_SRC_BLE_ACTIVITY = 0x08,
+    SDF_WAKE_SRC_ZIGBEE_RX = 0x10,
+    SDF_WAKE_SRC_BUTTON = 0x20,
+} sdf_wake_source_t;
+
+typedef struct {
+    uint32_t magic;
+    uint8_t ble_transport_state;
+    uint8_t zigbee_join_state;
+    uint8_t sensor_power_state;
+    uint8_t enrolled_user_count;
+    uint32_t failed_attempts;
+    int64_t last_activity_us;
+    int64_t next_checkin_us;
+    uint16_t crc16;
+} sdf_power_retention_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /**
- * @brief Wakeup reason classification.
- */
+  * @brief Wakeup reason classification.
+  */
 typedef enum {
     SDF_PLATFORM_WAKE_REASON_NONE = 0,
     SDF_PLATFORM_WAKE_REASON_TIMER = 1,
@@ -96,12 +118,59 @@ esp_err_t sdf_platform_sleep_deep(void);
 uint64_t sdf_platform_sleep_get_sleep_duration_us(void);
 
 /**
- * @brief Check if deep sleep wakeup was caused by GPIO.
- *
- * @param gpio_num Pointer to store GPIO number (can be NULL).
- * @return true if wakeup was from GPIO.
- */
+  * @brief Check if deep sleep wakeup was caused by GPIO.
+  *
+  * @param gpio_num Pointer to store GPIO number (can be NULL).
+  * @return true if wakeup was from GPIO.
+  */
 bool sdf_platform_sleep_wakeup_from_gpio(gpio_num_t *gpio_num);
+
+/**
+  * @brief Check if deep sleep wakeup was caused by timer.
+  *
+  * @return true if wakeup was from timer.
+  */
+bool sdf_platform_sleep_wakeup_from_timer(void);
+
+/**
+  * @brief Check if wakeup was caused by USB connection.
+  *
+  * @return true if wakeup was from USB.
+  */
+bool sdf_platform_sleep_wakeup_from_usb(void);
+
+/**
+  * @brief Configure wake sources for deep sleep.
+  *
+  * @param sources Bitmask of wake sources (see sdf_wake_source_t).
+  * @return ESP_OK on success.
+  */
+esp_err_t sdf_platform_sleep_configure_wake_sources(uint32_t sources);
+
+/**
+  * @brief Write to RTC retention memory.
+  *
+  * @param data Data to write.
+  * @param len Length of data (max CONFIG_SDF_POWER_RETENTION_SIZE).
+  * @return ESP_OK on success.
+  */
+esp_err_t sdf_platform_sleep_retention_write(const void *data, size_t len);
+
+/**
+  * @brief Read from RTC retention memory.
+  *
+  * @param data Buffer to store read data.
+  * @param len Length of data (max CONFIG_SDF_POWER_RETENTION_SIZE).
+  * @return ESP_OK on success.
+  */
+esp_err_t sdf_platform_sleep_retention_read(void *data, size_t len);
+
+/**
+  * @brief Validate retention memory has correct magic.
+  *
+  * @return true if retention memory is valid.
+  */
+bool sdf_platform_sleep_retention_valid(void);
 
 #ifdef __cplusplus
 }

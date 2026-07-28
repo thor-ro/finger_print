@@ -18,11 +18,22 @@
 typedef struct sdf_nuki_ble_transport_t sdf_nuki_ble_transport_t;
 #endif
 
+#include "sdf_platform_sleep.h"
+
+typedef struct {
+    uint32_t enabled_sources;
+    uint32_t checkin_interval_ms;
+    uint32_t finger_wake_debounce_ms;
+    bool enable_ble_wake;
+    bool enable_zigbee_wake;
+    uint32_t deep_sleep_min_duration_ms;
+} sdf_power_wake_config_t;
+
 typedef enum {
-  SDF_POWER_WAKE_REASON_NONE = 0,
-  SDF_POWER_WAKE_REASON_TIMER = 1,
-  SDF_POWER_WAKE_REASON_FINGERPRINT = 2,
-  SDF_POWER_WAKE_REASON_OTHER = 3,
+   SDF_POWER_WAKE_REASON_NONE = 0,
+   SDF_POWER_WAKE_REASON_TIMER = 1,
+   SDF_POWER_WAKE_REASON_FINGERPRINT = 2,
+   SDF_POWER_WAKE_REASON_OTHER = 3,
 } sdf_power_wake_reason_t;
 
 typedef bool (*sdf_power_busy_cb)(void *ctx);
@@ -62,5 +73,17 @@ uint32_t sdf_power_get_checkin_interval_ms(void);
 
 esp_err_t sdf_power_set_battery_percent(uint8_t battery_percent);
 uint8_t sdf_power_get_battery_percent(void);
+
+esp_err_t sdf_power_set_wake_config(const sdf_power_wake_config_t *config);
+esp_err_t sdf_power_get_wake_config(sdf_power_wake_config_t *config);
+
+esp_err_t sdf_power_save_retention(const sdf_power_retention_t *state);
+esp_err_t sdf_power_load_retention(sdf_power_retention_t *state);
+bool sdf_power_retention_valid(void);
+
+esp_err_t sdf_power_prepare_deep_sleep(sdf_power_retention_t *state);
+esp_err_t sdf_power_resume_from_deep_sleep(sdf_wake_source_t *src);
+
+uint32_t sdf_power_calculate_checkin_interval(void);
 
 #endif /* SDF_POWER_H */

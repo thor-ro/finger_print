@@ -61,6 +61,10 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     config->enable_light_sleep = CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP;
     config->enable_ble_radio_gating = CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING;
     config->enable_deep_sleep_fallback = true;
+    config->enable_deep_sleep = CONFIG_SDF_POWER_ENABLE_DEEP_SLEEP;
+    config->retention_size = CONFIG_SDF_POWER_RETENTION_SIZE;
+    config->adaptive_checkin = CONFIG_SDF_POWER_ADAPTIVE_CHECKIN;
+    config->staged_wake = CONFIG_SDF_POWER_STAGED_WAKE;
 
     /* Zigbee */
 #if defined(CONFIG_SDF_ZIGBEE_ENABLE)
