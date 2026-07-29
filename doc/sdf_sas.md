@@ -219,7 +219,7 @@ common <-- evt
 | **sdf_drivers** | Hardware abstraction: fingerprint UART (19200 baud, command framing, checksum), WS2812 LED ring (color animations), battery ADC |
 | **sdf_state_machines** | Pure logic enrollment state machine (self-contained retry policy): IDLE → STEP_1 → STEP_2 → STEP_3 → SUCCESS/ERROR; exposes `next_action` API for executor |
 | **sdf_storage** | NVS persistence: Nuki credentials, BLE target address, NVS security verification |
-| **sdf_power_policy** | Portable sleep/wake policy: evaluates sleep conditions, manages wake guard timing, battery report scheduling, policy callbacks (busy, wake, battery, zigbee_ready) |
+| **sdf_power_policy** | Portable sleep/wake policy: evaluates sleep conditions, manages wake guard timing, battery report scheduling, policy callbacks (busy, wake, battery, zigbee_ready); uses real-time timestamps via `esp_timer_get_time()` instead of mock values |
 | **sdf_platform_power** | Platform-specific sleep mechanisms: ESP-IDF light/deep sleep entry, GPIO wake configuration, timer wake setup, BLE radio gating, RTC retention memory |
 | **sdf_common** | Shared types: lock action enums, keyturner state, event/audit structs, error codes |
 | **sdf_cli** | Debug CLI for interactive testing and diagnostics |
@@ -592,7 +592,7 @@ Power management is split into two components for separation of concerns:
 
 | Component | Responsibility |
 |---|---|
-| **sdf_power_policy** | Sleep/wake decisions, wake guard timing, battery report scheduling, policy callbacks |
+| **sdf_power_policy** | Sleep/wake decisions, wake guard timing, battery report scheduling, policy callbacks; uses real-time timestamps via `esp_timer_get_time()` (previously used mock `1000000000` values) |
 | **sdf_platform_power** | ESP-IDF sleep entry, GPIO wake configuration, timer wake setup, BLE radio gating, RTC retention |
 
 | Parameter | Default | Config Key |

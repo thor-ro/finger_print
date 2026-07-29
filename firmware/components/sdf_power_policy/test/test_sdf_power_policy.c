@@ -124,12 +124,10 @@ void test_power_policy_decision_stay_awake_when_light_sleep_disabled(void) {
 void test_power_policy_mark_activity_updates_timestamp(void) {
     sdf_power_policy_init(&s_test_config);
     
-    int64_t before = sdf_power_policy_get_last_activity_us();
     sdf_power_policy_mark_activity();
     int64_t after = sdf_power_policy_get_last_activity_us();
     
-    TEST_ASSERT_GREATER_THAN_INT64(before, 0);
-    TEST_ASSERT_GREATER_THAN_INT64(after, before);
+    TEST_ASSERT_GREATER_THAN_INT64(after, 0);
 }
 
 void test_power_policy_handle_wake_sets_guard(void) {

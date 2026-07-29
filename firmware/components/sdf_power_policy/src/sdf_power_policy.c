@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <stdint.h>
+#include <esp_timer.h>
 
 #define SDF_POWER_POLICY_LOCK_WAIT_MS 250u
 
@@ -22,10 +23,9 @@ void sdf_power_policy_init(const sdf_power_policy_config_t *config) {
     }
     s_state.config = *config;
     s_state.initialized = true;
-    s_state.last_activity_us = 1000000000;  /* Mock time */
-    s_state.wake_guard_until_us = s_state.last_activity_us + 
-        ((int64_t)config->post_wake_guard_ms * 1000LL);
-    s_state.next_battery_report_us = s_state.last_activity_us;
+    s_state.last_activity_us = 0;
+    s_state.wake_guard_until_us = 0;
+    s_state.next_battery_report_us = 0;
 }
 
 sdf_power_policy_decision_t sdf_power_policy_evaluate(int64_t now_us, int64_t last_activity_us,
@@ -77,7 +77,7 @@ sdf_power_policy_decision_t sdf_power_policy_evaluate(int64_t now_us, int64_t la
 }
 
 void sdf_power_policy_mark_activity(void) {
-    s_state.last_activity_us = 1000000000;  /* Mock time */
+    s_state.last_activity_us = esp_timer_get_time();
 }
 
 uint8_t sdf_power_policy_get_battery_percent(void) {
@@ -87,11 +87,11 @@ uint8_t sdf_power_policy_get_battery_percent(void) {
 void sdf_power_policy_handle_wake(sdf_power_policy_wake_reason_t reason) {
     (void)reason;
     /* Update wake guard */
-    s_state.wake_guard_until_us = 1000000000 + 
+    s_state.wake_guard_until_us = esp_timer_get_time() + 
         ((int64_t)s_state.config.post_wake_guard_ms * 1000LL);
     
     /* Update last activity */
-    s_state.last_activity_us = 1000000000;
+    s_state.last_activity_us = esp_timer_get_time();
     
     /* Invoke callback */
     if (s_state.config.wake_cb != NULL) {
@@ -99,7 +99,7 @@ void sdf_power_policy_handle_wake(sdf_power_policy_wake_reason_t reason) {
     }
     
     /* Schedule next battery report */
-    s_state.next_battery_report_us = 1000000000 + 
+    s_state.next_battery_report_us = esp_timer_get_time() + 
         ((int64_t)s_state.config.battery_report_interval_ms * 1000LL);
 }
 
