@@ -2,6 +2,18 @@
 
 This file tracks firmware-level changes and maps them to project versions.
 
+## 0.2.1 — 2026-07-29
+
+### Changed
+- Updated GPIO pin assignments to match revised hardware wiring (doc/wiring.md):
+  - FP TX (UART TX to sensor): GPIO 0 (was GPIO 4)
+  - FP RX (UART RX from sensor): GPIO 1 (was GPIO 5)
+  - Battery ADC: GPIO 5 (was GPIO 0)
+  - Enrollment/Local Button: GPIO 4 (was GPIO 14)
+- `sdkconfig.defaults`: `CONFIG_SDF_ENROLLMENT_BTN_GPIO` updated from 14 to 4.
+- `sdf_power/Kconfig`: `SDF_ENROLLMENT_BTN_GPIO` default updated from 14 to 4.
+- `sdf_services.c`: UART default constants updated to match new wiring.
+
 ## 0.2.0 — 2026-07-23
 
 ### Added

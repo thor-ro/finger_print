@@ -7,19 +7,19 @@ The following table describes the wiring of the Waveshare ESP32-C6 mini module t
 | 5V           | 5V           |                  | 5V Power Input                                  |
 | GND          | GND          | Fingerprint GND  | Ground                                          |
 | 3.3V         | 3.3V         | Fingerprint 3.3V | 3.3V Power (Output)                             |
-| 0            | GPIO0        | Battery ADC      | Voltage divider (1MΩ / 1MΩ) for battery reading |
-| 1            | GPIO1        |                  |                                                 |
+| 0            | GPIO0        | Fingerprint RX   | UART TX (Data to sensor)                        |
+| 1            | GPIO1        | Fingerprint TX   | UART RX (Data from sensor)                      |
 | 2            | GPIO2        | Fingerprint EN   | Power Enable / High = Active, Low = Sleep       |
 | 3            | GPIO3        | Fingerprint Wake | Capacitive touch wake signal                    |
-| 4            | GPIO4        | Fingerprint RX   | UART TX (Data to sensor)                        |
-| 5            | GPIO5        | Fingerprint TX   | UART RX (Data from sensor)                      |
+| 4            | GPIO4        | Push Button      | Local Enrollment Button (Active Low)            |
+| 5            | GPIO5        | Battery ADC      | Voltage divider (1MΩ / 1MΩ) for battery reading |
 | 6            | GPIO6        |                  |                                                 |
 | 7            | GPIO7        |                  |                                                 |
 | 8            | GPIO8        |                  | WS2812 RGB LED (onboard)                        |
 | 9            | GPIO9        |                  |                                                 |
 | 12           | GPIO12       |                  |                                                 |
 | 13           | GPIO13       |                  |                                                 |
-| 14           | GPIO14       | Push Button      | Local Enrollment Button (Active Low)            |
+| 14           | GPIO14       |                  |                                                 |
 | 15           | GPIO15       |                  |                                                 |
 | 18           | GPIO18       |                  |                                                 |
 | 19           | GPIO19       |                  |                                                 |
@@ -51,3 +51,4 @@ The push button (used for local enrollment, network joining, etc.) is an Active 
 
 *   **Internal Pull-up:** The firmware configures GPIO 14 with the ESP32's internal pull-up resistor enabled. This keeps the pin securely HIGH (3.3V) when the button is not pressed.
 *   **External Pull-up (Optional):** If you are using long wires to connect the button (e.g., routing it to the outside of an enclosure), the wire can act as an antenna and pick up electromagnetic noise. In such cases, adding an external **10kΩ pull-up resistor** between GPIO 14 and the 3.3V pin is recommended to prevent false button presses.
+

@@ -26,8 +26,8 @@ void sdf_config_get_defaults(sdf_config_t *config) {
 
     /* Fingerprint sensor */
     config->fp_uart_port = 1;
-    config->fp_tx_pin = 4;
-    config->fp_rx_pin = 5;
+    config->fp_tx_pin = 0;
+    config->fp_rx_pin = 1;
     config->fp_power_en_pin = CONFIG_SDF_POWER_FP_EN_GPIO;
     config->fp_baud_rate = 19200;
     config->fp_response_timeout_ms = 12000;
@@ -47,7 +47,7 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     config->ws2812_led_gpio = CONFIG_SDF_WS2812_LED_GPIO;
 
     /* Battery / ADC */
-    config->battery_adc_pin = 0;
+    config->battery_adc_pin = 5;
 
     /* Power Management */
     config->checkin_interval_ms = CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS;

@@ -110,7 +110,7 @@ hw --> fw : Match/Enroll results
 |---|---|---|
 | Zigbee 802.15.4 | ZHA Door Lock Cluster 0x0101 | Lock/Unlock commands → internal events; attributes → reports |
 | BLE (NimBLE) | Nuki Smart Lock protocol | Encrypted 0x000D Lock Action; challenge-response pairing |
-| UART (GPIO 4/5) | Proprietary fingerprint protocol | 1:N match, 3-step enrollment, user query, LED control |
+| UART (GPIO 0/1) | Proprietary fingerprint protocol | 1:N match, 3-step enrollment, user query, LED control |
 | GPIO 3 (WAKE) | Interrupt on touch | Wake from deep sleep on fingerprint touch |
 | GPIO 2 (EN) | Power gate | Enable/disable fingerprint sensor power |
 | GPIO 8 (WS2812) | LED ring | Status feedback: color, pulse, breathing patterns |
@@ -539,11 +539,11 @@ rectangle "External Hardware" {
   rectangle "Battery\n(3.7V LiPo)" as bat
 }
 
-mcu --> fps : UART1\n(GPIO 4 TX, 5 RX)\nGPIO 3 (WAKE)\nGPIO 2 (EN)
+mcu --> fps : UART1\n(GPIO 0 TX, 1 RX)\nGPIO 3 (WAKE)\nGPIO 2 (EN)
 mcu --> led : GPIO 8\n(WS2812 data)
 mcu --> nuki : BLE 2.4 GHz\n(NimBLE Central)
 mcu --> zc : Zigbee 802.15.4\n(ZHA End Device)
-mcu --> bat : ADC GPIO 0\n(voltage divider)
+mcu --> bat : ADC GPIO 5\n(voltage divider)
 @enduml
 ```
 

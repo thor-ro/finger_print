@@ -59,7 +59,7 @@ config SDF_POWER_FP_EN_GPIO
 config SDF_ENROLLMENT_BTN_GPIO
     int "Enrollment Button GPIO"
     range -1 30
-    default 14
+    default 4
     help
         GPIO used for the local hardware enrollment button. Set to -1 to disable.
 
