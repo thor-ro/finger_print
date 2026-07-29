@@ -25,18 +25,18 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     memset(config, 0, sizeof(*config));
 
     /* Fingerprint sensor */
-    config->fp_uart_port = 1;
-    config->fp_tx_pin = 0;
-    config->fp_rx_pin = 1;
+    config->fp_uart_port = CONFIG_SDF_FP_UART_PORT;
+    config->fp_tx_pin = CONFIG_SDF_FP_TX_PIN;
+    config->fp_rx_pin = CONFIG_SDF_FP_RX_PIN;
     config->fp_power_en_pin = CONFIG_SDF_POWER_FP_EN_GPIO;
-    config->fp_baud_rate = 19200;
-    config->fp_response_timeout_ms = 12000;
-    config->fp_rx_buffer_size = 256;
-    config->fp_tx_buffer_size = 256;
+    config->fp_baud_rate = CONFIG_SDF_FP_BAUD_RATE;
+    config->fp_response_timeout_ms = CONFIG_SDF_FP_RESPONSE_TIMEOUT_MS;
+    config->fp_rx_buffer_size = CONFIG_SDF_FP_RX_BUFFER_SIZE;
+    config->fp_tx_buffer_size = CONFIG_SDF_FP_TX_BUFFER_SIZE;
 
     /* Fingerprint matching */
-    config->match_poll_interval_ms = 400;
-    config->match_cooldown_ms = 3000;
+    config->match_poll_interval_ms = CONFIG_SDF_MATCH_POLL_INTERVAL_MS;
+    config->match_cooldown_ms = CONFIG_SDF_MATCH_COOLDOWN_MS;
 
     /* Security / Biometric */
     config->failed_attempt_threshold = CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_THRESHOLD;
@@ -47,7 +47,7 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     config->ws2812_led_gpio = CONFIG_SDF_WS2812_LED_GPIO;
 
     /* Battery / ADC */
-    config->battery_adc_pin = 5;
+    config->battery_adc_pin = CONFIG_SDF_BATTERY_ADC_PIN;
 
     /* Power Management */
     config->checkin_interval_ms = CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS;
@@ -92,6 +92,9 @@ void sdf_config_get_defaults(sdf_config_t *config) {
 
     /* Enrollment button */
     config->enrollment_btn_gpio = CONFIG_SDF_ENROLLMENT_BTN_GPIO;
+
+    /* Event Router */
+    config->event_router_queue_depth = CONFIG_SDF_EVENT_ROUTER_QUEUE_DEPTH;
 }
 
 esp_err_t sdf_config_init(void) {
@@ -213,6 +216,12 @@ esp_err_t sdf_config_validate(const sdf_config_t *config) {
         valid = false;
     }
 
+    /* Event Router */
+    if (config->event_router_queue_depth < 8 || config->event_router_queue_depth > 64) {
+        ESP_LOGE(TAG, "event_router_queue_depth out of range: %lu", config->event_router_queue_depth);
+        valid = false;
+    }
+
     return valid ? ESP_OK : ESP_ERR_INVALID_ARG;
 }
 
@@ -248,6 +257,7 @@ void sdf_config_dump(const sdf_config_t *config, const char *tag) {
              config->nuki_target_addr[4], config->nuki_target_addr[5],
              config->ble_connect_on_demand);
     ESP_LOGI(tag, "Button: enrollment=%d", config->enrollment_btn_gpio);
+    ESP_LOGI(tag, "Event Router: queue_depth=%u", config->event_router_queue_depth);
     ESP_LOGI(tag, "WDT: timeout=%ums", config->wdt_timeout_ms);
     ESP_LOGI(tag, "==========================");
 }

@@ -7,6 +7,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
+#include "sdf_config.h"
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_check.h"
@@ -870,9 +871,9 @@ static void sdf_zigbee_task(void *arg) {
 
 #if CONFIG_SDF_ZIGBEE_SLEEP_ENABLE
   esp_zb_sleep_enable(true);
-  esp_zb_sleep_set_threshold(CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS);
-  ESP_LOGI(TAG, "Zigbee sleep enabled (threshold=%d ms)",
-           CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS);
+    esp_zb_sleep_set_threshold(sdf_config_get()->zigbee_sleep_threshold_ms);
+    ESP_LOGI(TAG, "Zigbee sleep enabled (threshold=%d ms)",
+             sdf_config_get()->zigbee_sleep_threshold_ms);
 #endif
 
   esp_err_t err = esp_zb_start(false);

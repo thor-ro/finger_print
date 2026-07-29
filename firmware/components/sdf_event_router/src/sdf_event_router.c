@@ -1,5 +1,5 @@
 #include "sdf_event_router.h"
-#include "sdkconfig.h"
+#include "sdf_config.h"
 
 #include <string.h>
 
@@ -69,7 +69,7 @@ esp_err_t sdf_event_router_init(void)
         return ESP_ERR_NO_MEM;
     }
 
-    int queue_depth = CONFIG_SDF_EVENT_ROUTER_QUEUE_DEPTH;
+    uint32_t queue_depth = sdf_config_get()->event_router_queue_depth;
     s_state.queue = xQueueCreate(queue_depth, sizeof(sdf_event_router_event_t));
     if (s_state.queue == NULL) {
         vSemaphoreDelete(s_state.lock);

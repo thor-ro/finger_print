@@ -1,0 +1,2 @@
+## Config Consolidation (ADR-002)
+Consolidate all config into sdf_config/Kconfig instead of scattered per-component Kconfig files. Key principles: Kconfig is the build-time source of truth (GPIO/pin mappings, feature flags), sdf_config_t is the runtime access API. No more hardcoded GPIO/pin values in C source — all must have Kconfig entries. Components must go through sdf_config_get() at runtime, not CONFIG_SDF_* directly (except compile-time #if guards). ADR at doc/adr/consolidated_config.md. OpenSpec change: consolidate-config.

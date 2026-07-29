@@ -8,5 +8,5 @@ idf_component_register(
          "src/sdf_protocol_zigbee_mock_linux.c"
     INCLUDE_DIRS "include"
     REQUIRES sdf_common sdf_event_router
-    PRIV_REQUIRES ${zg_priv_reqs}
+    PRIV_REQUIRES ${zg_priv_reqs} sdf_config
 )

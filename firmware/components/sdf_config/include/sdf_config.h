@@ -74,6 +74,9 @@ typedef struct {
     uint8_t nonce_replay_window;
     bool require_encrypted_nvs;
 
+    /* Event Router */
+    uint32_t event_router_queue_depth;
+
     /* System */
     uint32_t wdt_timeout_ms;
 

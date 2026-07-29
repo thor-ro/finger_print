@@ -1,5 +1,5 @@
 #include "sdf_platform_sleep.h"
-#include "sdkconfig.h"
+#include "sdf_config.h"
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_sleep.h"
@@ -11,10 +11,6 @@
 #include "sdf_mock_linux_sleep.h"
 #endif
 
-#define SDF_POWER_RETENTION_MAGIC 0x5FDEC3A1
-#define SDF_POWER_RETENTION_SIZE CONFIG_SDF_POWER_RETENTION_SIZE
-#define SDF_POWER_DEFAULT_CHECKIN_INTERVAL_MS 15000
-
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "soc/rtc.h"
 #endif
@@ -22,6 +18,9 @@
 static uint8_t *s_retention_base = NULL;
 
 static const char *TAG = "sdf_platform_sleep";
+
+#define SDF_POWER_RETENTION_MAGIC 0x5FDEC3A1
+#define SDF_POWER_DEFAULT_CHECKIN_INTERVAL_MS 15000
 
 esp_err_t sdf_power_crc16_ccitt(const void *data, size_t len, uint16_t *crc) {
     uint16_t c = 0xFFFF;
@@ -163,7 +162,7 @@ esp_err_t sdf_platform_sleep_configure_wake_sources(uint32_t sources) {
 
 esp_err_t sdf_platform_sleep_retention_write(const void *data, size_t len) {
 #ifndef CONFIG_IDF_TARGET_LINUX
-    if (len > SDF_POWER_RETENTION_SIZE) {
+    if (len > sdf_config_get()->retention_size) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_retention_base == NULL) {
@@ -176,7 +175,7 @@ esp_err_t sdf_platform_sleep_retention_write(const void *data, size_t len) {
 
 esp_err_t sdf_platform_sleep_retention_read(void *data, size_t len) {
 #ifndef CONFIG_IDF_TARGET_LINUX
-    if (len > SDF_POWER_RETENTION_SIZE) {
+    if (len > sdf_config_get()->retention_size) {
         return ESP_ERR_INVALID_ARG;
     }
     if (s_retention_base == NULL) {
@@ -191,6 +190,9 @@ bool sdf_platform_sleep_retention_valid(void) {
 #ifndef CONFIG_IDF_TARGET_LINUX
     if (s_retention_base == NULL) {
         s_retention_base = (uint8_t*)SOC_RTC_DATA_LOW;
+    }
+    if (s_retention_base == NULL) {
+        return false;
     }
     sdf_power_retention_t *retention = (sdf_power_retention_t *)s_retention_base;
     return retention->magic == SDF_POWER_RETENTION_MAGIC;
