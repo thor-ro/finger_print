@@ -27,16 +27,16 @@ struct sdf_event_router_state {
     QueueHandle_t queue;
     TaskHandle_t task;
     bool initialized;
-    sdf_event_router_subscriber_t *subscribers;
+    sdf_event_router_subscriber_t *subscribers_by_type[SDF_EVENT_ROUTER_TYPE_COUNT];
     SemaphoreHandle_t lock;
 } s_state;
 
 static void sdf_event_router_dispatch_sync(const sdf_event_router_event_t *event)
 {
-    sdf_event_router_subscriber_t *sub = s_state.subscribers;
+    sdf_event_router_subscriber_t *sub = s_state.subscribers_by_type[event->type];
 
     while (sub != NULL) {
-        if (sub->type == event->type && sub->min_prio >= event->priority) {
+        if (sub->min_prio >= event->priority) {
             if (sub->cb != NULL) {
                 sub->cb(sub->ctx, event);
             }
@@ -61,6 +61,8 @@ esp_err_t sdf_event_router_init(void)
     if (s_state.initialized) {
         return ESP_OK;
     }
+
+    memset(&s_state, 0, sizeof(s_state));
 
     s_state.lock = xSemaphoreCreateMutex();
     if (s_state.lock == NULL) {
@@ -113,8 +115,8 @@ esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type,
     sub->next = NULL;
 
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_EVENT_ROUTER_LOCK_WAIT_MS)) == pdTRUE) {
-        sub->next = s_state.subscribers;
-        s_state.subscribers = sub;
+        sub->next = s_state.subscribers_by_type[sub->type];
+        s_state.subscribers_by_type[sub->type] = sub;
         xSemaphoreGive(s_state.lock);
     } else {
         free(sub);
@@ -133,12 +135,12 @@ esp_err_t sdf_event_router_unsubscribe(sdf_event_router_subscriber_t *handle)
 
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_EVENT_ROUTER_LOCK_WAIT_MS)) == pdTRUE) {
         sdf_event_router_subscriber_t *prev = NULL;
-        sdf_event_router_subscriber_t *sub = s_state.subscribers;
+        sdf_event_router_subscriber_t *sub = s_state.subscribers_by_type[handle->type];
 
         while (sub != NULL) {
             if (sub == handle) {
                 if (prev == NULL) {
-                    s_state.subscribers = sub->next;
+                    s_state.subscribers_by_type[handle->type] = sub->next;
                 } else {
                     prev->next = sub->next;
                 }
@@ -179,6 +181,11 @@ esp_err_t sdf_event_router_emit_async(const sdf_event_router_event_t *event)
 {
     if (event == NULL || !s_state.initialized) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (event->priority == SDF_EVENT_ROUTER_PRIO_CRITICAL) {
+        sdf_event_router_dispatch_sync(event);
+        return ESP_OK;
     }
 
     BaseType_t ok = xQueueSend(s_state.queue, event, pdMS_TO_TICKS(100));

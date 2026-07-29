@@ -63,6 +63,19 @@
 
 static const char *TAG = "sdf_services";
 
+/* 512-entry buffers for query_users() results.
+ * The fingerprint sensor supports up to 512 enrolled user templates
+ * (the sensor's hardware limit), even though user IDs can range
+ * up to SDF_FINGERPRINT_USER_ID_MAX (0x0FFF = 4095).  A full
+ * query returns at most 512 entries, so these buffers are sized
+ * accordingly.  Total: 512*2 + 512 + 512*2 + 512 = 3072 bytes.
+ *
+ * TODO: A compact representation (bitmap of 4095 user IDs + packed
+ * 2-bit permissions) could reduce user-ID storage by ~50%, but would
+ * require changes to fp_query_users() and the enrollment/permisson
+ * change APIs.  For the current enrollment count (typically < 50),
+ * the savings are small and the added lookup complexity is not worth
+ * the flash cost. */
 static uint16_t s_enrollment_user_buf[512];
 static uint8_t s_enrollment_perm_buf[512];
 static uint16_t s_perm_user_buf[512];
@@ -238,15 +251,24 @@ esp_err_t err = ESP_OK;
   esp_task_wdt_reset();
 #endif
   if (err == ESP_OK) {
-    for (uint16_t id = 1; id <= SDF_FINGERPRINT_USER_ID_MAX; id++) {
-      bool in_use = false;
-      for (size_t i = 0; i < count; i++) {
-        if (s_enrollment_user_buf[i] == id) {
-          in_use = true;
-          break;
-        }
+    /*  The first free user ID must be in [1, count+1] by the
+     *  pigeonhole principle: count enrolled users occupy at most
+     *  count distinct IDs, so at least one ID in that range is free.
+     *  A bitmap gives O(count) lookup instead of scanning all 4096. */
+    const uint16_t search_max = (count >= SDF_FINGERPRINT_USER_ID_MAX)
+                                    ? SDF_FINGERPRINT_USER_ID_MAX
+                                    : (uint16_t)(count + 1);
+    uint32_t bmp[17] = {0};  /* 544 bits → covers IDs 1..544 (max count+1) */
+
+    for (size_t i = 0; i < count; i++) {
+      uint16_t uid = s_enrollment_user_buf[i];
+      if (uid >= 1 && uid <= search_max) {
+        bmp[(uid - 1) / 32] |= (1u << ((uid - 1) % 32));
       }
-      if (!in_use) {
+    }
+
+    for (uint16_t id = 1; id <= search_max; id++) {
+      if (!(bmp[(id - 1) / 32] & (1u << ((id - 1) % 32)))) {
         new_id = id;
         break;
       }

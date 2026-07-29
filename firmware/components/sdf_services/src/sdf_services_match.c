@@ -22,6 +22,7 @@
 #define SDF_MATCH_TASK_STACK 4096
 #define SDF_MATCH_TASK_PRIORITY 5
 #define SDF_MATCH_POLL_MS 400
+#define SDF_MATCH_POLL_MS_SUSPENDED 10000
 
 static const char *TAG = "sdf_services_match";
 
@@ -69,6 +70,20 @@ static void sdf_match_task_deinit_subscriptions(sdf_match_task_state_t *state) {
     state->event_queue = NULL;
 }
 
+static void sdf_match_emit_lockout_cleared(void) {
+    if (!sdf_services_is_ready()) {
+        return;
+    }
+    sdf_event_router_event_t evt = {
+        .type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+        .payload.security.user_id = 0,
+        .payload.security.failed_attempts = 0,
+    };
+    sdf_event_router_emit(&evt);
+}
+
 static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) {
     sdf_services_state_t *s = sdf_services_state();
     sdf_services_unlock_cb unlock_cb = NULL;
@@ -79,18 +94,17 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     uint32_t lockout_duration_ms;
     int64_t now_us = esp_timer_get_time();
     bool lockout_cleared = false;
+    bool run_match = false;
 
     if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
         return;
     }
 
-    /* If there are no enrolled users, matching is impossible */
     if (s->enrolled_user_count == 0) {
         xSemaphoreGive(s->lock);
         return;
     }
 
-    /* Check and clear lockout if expired */
     if (s->lockout_until_us > 0 && now_us >= s->lockout_until_us) {
         s->lockout_until_us = 0;
         s->failed_attempt_count = 0;
@@ -98,26 +112,11 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         lockout_cleared = true;
     }
 
-    /* Check if we should run match cycle */
-    if (now_us < s->match_cooldown_until_us ||
-        sdf_enrollment_sm_is_active(&s->enrollment) ||
-        s->enrollment_request_pending ||
-        now_us < s->lockout_until_us) {
-        xSemaphoreGive(s->lock);
-        if (lockout_cleared) {
-            if (!sdf_services_is_ready()) {
-                return;
-            }
-            sdf_event_router_event_t evt = {
-                .type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
-                .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-                .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
-                .payload.security.user_id = 0,
-                .payload.security.failed_attempts = 0,
-            };
-            sdf_event_router_emit(&evt);
-        }
-        return;
+    if (now_us >= s->match_cooldown_until_us &&
+        !sdf_enrollment_sm_is_active(&s->enrollment) &&
+        !s->enrollment_request_pending &&
+        now_us >= s->lockout_until_us) {
+        run_match = true;
     }
 
     unlock_cb = s->config.unlock_cb;
@@ -129,17 +128,11 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     xSemaphoreGive(s->lock);
 
     if (lockout_cleared) {
-        if (!sdf_services_is_ready()) {
-            return;
-        }
-        sdf_event_router_event_t evt = {
-            .type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
-            .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-            .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
-            .payload.security.user_id = 0,
-            .payload.security.failed_attempts = 0,
-        };
-        sdf_event_router_emit(&evt);
+        sdf_match_emit_lockout_cleared();
+    }
+
+    if (!run_match) {
+        return;
     }
 
     if (unlock_cb == NULL) {
@@ -154,16 +147,15 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
 
     sdf_fingerprint_op_result_t match_result = fp_match_1n(&match);
 
-    if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
-        match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
-        bool emit_failed_attempt = false;
-        bool emit_lockout = false;
-        uint32_t failed_attempts = 0;
-        uint32_t lockout_remaining_ms = 0;
+    uint32_t failed_attempts_after = 0;
+    bool emit_failed_attempt = false;
+    bool emit_lockout = false;
 
-        if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-            s->match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
+    if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+        s->match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
 
+        if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
+            match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
             if (match_result == SDF_FINGERPRINT_OP_NO_MATCH) {
                 if (s->failed_attempt_window_start_us == 0 ||
                     (now_us - s->failed_attempt_window_start_us) >
@@ -173,20 +165,26 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
                 }
 
                 s->failed_attempt_count++;
-                failed_attempts = s->failed_attempt_count;
+                failed_attempts_after = s->failed_attempt_count;
                 emit_failed_attempt = true;
 
                 if (s->failed_attempt_count >= failed_attempt_threshold) {
-                    s->lockout_until_us = now_us + ((int64_t)lockout_duration_ms * 1000LL);
+                    s->lockout_until_us = now_us +
+                        ((int64_t)lockout_duration_ms * 1000LL);
                     s->failed_attempt_count = 0;
                     s->failed_attempt_window_start_us = 0;
-                    lockout_remaining_ms = lockout_duration_ms;
                     emit_lockout = true;
                 }
             }
-            xSemaphoreGive(s->lock);
+        } else if (match_result == SDF_FINGERPRINT_OP_OK) {
+            s->failed_attempt_count = 0;
+            s->failed_attempt_window_start_us = 0;
         }
+        xSemaphoreGive(s->lock);
+    }
 
+    if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
+        match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
         if (emit_failed_attempt) {
             if (!sdf_services_is_ready()) {
                 return;
@@ -196,7 +194,7 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
                 .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
                 .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
                 .payload.security.user_id = 0,
-                .payload.security.failed_attempts = failed_attempts,
+                .payload.security.failed_attempts = failed_attempts_after,
             };
             sdf_event_router_emit(&evt);
         }
@@ -220,17 +218,12 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     if (match_result != SDF_FINGERPRINT_OP_OK) {
         ESP_LOGW(TAG, "Fingerprint match error: %s",
                  sdf_services_fingerprint_result_name(match_result));
-        if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-            s->match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
-            xSemaphoreGive(s->lock);
-        }
         return;
     }
 
     ESP_LOGI(TAG, "Fingerprint match user_id=%u permission=%u",
              (unsigned)match.user_id, (unsigned)match.permission);
 
-    /* Try to claim admin action */
     if (sdf_services_try_claim_admin_action(&match)) {
         return;
     }
@@ -239,13 +232,6 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     if (unlock_result != 0) {
         ESP_LOGW(TAG, "Unlock callback returned %d for user_id=%u", unlock_result,
                  (unsigned)match.user_id);
-    }
-
-    if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-        s->match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
-        s->failed_attempt_count = 0;
-        s->failed_attempt_window_start_us = 0;
-        xSemaphoreGive(s->lock);
     }
 
     if (!sdf_services_is_ready()) {
@@ -351,14 +337,16 @@ void sdf_match_task(void *arg) {
 #endif
 
         sdf_event_router_event_t event;
-        TickType_t wait_ticks = pdMS_TO_TICKS(SDF_MATCH_POLL_MS);
+        TickType_t wait_ticks = pdMS_TO_TICKS(
+            s_match_state.suspended ? SDF_MATCH_POLL_MS_SUSPENDED
+                                     : SDF_MATCH_POLL_MS);
 
-        /* Check for events with timeout */
         if (xQueueReceive(s_match_state.event_queue, &event, wait_ticks) == pdTRUE) {
             switch (event.type) {
                 case SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST:
                     ESP_LOGD(TAG, "Match request received");
                     s_match_state.pending_match_request = true;
+                    s_match_state.suspended = false;
                     break;
                 case SDF_EVENT_ROUTER_POWER_WAKE:
                     ESP_LOGI(TAG, "Wake event - resuming match task");
@@ -373,44 +361,36 @@ void sdf_match_task(void *arg) {
             }
         }
 
-        /* Run match cycle if not suspended */
-        if (!s_match_state.suspended && s_match_state.pending_match_request) {
-            s_match_state.pending_match_request = false;
-            sdf_match_task_run_match_cycle(&s_match_state);
-        } else if (!s_match_state.suspended && !s_match_state.pending_match_request) {
-            /* Normal polling cycle */
-            sdf_match_task_run_match_cycle(&s_match_state);
+        if (!s_match_state.suspended) {
+            if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+                int64_t now_us = esp_timer_get_time();
+                bool should_suspend = !s_match_state.pending_match_request &&
+                    s->match_cooldown_until_us <= now_us &&
+                    s->lockout_until_us <= now_us &&
+                    !sdf_enrollment_sm_is_active(&s->enrollment) &&
+                    !s->enrollment_request_pending;
+                xSemaphoreGive(s->lock);
+                if (should_suspend) {
+                    s_match_state.suspended = true;
+                }
+            }
         }
 
-        /* Power management: check if we should enter deep sleep */
-        bool should_block = false;
-        if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-            int64_t now_us = esp_timer_get_time();
-            should_block = !sdf_enrollment_sm_is_active(&s->enrollment) &&
-                           !s->enrollment_request_pending &&
-                           (s->match_cooldown_until_us == 0 || now_us >= s->match_cooldown_until_us) &&
-                           (s->lockout_until_us == 0 || now_us >= s->lockout_until_us);
-            xSemaphoreGive(s->lock);
+        if (s_match_state.suspended && is_powered) {
+            led_off();
+            fp_set_power(false);
+            is_powered = false;
+        } else if (!s_match_state.suspended && !is_powered) {
+            fp_set_power(true);
+            is_powered = true;
+            vTaskDelay(pdMS_TO_TICKS(200));
         }
 
-        if (should_block && s->config.wake_gpio >= 0) {
-            if (is_powered) {
-                led_off();
-                fp_set_power(false);
-                is_powered = false;
+        if (!s_match_state.suspended) {
+            if (s_match_state.pending_match_request) {
+                s_match_state.pending_match_request = false;
             }
-#ifndef CONFIG_IDF_TARGET_LINUX
-            esp_task_wdt_delete(NULL);
-#endif
-            xSemaphoreTake(s->wake_sem, portMAX_DELAY);
-#ifndef CONFIG_IDF_TARGET_LINUX
-            esp_task_wdt_add(NULL);
-#endif
-            if (!is_powered) {
-                fp_set_power(true);
-                is_powered = true;
-                vTaskDelay(pdMS_TO_TICKS(200)); /* Boot delay for FP sensor after power up */
-            }
+            sdf_match_task_run_match_cycle(&s_match_state);
         }
     }
 }

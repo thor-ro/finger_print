@@ -90,7 +90,7 @@ static void sdf_power_push_battery_percent(uint8_t battery_percent) {
 
   // Emit battery event
   sdf_event_router_event_t evt = {
-      .type = SDF_EVENT_ROUTER_POWER_SLEEP, // Reuse POWER_SLEEP for battery events (LOW priority)
+      .type = SDF_EVENT_ROUTER_POWER_BATTERY,
       .priority = SDF_EVENT_ROUTER_PRIO_LOW,
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
       .payload.power.remaining_ms = battery_percent,
@@ -130,12 +130,11 @@ static esp_err_t sdf_power_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
   return sdf_platform_sleep_enable_gpio_wakeup_light(wake_gpio, 1);
 }
 
-static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
+static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *config) {
   if (config == NULL || !config->enable_light_sleep) {
-    return;
+    return ESP_OK;
   }
 
-  // Emit sleep event
   sdf_event_router_event_t sleep_evt = {
       .type = SDF_EVENT_ROUTER_POWER_SLEEP,
       .priority = SDF_EVENT_ROUTER_PRIO_LOW,
@@ -144,13 +143,13 @@ static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
   };
   sdf_event_router_emit(&sleep_evt);
 
-  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-  esp_sleep_enable_timer_wakeup((uint64_t)config->checkin_interval_ms *
-                                1000ULL);
+  sdf_platform_sleep_disable_all_wakeup_sources();
+  sdf_platform_sleep_enable_timer_wakeup((uint64_t)config->checkin_interval_ms *
+                                             1000ULL);
 
   if (sdf_power_gpio_valid(config->fingerprint_wake_gpio)) {
     esp_err_t wake_err =
-        sdf_power_configure_fingerprint_wakeup(config->fingerprint_wake_gpio);
+        sdf_platform_sleep_enable_gpio_wakeup_light(config->fingerprint_wake_gpio, 1);
     if (wake_err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to configure fingerprint wake GPIO: %s",
                esp_err_to_name(wake_err));
@@ -172,7 +171,6 @@ static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
   }
 
 #ifndef CONFIG_IDF_TARGET_LINUX
-  /* Always restore BLE state after sleep attempt, even on failure. */
   if (ble_was_gated) {
     sdf_nuki_ble_set_enabled(config->ble_transport, true);
   }
@@ -183,6 +181,16 @@ static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
   ESP_LOGI(TAG, "Woke from light sleep (%s)",
            sdf_power_wakeup_reason_name(reason));
   sdf_power_notify_wakeup(config, reason);
+
+  return sleep_err;
+}
+
+static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
+  if (config == NULL || !config->enable_light_sleep) {
+    return;
+  }
+
+  sdf_power_enter_light_sleep(config);
 }
 
 static void sdf_power_task(void *arg) {
@@ -196,15 +204,13 @@ static void sdf_power_task(void *arg) {
 #ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_reset();
 #endif
-    sdf_power_manager_config_t config_snapshot = {
-        .loop_interval_ms = s_state.config.loop_interval_ms,
-    };
     bool initialized = false;
     int64_t now_us = esp_timer_get_time();
-    int64_t last_activity_us = now_us;
-    int64_t wake_guard_until_us = now_us;
-    int64_t next_battery_report_us = now_us;
-    uint8_t battery_percent = s_state.battery_percent;
+    int64_t last_activity_us = 0;
+    int64_t wake_guard_until_us = 0;
+    int64_t next_battery_report_us = 0;
+    uint8_t battery_percent = 0;
+    sdf_power_manager_config_t config_snapshot = {0};
 
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
         pdTRUE) {
@@ -216,7 +222,7 @@ static void sdf_power_task(void *arg) {
       battery_percent = s_state.battery_percent;
       xSemaphoreGive(s_state.lock);
     } else {
-      vTaskDelay(pdMS_TO_TICKS(config_snapshot.loop_interval_ms));
+      vTaskDelay(pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS));
       continue;
     }
 
@@ -266,35 +272,11 @@ static void sdf_power_task(void *arg) {
 #endif
 
     if (decision == SDF_POWER_POLICY_DECISION_SLEEP_LIGHT) {
-      sdf_event_router_event_t sleep_evt = {
-          .type = SDF_EVENT_ROUTER_POWER_SLEEP,
-          .priority = SDF_EVENT_ROUTER_PRIO_LOW,
-          .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-          .payload.power.remaining_ms = config_snapshot.checkin_interval_ms,
-      };
-      sdf_event_router_emit(&sleep_evt);
-
-      sdf_platform_power_enable_timer_wake(config_snapshot.checkin_interval_ms);
-      if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio)) {
-        sdf_platform_power_enable_gpio_wake(config_snapshot.fingerprint_wake_gpio, 1);
+      esp_err_t sleep_err = sdf_power_enter_light_sleep(&config_snapshot);
+      if (sleep_err != ESP_OK) {
+        ESP_LOGW(TAG, "Light sleep entry failed: %s",
+                 esp_err_to_name(sleep_err));
       }
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-      bool ble_was_gated = false;
-      if (config_snapshot.enable_ble_radio_gating && config_snapshot.ble_transport != NULL) {
-        sdf_platform_power_gate_ble_radio(false);
-        ble_was_gated = true;
-      }
-#endif
-
-sdf_platform_power_enter_light();
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-      if (ble_was_gated) {
-        sdf_platform_power_gate_ble_radio(true);
-      }
-#endif
-
       sdf_power_policy_handle_wake(SDF_POWER_POLICY_WAKE_REASON_TIMER);
     }
 
@@ -309,11 +291,10 @@ sdf_platform_power_enter_light();
       }
 
       sdf_power_retention_t retention = {0};
-      retention.magic = 0x5FDEC3A1;
       retention.last_activity_us = esp_timer_get_time();
       retention.next_checkin_us = retention.last_activity_us +
           ((int64_t)config_snapshot.checkin_interval_ms * 1000LL);
-      sdf_platform_sleep_retention_write(&retention, sizeof(retention));
+      sdf_power_save_retention(&retention);
 
       sdf_platform_power_enter_deep();
     }
@@ -635,11 +616,11 @@ esp_err_t sdf_power_prepare_deep_sleep(sdf_power_retention_t *state) {
   state->magic = 0x5FDEC3A1;
   state->last_activity_us = s_state.last_activity_us;
   state->next_checkin_us = esp_timer_get_time() + ((int64_t)s_state.config.checkin_interval_ms * 1000LL);
-  state->ble_transport_state = 0;  // Would need to get from BLE module
-  state->zigbee_join_state = 0;    // Would need to get from Zigbee module
-  state->sensor_power_state = 0;   // Would need to get from sensor driver
-  state->enrolled_user_count = 0;  // Would need to get from enrollment module
-  state->failed_attempts = 0;      // Would need to get from security module
+  state->ble_transport_state = (s_state.config.ble_transport != NULL && sdf_nuki_ble_is_enabled(s_state.config.ble_transport)) ? 1 : 0;
+  state->zigbee_join_state = sdf_protocol_zigbee_is_ready() ? 1 : 0;
+  state->sensor_power_state = 0;
+  state->enrolled_user_count = 0;
+  state->failed_attempts = 0;
 
   state->crc16 = sdf_power_crc16(state, sizeof(sdf_power_retention_t) - sizeof(state->crc16));
 

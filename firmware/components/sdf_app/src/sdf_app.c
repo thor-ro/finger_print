@@ -57,9 +57,6 @@ static uint32_t s_app_audit_err_biometric_failed = 0;
 static uint32_t s_app_audit_err_auth_lockout = 0;
 static uint32_t s_app_audit_err_nonce_replay = 0;
 static uint32_t s_app_audit_err_protocol = 0;
-static bool s_pairing_active;
-static bool s_pairing_requested;
-static uint16_t s_zigbee_alarm_mask;
 static bool s_latch_sequence_active;
 static bool s_lock_action_pending;
 static uint8_t s_pending_lock_action;
@@ -89,11 +86,13 @@ static const char *sdf_app_status_name(uint8_t status) {
 }
 
 static void sdf_app_set_alarm_mask_bits(uint16_t set_bits,
-                                        uint16_t clear_bits) {
-  s_zigbee_alarm_mask |= set_bits;
-  s_zigbee_alarm_mask &= (uint16_t)(~clear_bits);
-  if (sdf_protocol_zigbee_is_enabled()) {
-    sdf_protocol_zigbee_update_alarm_mask(s_zigbee_alarm_mask);
+                                         uint16_t clear_bits) {
+  uint16_t new_mask = (s_zigbee_alarm_mask | set_bits) & (uint16_t)(~clear_bits);
+  if (new_mask != s_zigbee_alarm_mask) {
+    s_zigbee_alarm_mask = new_mask;
+    if (sdf_protocol_zigbee_is_enabled()) {
+      sdf_protocol_zigbee_update_alarm_mask(s_zigbee_alarm_mask);
+    }
   }
 }
 
@@ -1216,55 +1215,82 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
 
   // Subscribe to events
-  sdf_event_router_subscriber_t *sub_handle = NULL;
+  sdf_event_router_subscriber_t *subs[7];
+  size_t subs_count = 0;
+
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
-                                   SDF_EVENT_ROUTER_PRIO_HIGH,
-                                   sdf_app_on_event, NULL, &sub_handle);
+                                        SDF_EVENT_ROUTER_PRIO_HIGH,
+                                        sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to biometric match: %s", esp_err_to_name(err));
+    goto sub_cleanup;
   }
+  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
-                                   SDF_EVENT_ROUTER_PRIO_CRITICAL,
-                                   sdf_app_on_event, NULL, &sub_handle);
+                                        SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                                        sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to security lockout: %s", esp_err_to_name(err));
+    goto sub_cleanup;
   }
+  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,
-                                   SDF_EVENT_ROUTER_PRIO_HIGH,
-                                   sdf_app_on_event, NULL, &sub_handle);
+                                        SDF_EVENT_ROUTER_PRIO_HIGH,
+                                        sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to biometric match failed: %s", esp_err_to_name(err));
+    goto sub_cleanup;
   }
+  subs_count++;
 
-err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
-                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                     sdf_app_on_event, NULL, &sub_handle);
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                        sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment step: %s", esp_err_to_name(err));
+    goto sub_cleanup;
   }
+  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
-                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                     sdf_app_on_event, NULL, &sub_handle);
+                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                        sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
+    goto sub_cleanup;
   }
+  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_FAILED,
-                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                     sdf_app_on_event, NULL, &sub_handle);
+                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                        sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
+    goto sub_cleanup;
   }
+  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_AUDIT,
-                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                     sdf_app_on_event, NULL, &sub_handle);
+                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                        sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to audit: %s", esp_err_to_name(err));
+    goto sub_cleanup;
   }
+  subs_count++;
+
+  goto sub_done;
+
+sub_cleanup:
+  while (subs_count > 0) {
+    subs_count--;
+    sdf_event_router_unsubscribe(subs[subs_count]);
+  }
+  return err;
+
+sub_done:
 
   sdf_services_config_t services_cfg;
   sdf_services_get_default_config(&services_cfg);

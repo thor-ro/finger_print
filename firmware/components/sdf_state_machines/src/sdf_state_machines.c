@@ -146,15 +146,10 @@ esp_err_t sdf_enrollment_sm_start(sdf_enrollment_sm_t *sm, uint16_t user_id,
     return ESP_ERR_INVALID_ARG;
   }
 
+  sdf_enrollment_sm_init(sm);
   sm->state = SDF_ENROLLMENT_STATE_STEP_1;
-  sm->result = SDF_ENROLLMENT_RESULT_NONE;
   sm->user_id = user_id;
   sm->permission = permission;
-  sm->completed_steps = 0;
-  sm->retry_count_step1 = 0;
-  sm->retry_count_step2 = 0;
-  sm->retry_count_step3 = 0;
-  /* Keep retry_policy as-is */
   return ESP_OK;
 }
 

@@ -112,6 +112,7 @@ When making architectural changes, you **must** update the corresponding documen
 
 ## Gotchas
 - Fingerprint sensor `Control LED (0x3C)` payload bytes are module-variant specific; defaults in `sdf_services.c` may need tuning on real hardware.
+- Match task uses suspend flag + extended polling (10s) when idle instead of WDT delete/recreate + semaphore-block for deep sleep transitions. This keeps the WDT active and reduces context-switch overhead.
 - No CI workflows exist yet. Tests require hardware.
 - `scripts/` and `tools/` directories are currently empty.
 

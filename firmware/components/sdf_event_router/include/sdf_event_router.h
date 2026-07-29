@@ -13,6 +13,7 @@ typedef enum {
     SDF_EVENT_ROUTER_BLE_LOCK_ACTION_COMPLETE,
     SDF_EVENT_ROUTER_POWER_SLEEP,
     SDF_EVENT_ROUTER_POWER_WAKE,
+    SDF_EVENT_ROUTER_POWER_BATTERY,
     SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
     SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST,
     SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
@@ -30,13 +31,15 @@ typedef enum {
     SDF_EVENT_ROUTER_ADMIN_AUTH_RESULT,
     SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
 
-  /* Button */
-  SDF_EVENT_ROUTER_BUTTON_PRESS,
-  SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,
-  SDF_EVENT_ROUTER_BUTTON_MULTI_PRESS,
+/* Button */
+    SDF_EVENT_ROUTER_BUTTON_PRESS,
+    SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,
+    SDF_EVENT_ROUTER_BUTTON_MULTI_PRESS,
 
-  /* Audit */
-  SDF_EVENT_ROUTER_AUDIT
+    /* Audit */
+    SDF_EVENT_ROUTER_AUDIT,
+
+    SDF_EVENT_ROUTER_TYPE_COUNT
 } sdf_event_router_type_t;
 
 typedef enum {
@@ -112,15 +115,15 @@ typedef struct {
 } sdf_event_router_admin_action_complete_payload_t;
 
 typedef struct {
-  uint8_t press_type;  // 1=single, 2=double, 3=triple, etc.
-  uint32_t press_duration_ms;
+    uint8_t press_type;
+    uint32_t press_duration_ms;
 } sdf_event_router_button_payload_t;
 
 typedef struct {
-  sdf_audit_event_type_t type;
-  uint16_t user_id;
-  int32_t status;
-  uint16_t detail;
+    sdf_audit_event_type_t type;
+    uint16_t user_id;
+    int32_t status;
+    uint16_t detail;
 } sdf_event_router_audit_payload_t;
 
 typedef struct {
