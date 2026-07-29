@@ -71,4 +71,30 @@ void sdf_button_task(void *arg);
 esp_err_t sdf_services_start_tasks(void);
 esp_err_t sdf_services_stop_tasks(void);
 
+/* Bitmap helpers */
+#define SDF_SERVICES_BMP_TEST(bmp, id)  ((bmp) & (1u << ((id) - 1)))
+#define SDF_SERVICES_BMP_SET(bmp, id)   ((bmp) |= (1u << ((id) - 1)))
+#define SDF_SERVICES_BMP_CLEAR(bmp, id) ((bmp) &= ~(1u << ((id) - 1)))
+
+static inline uint8_t sdf_services_perm_get(const uint8_t *packed, uint16_t id)
+{
+    uint8_t byte = packed[(id - 1) / 4];
+    uint8_t shift = ((id - 1) % 4) * 2;
+    return (byte >> shift) & 0x3;
+}
+
+static inline void sdf_services_perm_set(uint8_t *packed, uint16_t id, uint8_t perm)
+{
+    uint8_t *byte = &packed[(id - 1) / 4];
+    uint8_t shift = ((id - 1) % 4) * 2;
+    *byte = (*byte & ~(0x3 << shift)) | ((perm & 0x3) << shift);
+}
+
+/* Pack sensor query results into compact bitmap + packed permissions */
+void sdf_services_pack_user_list(const uint16_t *user_ids,
+                                        const uint8_t *permissions,
+                                        size_t count,
+                                        uint16_t *bmp,
+                                        uint8_t *perm_packed);
+
 #endif /* SDF_SERVICES_INTERNAL_H */

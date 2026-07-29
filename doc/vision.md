@@ -37,7 +37,7 @@ Registration is "Headless but Guided." Instead of buttons on the device, the use
 ### B. Biometrics: UART Fingerprint Sensor (C)
 
 * **Registration Logic:** The ESP32-C6 manages the enrollment state machine. When triggered by Zigbee, the ESP32 sends the `Add User (0x01)` command to the sensor, waits for the finger press (monitoring the `WAKE` pin), sends `Add User 2 (0x02)`, and finally `Add User 3 (0x03)` to merge the characteristics into a template.
-* **Storage:** Fingerprint templates are stored securely in the sensor's local flash memory (up to 500 users).
+* **Storage:** Fingerprint templates are stored securely in the sensor's local flash memory (up to 10 users).
 
 ### C. Network Integration: Zigbee 3.0
 

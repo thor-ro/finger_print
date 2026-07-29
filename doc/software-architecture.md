@@ -122,7 +122,7 @@ Out of scope:
 * `FP_LED(mode, color, duration_ms)`
 
 ## 9. Data Model
-* `UserId` integer in range 1..500.
+* `UserId` integer in range 1..10.
 * `LockState` enum: `LOCKED`, `UNLOCKED`, `UNKNOWN`.
 * `AuditEvent` struct with timestamp, user_id, source, result.
 * `DeviceConfig` struct with Zigbee check‑in interval, retry limits, and provisioning metadata.

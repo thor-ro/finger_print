@@ -50,7 +50,7 @@ void test_user_id_valid_max(void) {
 }
 
 void test_user_id_valid_mid(void) {
-  TEST_ASSERT_TRUE(fp_user_id_valid(100));
+  TEST_ASSERT_TRUE(fp_user_id_valid(5));
 }
 
 void test_user_id_invalid_zero(void) {

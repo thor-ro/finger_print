@@ -571,23 +571,14 @@ static void sdf_app_update_zigbee_user_list(void) {
   }
 
   const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
-  uint16_t *user_ids = calloc(max_users, sizeof(*user_ids));
-  uint8_t *perms = calloc(max_users, sizeof(*perms));
+  uint16_t user_ids[11];
+  uint8_t perms[11];
   size_t count = 0;
-
-  if (user_ids == NULL || perms == NULL) {
-    ESP_LOGE(TAG, "Failed to allocate user list buffers for Zigbee sync");
-    free(perms);
-    free(user_ids);
-    return;
-  }
 
   esp_err_t err = sdf_services_query_users(user_ids, perms, &count, max_users);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to query active users for Zigbee sync: %s",
              esp_err_to_name(err));
-    free(perms);
-    free(user_ids);
     return;
   }
 
@@ -616,8 +607,6 @@ static void sdf_app_update_zigbee_user_list(void) {
 
   sdf_protocol_zigbee_update_user_list(buf);
   ESP_LOGI(TAG, "Synced active users to Zigbee: %s", buf);
-  free(perms);
-  free(user_ids);
 }
 
 static esp_err_t

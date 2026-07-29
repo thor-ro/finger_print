@@ -1,6 +1,6 @@
 # Lightweight User Management Concept
 
-The fingerprint sensor on the smart door lock supports an internal hardware database capable of storing up to 500 fingerprints with assigned User IDs (12-bit) and permissions (1, 2, 3). To integrate this seamlessly with a Zigbee Smart Home Coordinator (e.g., Home Assistant, Zigbee2MQTT), we map the fingerprint hardware features to the standard **Zigbee Cluster Library (ZCL) Door Lock Cluster (0x0101)**.
+The fingerprint sensor on the smart door lock supports an internal hardware database capable of storing up to 10 fingerprints with assigned User IDs (12-bit) and permissions (1, 2, 3). To integrate this seamlessly with a Zigbee Smart Home Coordinator (e.g., Home Assistant, Zigbee2MQTT), we map the fingerprint hardware features to the standard **Zigbee Cluster Library (ZCL) Door Lock Cluster (0x0101)**.
 
 ## 1. Adding Users (Enrollment)
 

@@ -61,25 +61,39 @@
 #define SDF_SERVICES_ADMIN_ACTION_TIMEOUT_MS 10000u
 #define SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS 15000u
 
+/* Maximum users supported by firmware (sensor supports up to 4095) */
+#define SDF_SERVICES_MAX_USERS 10u
+/* Packed permissions: 2 bits per user, 8 users per uint8_t */
+#define SDF_SERVICES_PERM_PACKED_SIZE 4u  /* 16 users * 2 bits = 32 bits = 4 bytes */
+
 static const char *TAG = "sdf_services";
 
-/* 512-entry buffers for query_users() results.
- * The fingerprint sensor supports up to 512 enrolled user templates
- * (the sensor's hardware limit), even though user IDs can range
- * up to SDF_FINGERPRINT_USER_ID_MAX (0x0FFF = 4095).  A full
- * query returns at most 512 entries, so these buffers are sized
- * accordingly.  Total: 512*2 + 512 + 512*2 + 512 = 3072 bytes.
+/* Compact user representation: bitmap (1 bit per user ID) + packed 2-bit permissions.
+ * Max 10 users -> 16-bit bitmap + 4-byte packed permissions (16 users * 2 bits).
+ * Replaces 4x512 buffers (3072 bytes) with ~12 bytes.
+ * Optimization #16: ~50%+ RAM savings with bitmap + packed perms.
  *
- * TODO: A compact representation (bitmap of 4095 user IDs + packed
- * 2-bit permissions) could reduce user-ID storage by ~50%, but would
- * require changes to fp_query_users() and the enrollment/permisson
- * change APIs.  For the current enrollment count (typically < 50),
- * the savings are small and the added lookup complexity is not worth
- * the flash cost. */
-static uint16_t s_enrollment_user_buf[512];
-static uint8_t s_enrollment_perm_buf[512];
-static uint16_t s_perm_user_buf[512];
-static uint8_t s_perm_perm_buf[512];
+ * Bitmap: bit N = 1 means user ID (N+1) is enrolled
+ * Packed perms: 2 bits per user (0=none, 1=std, 2=elev, 3=admin) */
+static uint16_t s_enrollment_user_bmp = 0;
+static uint8_t s_enrollment_perm_packed[SDF_SERVICES_PERM_PACKED_SIZE] = {0};
+static uint16_t s_perm_user_bmp = 0;
+static uint8_t s_perm_perm_packed[SDF_SERVICES_PERM_PACKED_SIZE] = {0};
+
+/* Convert sensor query results (user_ids[], permissions[]) to packed format */
+void sdf_services_pack_user_list(const uint16_t *user_ids,
+                                        const uint8_t *permissions,
+                                        size_t count,
+                                        uint16_t *bmp,
+                                        uint8_t *perm_packed)
+{
+    *bmp = 0;
+    memset(perm_packed, 0, SDF_SERVICES_PERM_PACKED_SIZE);
+    for (size_t i = 0; i < count && user_ids[i] <= SDF_SERVICES_MAX_USERS; i++) {
+        SDF_SERVICES_BMP_SET(*bmp, user_ids[i]);
+        sdf_services_perm_set(perm_packed, user_ids[i], permissions[i]);
+    }
+}
 
 static sdf_services_state_t s_state = {0};
 
@@ -228,10 +242,10 @@ sdf_services_emit_security_event(sdf_services_security_event_type_t type,
 static void
 sdf_services_start_local_enrollment_with_permission(
     uint8_t permission) {
-  const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
+  const size_t max_users = (size_t)SDF_SERVICES_MAX_USERS;
   size_t count = 0;
   uint16_t new_id = 0;
-esp_err_t err = ESP_OK;
+  esp_err_t err = ESP_OK;
 
   if (esp_get_free_heap_size() < 4096) {
     ESP_LOGE(TAG, "Insufficient heap for enrollment query");
@@ -240,9 +254,11 @@ esp_err_t err = ESP_OK;
     return;
   }
 
-  err = sdf_services_query_users(s_enrollment_user_buf,
-                                        s_enrollment_perm_buf,
-                                        &count, max_users);
+  /* Use local temp arrays for query, then pack into compact format */
+  uint16_t user_ids[SDF_SERVICES_MAX_USERS];
+  uint8_t perms[SDF_SERVICES_MAX_USERS];
+
+  err = sdf_services_query_users(user_ids, perms, &count, max_users);
   // query_users involves a sensor UART exchange that can be slow.
   // Reset the watchdog here because this function is called from
   // sdf_services_execute_admin_action which itself follows fp_match_1n(),
@@ -251,24 +267,14 @@ esp_err_t err = ESP_OK;
   esp_task_wdt_reset();
 #endif
   if (err == ESP_OK) {
-    /*  The first free user ID must be in [1, count+1] by the
-     *  pigeonhole principle: count enrolled users occupy at most
-     *  count distinct IDs, so at least one ID in that range is free.
-     *  A bitmap gives O(count) lookup instead of scanning all 4096. */
-    const uint16_t search_max = (count >= SDF_FINGERPRINT_USER_ID_MAX)
-                                    ? SDF_FINGERPRINT_USER_ID_MAX
-                                    : (uint16_t)(count + 1);
-    uint32_t bmp[17] = {0};  /* 544 bits → covers IDs 1..544 (max count+1) */
+    /* Pack results into compact bitmap + packed permissions format */
+    sdf_services_pack_user_list(user_ids, perms, count,
+                                &s_enrollment_user_bmp,
+                                s_enrollment_perm_packed);
 
-    for (size_t i = 0; i < count; i++) {
-      uint16_t uid = s_enrollment_user_buf[i];
-      if (uid >= 1 && uid <= search_max) {
-        bmp[(uid - 1) / 32] |= (1u << ((uid - 1) % 32));
-      }
-    }
-
-    for (uint16_t id = 1; id <= search_max; id++) {
-      if (!(bmp[(id - 1) / 32] & (1u << ((id - 1) % 32)))) {
+    /* Find first free ID using bitmap (O(1) per check) */
+    for (uint16_t id = 1; id <= SDF_SERVICES_MAX_USERS; id++) {
+      if (!SDF_SERVICES_BMP_TEST(s_enrollment_user_bmp, id)) {
         new_id = id;
         break;
       }
@@ -984,7 +990,7 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
     return ESP_ERR_INVALID_STATE;
   }
 
-  const size_t query_capacity = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
+  const size_t query_capacity = (size_t)SDF_SERVICES_MAX_USERS;
   size_t count = query_capacity;
   esp_err_t err;
 
@@ -994,22 +1000,29 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
     return ESP_ERR_NO_MEM;
   }
 
-  err = sdf_services_query_users(s_perm_user_buf, s_perm_perm_buf,
-                                      &count, query_capacity);
+  /* Use local temp arrays for query, then pack into compact format */
+  uint16_t user_ids[SDF_SERVICES_MAX_USERS];
+  uint8_t perms[SDF_SERVICES_MAX_USERS];
+
+  err = sdf_services_query_users(user_ids, perms, &count, query_capacity);
   if (err != ESP_OK) {
     return err;
   }
 
-  bool found = false;
-  uint8_t current_permission = 0;
+  /* Pack results into compact bitmap + packed permissions format */
+  sdf_services_pack_user_list(user_ids, perms, count,
+                              &s_perm_user_bmp,
+                              s_perm_perm_packed);
+
+  bool found = SDF_SERVICES_BMP_TEST(s_perm_user_bmp, user_id);
+  uint8_t current_permission = found ? sdf_services_perm_get(s_perm_perm_packed, user_id) : 0;
+
+  /* Count admins using packed permissions */
   size_t admin_count = 0;
-  for (size_t i = 0; i < count; ++i) {
-    if (s_perm_perm_buf[i] == 3u) {
+  for (uint16_t id = 1; id <= SDF_SERVICES_MAX_USERS; id++) {
+    if (SDF_SERVICES_BMP_TEST(s_perm_user_bmp, id) &&
+        sdf_services_perm_get(s_perm_perm_packed, id) == 3u) {
       admin_count++;
-    }
-    if (s_perm_user_buf[i] == user_id) {
-      found = true;
-      current_permission = s_perm_perm_buf[i];
     }
   }
 

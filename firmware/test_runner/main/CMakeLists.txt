@@ -1,4 +1,4 @@
-set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage sdf_power nvs_flash esp_partition mbedtls)
+set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage sdf_power sdf_services nvs_flash esp_partition mbedtls)
 
 if(NOT IDF_TARGET STREQUAL "linux")
     list(APPEND test_reqs sdf_protocol_zigbee sdf_app sdf_cli)
@@ -16,6 +16,7 @@ idf_component_register(
          "../../components/sdf_protocol_ble/test/test_protocol_ble.c"
          "../../components/sdf_storage/test/test_sdf_storage.c"
          "../../components/sdf_power/test/test_sdf_power.c"
+         "../../components/sdf_services/test/test_sdf_services.c"
     INCLUDE_DIRS "."
                  "../../components/sdf_app/include"
     REQUIRES ${test_reqs}

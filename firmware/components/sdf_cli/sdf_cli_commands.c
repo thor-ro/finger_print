@@ -90,10 +90,11 @@ static int cmd_user_list(int argc, char **argv) {
   if (!check_auth())
     return 0;
 
-  uint16_t user_ids[4096];
-  uint8_t permissions[4096];
+  const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
+  uint16_t user_ids[max_users];
+  uint8_t permissions[max_users];
   size_t count = 0;
-  esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, 4096);
+  esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, max_users);
   if (err != ESP_OK) {
     printf("Failed to query users: %s\n", esp_err_to_name(err));
     return 0;
@@ -202,10 +203,11 @@ static int cmd_user_add(int argc, char **argv) {
   }
 
   // Check if user_id is already occupied
-  uint16_t user_ids[4096];
-  uint8_t permissions[4096];
+  const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
+  uint16_t user_ids[max_users];
+  uint8_t permissions[max_users];
   size_t count = 0;
-  esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, 4096);
+  esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, max_users);
   if (err != ESP_OK) {
     printf("Failed to check existing users: %s\n", esp_err_to_name(err));
     return 0;
@@ -260,7 +262,7 @@ static int cmd_user_add(int argc, char **argv) {
       printf("User ID %u is already enrolled.\n", (unsigned)user_id);
       return 0;
     } else if (step_result == SDF_FINGERPRINT_OP_FULL) {
-      printf("Fingerprint database full (max 4095 users).\n");
+      printf("Fingerprint database full (max 10 users).\n");
       return 0;
     } else {
       printf("Scan %d error: %d\n", step, (int)step_result);

@@ -11,3 +11,4 @@ firmware/build
 firmware/managed_components
 breakboard
 doc/UART_Fingerprint_Sensor_(C)_Demo
+case

@@ -39,7 +39,7 @@ Out of scope:
   * BLE Central for Nuki lock.
   * Deep sleep and timed wakeups (TWT/Check‑in).
 * **UART Fingerprint Sensor**
-  * Template storage in sensor flash (up to 500 users).
+  * Template storage in sensor flash (up to 10 users).
   * WAKE pin for touch detection.
   * LED ring for enrollment feedback (Control LED 0x3C).
 * **Power Subsystem**
@@ -93,7 +93,7 @@ Out of scope:
 ## 7. Data Model
 * **User ID Mapping**
   * Zigbee user ID -> Sensor template ID (1:1).
-  * Max users: 500 (sensor limit).
+  * Max users: 10 (firmware limit).
 * **Lock State**
   * `Locked`, `Unlocked`, `Unknown` (if Nuki not reachable).
 * **Battery**

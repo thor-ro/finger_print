@@ -8,7 +8,7 @@
 #include "esp_err.h"
 
 #define SDF_FINGERPRINT_USER_ID_MIN 1u
-#define SDF_FINGERPRINT_USER_ID_MAX 0x0FFFu
+#define SDF_FINGERPRINT_USER_ID_MAX 10u
 #define SDF_FINGERPRINT_EIGENVALUE_SIZE 193u
 
 typedef struct {
