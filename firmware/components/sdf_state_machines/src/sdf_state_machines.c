@@ -211,6 +211,20 @@ uint8_t sdf_enrollment_sm_get_completed_steps(const sdf_enrollment_sm_t *sm) {
   return sm->completed_steps;
 }
 
+typedef struct {
+    sdf_enrollment_state_t current_state;
+    sdf_fingerprint_op_result_t result;
+    sdf_enrollment_state_t next_state;
+    sdf_enroll_action_t action;
+    sdf_fingerprint_enroll_step_t next_cmd;
+} sdf_enrollment_transition_t;
+
+static const sdf_enrollment_transition_t transitions[] = {
+    { SDF_ENROLLMENT_STATE_STEP_1, SDF_FINGERPRINT_OP_OK, SDF_ENROLLMENT_STATE_STEP_2, SDF_ENROLL_ACT_EXECUTE_STEP, SDF_FINGERPRINT_ENROLL_STEP_2 },
+    { SDF_ENROLLMENT_STATE_STEP_2, SDF_FINGERPRINT_OP_OK, SDF_ENROLLMENT_STATE_STEP_3, SDF_ENROLL_ACT_EXECUTE_STEP, SDF_FINGERPRINT_ENROLL_STEP_3 },
+    { SDF_ENROLLMENT_STATE_STEP_3, SDF_FINGERPRINT_OP_OK, SDF_ENROLLMENT_STATE_SUCCESS, SDF_ENROLL_ACT_COMPLETE, 0 },
+};
+
 /* New enhanced API - returns next action to execute */
 sdf_enroll_next_t
 sdf_enrollment_sm_apply_step_result_ex(sdf_enrollment_sm_t *sm,
@@ -226,34 +240,22 @@ sdf_enrollment_sm_apply_step_result_ex(sdf_enrollment_sm_t *sm,
   }
 
   if (step_result == SDF_FINGERPRINT_OP_OK) {
-    sm->completed_steps++;
-
-    if (sm->state == SDF_ENROLLMENT_STATE_STEP_1) {
-      sm->state = SDF_ENROLLMENT_STATE_STEP_2;
-      sm->result = SDF_ENROLLMENT_RESULT_NONE;
-      next.action = SDF_ENROLL_ACT_EXECUTE_STEP;
-      next.cmd = SDF_FINGERPRINT_ENROLL_STEP_2;
-      next.user_id = sm->user_id;
-      next.permission = sm->permission;
-      return next;
+    for (size_t i = 0; i < sizeof(transitions) / sizeof(transitions[0]); i++) {
+      if (transitions[i].current_state == sm->state && transitions[i].result == step_result) {
+        sm->completed_steps++;
+        sm->state = transitions[i].next_state;
+        if (sm->state == SDF_ENROLLMENT_STATE_SUCCESS) {
+          sm->result = SDF_ENROLLMENT_RESULT_SUCCESS;
+        } else {
+          sm->result = SDF_ENROLLMENT_RESULT_NONE;
+        }
+        next.action = transitions[i].action;
+        next.cmd = transitions[i].next_cmd;
+        next.user_id = sm->user_id;
+        next.permission = sm->permission;
+        return next;
+      }
     }
-
-    if (sm->state == SDF_ENROLLMENT_STATE_STEP_2) {
-      sm->state = SDF_ENROLLMENT_STATE_STEP_3;
-      sm->result = SDF_ENROLLMENT_RESULT_NONE;
-      next.action = SDF_ENROLL_ACT_EXECUTE_STEP;
-      next.cmd = SDF_FINGERPRINT_ENROLL_STEP_3;
-      next.user_id = sm->user_id;
-      next.permission = sm->permission;
-      return next;
-    }
-
-    sm->state = SDF_ENROLLMENT_STATE_SUCCESS;
-    sm->result = SDF_ENROLLMENT_RESULT_SUCCESS;
-    next.action = SDF_ENROLL_ACT_COMPLETE;
-    next.user_id = sm->user_id;
-    next.permission = sm->permission;
-    return next;
   }
 
   /* On steps 1 and 2 (scan commands), ACK_FAIL (0x01) usually means the user

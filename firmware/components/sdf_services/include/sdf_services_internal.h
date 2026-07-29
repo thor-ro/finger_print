@@ -28,6 +28,7 @@ typedef struct {
   bool initialized;
   sdf_services_config_t config;
   sdf_enrollment_sm_t enrollment;
+  QueueHandle_t match_task_queue;
   bool enrollment_request_pending;
   uint16_t request_user_id;
   uint8_t request_permission;

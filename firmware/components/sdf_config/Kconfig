@@ -200,7 +200,7 @@ menu "Fingerprint"
 
         config SDF_FP_BAUD_RATE
             int "Fingerprint UART baud rate"
-            default 19200
+            default 115200
             help
                 Baud rate for fingerprint sensor UART communication.
 

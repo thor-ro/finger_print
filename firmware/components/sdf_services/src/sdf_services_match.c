@@ -21,8 +21,6 @@
 #define SDF_MATCH_TASK_NAME "sdf_match"
 #define SDF_MATCH_TASK_STACK 4096
 #define SDF_MATCH_TASK_PRIORITY 5
-#define SDF_MATCH_POLL_MS 400
-#define SDF_MATCH_POLL_MS_SUSPENDED 10000
 
 static const char *TAG = "sdf_services_match";
 
@@ -47,7 +45,8 @@ static void sdf_match_task_event_cb(void *ctx, const sdf_event_router_event_t *e
 }
 
 static void sdf_match_task_init_subscriptions(sdf_match_task_state_t *state) {
-    state->event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+    sdf_services_state_t *s = sdf_services_state();
+    state->event_queue = s->match_task_queue;
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST,
                                SDF_EVENT_ROUTER_PRIO_HIGH,
@@ -66,7 +65,7 @@ static void sdf_match_task_deinit_subscriptions(sdf_match_task_state_t *state) {
     if (state->sub_match_req) sdf_event_router_unsubscribe(state->sub_match_req);
     if (state->sub_power_wake) sdf_event_router_unsubscribe(state->sub_power_wake);
     if (state->sub_power_sleep) sdf_event_router_unsubscribe(state->sub_power_sleep);
-    if (state->event_queue) vQueueDelete(state->event_queue);
+    /* Don't delete queue - it's shared and managed by sdf_services */
     state->event_queue = NULL;
 }
 
@@ -337,9 +336,8 @@ void sdf_match_task(void *arg) {
 #endif
 
         sdf_event_router_event_t event;
-        TickType_t wait_ticks = pdMS_TO_TICKS(
-            s_match_state.suspended ? SDF_MATCH_POLL_MS_SUSPENDED
-                                     : SDF_MATCH_POLL_MS);
+        const TickType_t wait_ticks = portMAX_DELAY;
+        bool run_match = false;
 
         if (xQueueReceive(s_match_state.event_queue, &event, wait_ticks) == pdTRUE) {
             switch (event.type) {
@@ -347,10 +345,12 @@ void sdf_match_task(void *arg) {
                     ESP_LOGD(TAG, "Match request received");
                     s_match_state.pending_match_request = true;
                     s_match_state.suspended = false;
+                    run_match = true;
                     break;
                 case SDF_EVENT_ROUTER_POWER_WAKE:
                     ESP_LOGI(TAG, "Wake event - resuming match task");
                     s_match_state.suspended = false;
+                    run_match = true;
                     break;
                 case SDF_EVENT_ROUTER_POWER_SLEEP:
                     ESP_LOGI(TAG, "Sleep event - suspending match task");
@@ -361,19 +361,11 @@ void sdf_match_task(void *arg) {
             }
         }
 
-        if (!s_match_state.suspended) {
-            if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-                int64_t now_us = esp_timer_get_time();
-                bool should_suspend = !s_match_state.pending_match_request &&
-                    s->match_cooldown_until_us <= now_us &&
-                    s->lockout_until_us <= now_us &&
-                    !sdf_enrollment_sm_is_active(&s->enrollment) &&
-                    !s->enrollment_request_pending;
-                xSemaphoreGive(s->lock);
-                if (should_suspend) {
-                    s_match_state.suspended = true;
-                }
-            }
+        if (ulTaskNotifyTake(pdFALSE, 0) > 0) {
+            ESP_LOGD(TAG, "Wake ISR notification received");
+            s_match_state.pending_match_request = true;
+            s_match_state.suspended = false;
+            run_match = true;
         }
 
         if (s_match_state.suspended && is_powered) {
@@ -386,10 +378,7 @@ void sdf_match_task(void *arg) {
             vTaskDelay(pdMS_TO_TICKS(200));
         }
 
-        if (!s_match_state.suspended) {
-            if (s_match_state.pending_match_request) {
-                s_match_state.pending_match_request = false;
-            }
+        if (!s_match_state.suspended && run_match) {
             sdf_match_task_run_match_cycle(&s_match_state);
         }
     }

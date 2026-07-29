@@ -580,6 +580,14 @@ static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
   (void)arg;
   BaseType_t higher_priority_task_woken = pdFALSE;
   xSemaphoreGiveFromISR(s_state.wake_sem, &higher_priority_task_woken);
+  if (s_state.match_task_queue != NULL) {
+    sdf_event_router_event_t evt = {
+        .type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+    };
+    xQueueSendFromISR(s_state.match_task_queue, &evt, &higher_priority_task_woken);
+  }
   if (higher_priority_task_woken == pdTRUE) {
 #ifdef CONFIG_IDF_TARGET_LINUX
     portYIELD_FROM_ISR(pdTRUE);
@@ -715,6 +723,7 @@ void sdf_services_get_default_config(sdf_services_config_t *config) {
   config->enrollment_btn_gpio = (gpio_num_t)sdf_cfg->enrollment_btn_gpio;
   config->ws2812_led_gpio = (gpio_num_t)sdf_cfg->ws2812_led_gpio;
   config->battery_adc_pin = sdf_cfg->battery_adc_pin;
+
 }
 
 /* New task start/stop functions */
@@ -723,6 +732,13 @@ esp_err_t sdf_services_start_tasks(void) {
 
     if (!sdf_services_is_ready()) {
         return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Create match task queue for ISR to wake the task */
+    s->match_task_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+    if (s->match_task_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create match task queue");
+        return ESP_FAIL;
     }
 
     /* Create match task */
@@ -796,6 +812,10 @@ esp_err_t sdf_services_stop_tasks(void) {
         vTaskDelete(s->button_task);
         s->button_task = NULL;
     }
+    if (s->match_task_queue) {
+        vQueueDelete(s->match_task_queue);
+        s->match_task_queue = NULL;
+    }
 
     ESP_LOGI(TAG, "All services tasks stopped");
     return ESP_OK;
@@ -814,8 +834,9 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
     s_state.lock = xSemaphoreCreateMutex();
     s_state.wake_sem = xSemaphoreCreateBinary();
     s_state.admin_action_done_sem = xSemaphoreCreateBinary();
+    s_state.match_task_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
     if (s_state.lock == NULL || s_state.wake_sem == NULL ||
-        s_state.admin_action_done_sem == NULL) {
+        s_state.admin_action_done_sem == NULL || s_state.match_task_queue == NULL) {
       return ESP_ERR_NO_MEM;
     }
   }
@@ -849,13 +870,14 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   s_state.enrolled_user_count = 0;
   xSemaphoreGive(s_state.lock);
 
-  sdf_drivers_config_t drivers_config = {
-      .fingerprint = s_state.config.fingerprint,
-      .led = {
-          .gpio_num = config->ws2812_led_gpio,
-      },
-      .battery_adc_pin = config->battery_adc_pin,
-  };
+sdf_drivers_config_t drivers_config = {
+       .fingerprint = s_state.config.fingerprint,
+       .led = {
+           .gpio_num = config->ws2812_led_gpio,
+       },
+       .battery_adc_pin = config->battery_adc_pin,
+       .fp_wake_gpio = config->wake_gpio,
+   };
 
   esp_err_t err = sdf_drivers_init(&drivers_config);
   if (err != ESP_OK) {
