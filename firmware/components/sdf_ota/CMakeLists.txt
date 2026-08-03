@@ -1,17 +1,45 @@
+set(OTA_PRIVATE_KEY "${COMPONENT_DIR}/../../../ota_private.key")
+set(OTA_PUBLIC_KEY_BIN "${COMPONENT_DIR}/../../../ota_public_key.bin")
+set(SDF_SIGN_OTA_PY "${COMPONENT_DIR}/../../../tools/sdf_sign_ota.py")
+
+if(NOT EXISTS ${OTA_PRIVATE_KEY})
+    message(STATUS "OTA private key not found. Auto-generating throwaway key...")
+    execute_process(
+        COMMAND openssl genpkey -algorithm ed25519 -out ${OTA_PRIVATE_KEY}
+        RESULT_VARIABLE OPENSSL_RES
+    )
+    if(NOT OPENSSL_RES EQUAL 0)
+        message(FATAL_ERROR "Failed to generate OTA private key using openssl")
+    endif()
+endif()
+
+if(NOT EXISTS ${OTA_PUBLIC_KEY_BIN} OR ${OTA_PRIVATE_KEY} IS_NEWER_THAN ${OTA_PUBLIC_KEY_BIN})
+    message(STATUS "Extracting public key from ${OTA_PRIVATE_KEY}...")
+    execute_process(
+        COMMAND python3 ${SDF_SIGN_OTA_PY} extract-pubkey --key ${OTA_PRIVATE_KEY} --output ${OTA_PUBLIC_KEY_BIN}
+        RESULT_VARIABLE EXTRACT_RES
+    )
+    if(NOT EXTRACT_RES EQUAL 0)
+        message(FATAL_ERROR "Failed to extract public key using sdf_sign_ota.py")
+    endif()
+endif()
+
 idf_component_register(SRCS "src/sdf_ota.c"
                        "src/sdf_ota_version.c"
+                       "src/sdf_ota_signature.c"
                        ${SDF_VERSION_C}
                        INCLUDE_DIRS "include"
                        REQUIRES mbedtls app_update sdf_common
-                       PRIV_REQUIRES sdf_config)
+                       PRIV_REQUIRES sdf_config
+                       EMBED_FILES ${OTA_PUBLIC_KEY_BIN})
 
 # Custom target for signing OTA images
 # Usage: idf.py sign_ota  (after build)
 # Requires: pip install cryptography
 add_custom_target(sign_ota
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/../../tools/sdf_sign_ota.py sign
+    COMMAND python3 ${SDF_SIGN_OTA_PY} sign
         --input ${PROJECT_BIN_DIR}/${PROJECT_NAME}.bin
-        --key ${CMAKE_SOURCE_DIR}/../ota_private.key
+        --key ${OTA_PRIVATE_KEY}
         --output ${PROJECT_BIN_DIR}/${PROJECT_NAME}_signed.bin
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Signing OTA image with Ed25519"
@@ -21,9 +49,9 @@ add_custom_target(sign_ota
 # Target to extract public key from private key
 # Usage: idf.py ota_extract_pubkey
 add_custom_target(ota_extract_pubkey
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/../../tools/sdf_sign_ota.py extract-pubkey
-        --key ${CMAKE_SOURCE_DIR}/../ota_private.key
-        --output ${PROJECT_BIN_DIR}/ota_public_key.bin
+    COMMAND python3 ${SDF_SIGN_OTA_PY} extract-pubkey
+        --key ${OTA_PRIVATE_KEY}
+        --output ${OTA_PUBLIC_KEY_BIN}
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Extracting OTA public key for firmware embedding"
     VERBATIM

@@ -12,3 +12,7 @@ firmware/managed_components
 breakboard
 doc/UART_Fingerprint_Sensor_(C)_Demo
 case
+*.key
+ota_private.key
+ota_pubkey.*
+ota_public_key.*

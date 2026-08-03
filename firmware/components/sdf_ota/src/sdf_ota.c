@@ -36,10 +36,7 @@ static SemaphoreHandle_t s_session_mutex = NULL;
 /* Version string embedded at build time */
 extern const char sdf_ota_version_string[];
 
-/* Public key for signature verification (32 bytes, Ed25519) */
-#if CONFIG_SDF_OTA_SIGNATURE_VERIFY
-extern const uint8_t sdf_ota_public_key[32];
-#endif
+
 
 static esp_err_t sdf_ota_emit_audit(sdf_audit_event_type_t type, int32_t status, uint16_t detail)
 {

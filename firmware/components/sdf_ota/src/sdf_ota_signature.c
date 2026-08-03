@@ -12,15 +12,9 @@
 
 static const char *TAG = "sdf_ota_sig";
 
-/* Ed25519 public key (32 bytes) - Generated from ota_private.key
- * Run tools/sdf_sign_ota.py extract-pubkey --key ota_private.key --output ota_pubkey.bin
- */
-static const uint8_t sdf_ota_public_key[32] = {
-    0x40, 0xd1, 0x58, 0x3a, 0x00, 0xad, 0x56, 0xb5,
-    0x74, 0x5d, 0xeb, 0x23, 0x3e, 0x91, 0x25, 0xce,
-    0x2d, 0x50, 0x15, 0xc0, 0x92, 0x78, 0x33, 0x01,
-    0xdf, 0x17, 0xaa, 0xb9, 0x64, 0x9d, 0x4a, 0x5d
-};
+/* Ed25519 public key (32 bytes) - Embedded from ota_public_key.bin */
+extern const uint8_t _binary_ota_public_key_bin_start[] asm("_binary_ota_public_key_bin_start");
+#define sdf_ota_public_key _binary_ota_public_key_bin_start
 
 /* Magic marker appended after signature: "SDF\x01" (4 bytes) */
 static const uint8_t SDF_OTA_MAGIC[4] = {0x53, 0x44, 0x46, 0x01};
@@ -142,6 +136,7 @@ esp_err_t sdf_ota_verify_signature(const esp_partition_t *partition)
 
 #include "sdf_ota.h"
 #include "esp_err.h"
+#include "esp_partition.h"
 
 esp_err_t sdf_ota_verify_signature(const esp_partition_t *partition)
 {
