@@ -9,11 +9,12 @@ This directory contains the static Web Companion app for the Smart Door Bridge.
 
 ## Deployment to GitHub Pages
 
-Since this is a dependency-free static web application, it can be deployed directly to GitHub Pages:
-1. Go to your repository settings on GitHub.
-2. Under "Pages", select the `main` branch.
-3. Select `/web-companion` as the source folder (or if using standard deployment, ensure your actions deploy this folder).
-4. Save and wait for the deployment to complete.
+Since this is a dependency-free static web application, it is automatically deployed to GitHub Pages via a GitHub Actions workflow (`.github/workflows/deploy-web-companion.yml`).
+
+To enable this in your repository:
+1. Go to your repository **Settings** on GitHub.
+2. Under **Pages** > **Build and deployment** > **Source**, select **GitHub Actions**.
+3. Push changes to the `web-companion/` directory, or trigger the workflow manually from the **Actions** tab.
 
 ## Browser Support
 Requires a browser with Web Bluetooth support (e.g., Chrome, Edge, Chrome for Android). iOS Safari does not support Web Bluetooth natively, but specialized apps like WebBLE can be used.
