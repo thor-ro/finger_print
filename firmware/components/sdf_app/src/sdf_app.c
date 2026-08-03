@@ -31,6 +31,7 @@
 #include "sdf_services.h"
 #include "sdf_event_router.h"
 #include "sdf_storage.h"
+#include "sdf_ble_companion.h"
 
 #define SDF_APP_ID 1u
 #define SDF_APP_NAME "SDF"
@@ -73,6 +74,13 @@ static void sdf_app_release_ble_transport(const char *reason);
 static int sdf_app_queue_lock_action(uint8_t lock_action, uint8_t flags);
 static int sdf_app_dispatch_pending_lock_action(void);
 static int sdf_app_start_unlock_unlatch_sequence(void);
+
+static void sdf_app_on_web_reg_auth_request(void *ctx,
+                                             const sdf_event_router_event_t *event);
+static void sdf_app_on_web_reg_auth_result(void *ctx,
+                                            const sdf_event_router_event_t *event);
+static void sdf_app_on_web_reg_auth_request(void *ctx,
+                                             const sdf_event_router_event_t *event);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
@@ -448,6 +456,52 @@ static void sdf_app_on_admin_action(void *ctx,
   }
 }
 
+static void sdf_ble_companion_on_auth_request(void *ctx,
+                                               const char *username,
+                                               const uint8_t *password_hash,
+                                               size_t hash_len) {
+    (void)ctx;
+    ESP_LOGI(TAG, "BLE Companion: Auth request for user '%s'", username);
+
+    sdf_event_router_event_t evt = {
+        .type = SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST,
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+    };
+    strncpy(evt.payload.web_reg_auth_request.username, username,
+            SDF_STORAGE_WEB_USER_NAME_MAX - 1);
+    memcpy(evt.payload.web_reg_auth_request.password_hash, password_hash,
+           SDF_STORAGE_WEB_USER_HASH_LEN);
+    sdf_event_router_emit(&evt);
+}
+
+static void sdf_ble_companion_on_config_write(void *ctx,
+                                               const uint8_t *data,
+                                               size_t len) {
+    (void)ctx;
+    ESP_LOGI(TAG, "BLE Companion: Config write, len=%u", (unsigned)len);
+}
+
+static void sdf_ble_companion_on_enroll_write(void *ctx,
+                                               const uint8_t *data,
+                                               size_t len) {
+    (void)ctx;
+    ESP_LOGI(TAG, "BLE Companion: Enroll write, len=%u", (unsigned)len);
+}
+
+static void sdf_ble_companion_on_ota_write(void *ctx,
+                                            const uint8_t *data,
+                                            size_t len) {
+    (void)ctx;
+    esp_err_t err = sdf_ble_companion_start_ota_request(data, len);
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "BLE Companion OTA request rejected: %s",
+               esp_err_to_name(err));
+    }
+}
+
+
+
 static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
   (void)ctx;
   sdf_power_mark_activity();
@@ -546,9 +600,76 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
     }
     break;
   }
+  case SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST: {
+    sdf_app_on_web_reg_auth_request(ctx, event);
+    break;
+  }
+  case SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT: {
+    sdf_app_on_web_reg_auth_result(ctx, event);
+    break;
+  }
   default:
     break;
   }
+}
+
+static void sdf_app_on_web_reg_auth_request(void *ctx,
+                                             const sdf_event_router_event_t *event) {
+  (void)ctx;
+  if (!event) {
+    return;
+  }
+
+  ESP_LOGI(TAG, "Web registration auth request for user: %s",
+           event->payload.web_reg_auth_request.username);
+
+  sdf_services_set_web_reg_auth(event->payload.web_reg_auth_request.username,
+                                 event->payload.web_reg_auth_request.password_hash,
+                                 SDF_STORAGE_WEB_USER_HASH_LEN);
+
+  sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH);
+}
+
+static void sdf_app_on_web_reg_auth_result(void *ctx,
+                                             const sdf_event_router_event_t *event) {
+  (void)ctx;
+  if (!event) {
+    return;
+  }
+
+  ESP_LOGI(TAG, "Web registration auth result: %s for user: %s",
+           event->payload.web_reg_auth_result.authorized ? "AUTHORIZED" : "DENIED",
+           event->payload.web_reg_auth_result.username);
+
+  if (event->payload.web_reg_auth_result.authorized) {
+    sdf_storage_web_user_t user = {0};
+    strncpy(user.username, event->payload.web_reg_auth_result.username,
+            SDF_STORAGE_WEB_USER_NAME_MAX - 1);
+    user.username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
+    user.permission = event->payload.web_reg_auth_result.permission;
+    user.valid = true;
+
+    uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+    if (sdf_services_get_web_reg_auth(NULL, 0, NULL) == ESP_OK) {
+      // Get the stored password hash
+      sdf_services_get_web_reg_password_hash(password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+      memcpy(user.password_hash, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+    }
+
+    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+      sdf_storage_web_user_t existing;
+      if (sdf_storage_web_user_load(i, &existing) == ESP_OK && !existing.valid) {
+        sdf_storage_web_user_save(i, &user);
+        ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
+        break;
+      }
+    }
+  }
+
+  sdf_ble_companion_reply_auth(event->payload.web_reg_auth_result.username, 
+                               event->payload.web_reg_auth_result.authorized);
+
+  sdf_services_clear_web_reg_auth();
 }
 
 static int sdf_app_start_unlock_unlatch_sequence(void) {
@@ -1204,7 +1325,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
 
   // Subscribe to events
-  sdf_event_router_subscriber_t *subs[7];
+  sdf_event_router_subscriber_t *subs[9];
   size_t subs_count = 0;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
@@ -1270,6 +1391,24 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
   subs_count++;
 
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST,
+                                        SDF_EVENT_ROUTER_PRIO_HIGH,
+                                        sdf_app_on_web_reg_auth_request, NULL, &subs[subs_count]);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to web reg auth request: %s", esp_err_to_name(err));
+    goto sub_cleanup;
+  }
+  subs_count++;
+
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
+                                        SDF_EVENT_ROUTER_PRIO_HIGH,
+                                        sdf_app_on_web_reg_auth_result, NULL, &subs[subs_count]);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to web reg auth result: %s", esp_err_to_name(err));
+    goto sub_cleanup;
+  }
+  subs_count++;
+
   goto sub_done;
 
 sub_cleanup:
@@ -1291,6 +1430,19 @@ sub_done:
   err = sdf_services_init(&services_cfg);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to initialize fingerprint services: %s",
+             esp_err_to_name(err));
+  }
+
+  sdf_ble_companion_callbacks_t ble_companion_cbs = {
+      .ctx = NULL,
+      .on_auth_request = sdf_ble_companion_on_auth_request,
+      .on_config_write = sdf_ble_companion_on_config_write,
+      .on_enroll_write = sdf_ble_companion_on_enroll_write,
+      .on_ota_write = sdf_ble_companion_on_ota_write,
+  };
+  err = sdf_ble_companion_init(&ble_companion_cbs);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to initialize BLE companion service: %s",
              esp_err_to_name(err));
   }
 

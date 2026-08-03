@@ -45,4 +45,23 @@ esp_err_t sdf_storage_ble_target_clear(void);
 
 esp_err_t sdf_storage_erase_all(void);
 
+/* Web user account storage (max 5 users) */
+#define SDF_STORAGE_WEB_USER_MAX 5
+#define SDF_STORAGE_WEB_USER_NAME_MAX 32
+#define SDF_STORAGE_WEB_USER_HASH_LEN 32  /* SHA256 */
+
+typedef struct {
+    char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+    uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+    uint8_t permission;  /* 1=standard, 2=elevated, 3=admin */
+    bool valid;
+} sdf_storage_web_user_t;
+
+esp_err_t sdf_storage_web_user_save(uint8_t index, const sdf_storage_web_user_t *user);
+esp_err_t sdf_storage_web_user_load(uint8_t index, sdf_storage_web_user_t *user);
+esp_err_t sdf_storage_web_user_clear(uint8_t index);
+esp_err_t sdf_storage_web_user_count(size_t *count);
+esp_err_t sdf_storage_web_user_find_by_name(const char *username, sdf_storage_web_user_t *user, uint8_t *index_out);
+esp_err_t sdf_storage_web_user_clear_all(void);
+
 #endif /* SDF_STORAGE_H */

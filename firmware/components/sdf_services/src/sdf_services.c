@@ -353,6 +353,26 @@ void sdf_services_execute_admin_action(
     return;
   }
 
+  if (action == SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH) {
+    ESP_LOGI(TAG, "Admin authorized Web Registration");
+    sdf_event_router_event_t evt = {
+        .type = SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+    };
+    sdf_services_state_t *s = sdf_services_state();
+    if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+        strncpy(evt.payload.web_reg_auth_result.username, s->request_web_username,
+                SDF_STORAGE_WEB_USER_NAME_MAX - 1);
+        evt.payload.web_reg_auth_result.username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
+        evt.payload.web_reg_auth_result.authorized = true;
+        evt.payload.web_reg_auth_result.permission = s->request_web_permission;
+        xSemaphoreGive(s->lock);
+    }
+    sdf_event_router_emit(&evt);
+    return;
+  }
+
   if (action_cb != NULL) {
     action_cb(action_ctx, action);
   }
@@ -1104,6 +1124,62 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
   }
 }
 
+esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action) {
+  if (action == SDF_SERVICES_ADMIN_ACTION_NONE) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock == NULL || s_state.admin_action_done_sem == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  bool initialized = false;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE) {
+      return ESP_ERR_TIMEOUT;
+    }
+
+    initialized = s_state.initialized;
+    if (!initialized || s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE ||
+        s_state.permission_change_pending ||
+        s_state.enrollment_request_pending ||
+        sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+      return ESP_ERR_INVALID_STATE;
+    }
+  }
+
+  if (!initialized) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE) {
+      return ESP_ERR_TIMEOUT;
+    }
+
+    if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE ||
+        s_state.permission_change_pending ||
+        s_state.enrollment_request_pending ||
+        sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+      return ESP_ERR_INVALID_STATE;
+    }
+
+    while (xSemaphoreTake(s_state.admin_action_done_sem, 0) == pdTRUE) {
+    }
+
+    s_state.pending_admin_action = action;
+    s_state.pending_admin_action_start_us = esp_timer_get_time();
+  }
+
+  if (s_state.wake_sem != NULL) {
+    xSemaphoreGive(s_state.wake_sem);
+  }
+
+  return ESP_OK;
+}
+
 esp_err_t sdf_services_reset_state(void) {
   if (s_state.lock == NULL) {
     return ESP_ERR_INVALID_STATE;
@@ -1252,4 +1328,97 @@ void sdf_services_start_pending_enrollment_if_any(void) {
     sdf_services_emit_enrollment_event(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
                                        &s_state.enrollment);
   }
+}
+
+esp_err_t sdf_services_get_web_reg_auth(char *username, size_t username_max,
+                                         uint8_t *permission) {
+  if (!username || !permission) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  if (!s_state.web_reg_auth_pending || s_state.request_web_username[0] == '\0') {
+    xSemaphoreGive(s_state.lock);
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  strncpy(username, s_state.request_web_username, username_max - 1);
+  username[username_max - 1] = '\0';
+  *permission = s_state.request_web_permission;
+
+  xSemaphoreGive(s_state.lock);
+  return ESP_OK;
+}
+
+void sdf_services_clear_web_reg_auth(void) {
+  if (s_state.lock == NULL) {
+    return;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+    s_state.web_reg_auth_pending = false;
+    s_state.request_web_username[0] = '\0';
+    xSemaphoreGive(s_state.lock);
+  }
+}
+
+esp_err_t sdf_services_set_web_reg_auth(const char *username,
+                                         const uint8_t *password_hash,
+                                         size_t hash_len) {
+  if (!username || !password_hash || hash_len != SDF_STORAGE_WEB_USER_HASH_LEN) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  if (s_state.web_reg_auth_pending) {
+    xSemaphoreGive(s_state.lock);
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  strncpy(s_state.request_web_username, username, SDF_STORAGE_WEB_USER_NAME_MAX - 1);
+  s_state.request_web_username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
+  memcpy(s_state.request_web_password_hash, password_hash, hash_len);
+  s_state.request_web_permission = 1;
+  s_state.web_reg_auth_pending = true;
+
+  xSemaphoreGive(s_state.lock);
+  return ESP_OK;
+}
+
+esp_err_t sdf_services_get_web_reg_password_hash(uint8_t *password_hash,
+                                                  size_t hash_len) {
+  if (!password_hash || hash_len != SDF_STORAGE_WEB_USER_HASH_LEN) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  if (!s_state.web_reg_auth_pending) {
+    xSemaphoreGive(s_state.lock);
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  memcpy(password_hash, s_state.request_web_password_hash, hash_len);
+  xSemaphoreGive(s_state.lock);
+  return ESP_OK;
 }

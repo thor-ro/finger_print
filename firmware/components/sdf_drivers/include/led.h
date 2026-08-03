@@ -28,5 +28,6 @@ void led_flash_red(void);
 void led_flash_orange(void);
 void led_admin_auth_green(void);
 void led_admin_auth_red(void);
+void led_pulse_white(void);
 
 #endif /* LED_H */

@@ -41,6 +41,7 @@ typedef enum {
   LED_CMD_ADMIN_AUTH_RED,
   LED_CMD_ENROLLMENT_STEP_RETRY,
   LED_CMD_ENROLLMENT_FAILED,
+  LED_CMD_PULSE_WHITE,
 } led_cmd_t;
 
 typedef struct {
@@ -182,6 +183,9 @@ static void led_execute_cmd(led_cmd_t cmd) {
     break;
   case LED_CMD_ENROLLMENT_FAILED:
     led_play_pattern(255, 0, 0, 300, 300, 5);  // Red flash for failure
+    break;
+  case LED_CMD_PULSE_WHITE:
+    led_play_pattern(255, 255, 255, 400, 200, 2);
     break;
   }
 }
@@ -336,6 +340,8 @@ void led_flash_orange(void) { led_post_cmd(LED_CMD_FLASH_ORANGE); }
 void led_admin_auth_green(void) { led_post_cmd(LED_CMD_ADMIN_AUTH_GREEN); }
 
 void led_admin_auth_red(void) { led_post_cmd(LED_CMD_ADMIN_AUTH_RED); }
+
+void led_pulse_white(void) { led_post_cmd(LED_CMD_PULSE_WHITE); }
 
 #else
 

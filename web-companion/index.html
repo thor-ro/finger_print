@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Smart Door Web Companion">
+    <title>Smart Door Web Companion</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1>Smart Door</h1>
+            <p>Web Companion</p>
+        </header>
+        
+        <main id="main-content">
+            <div id="connection-view" class="view active">
+                <h2>Connect to Bridge</h2>
+                <p>Ensure your device has Bluetooth enabled.</p>
+                <button id="btn-connect" class="primary-btn">Connect via WebBLE</button>
+                <p id="connection-status" class="status-msg"></p>
+            </div>
+
+            <!-- Auth View -->
+            <div id="auth-view" class="view">
+                <h2>Authentication</h2>
+                <div class="tabs">
+                    <button id="tab-login" class="tab-btn active">Login</button>
+                    <button id="tab-register" class="tab-btn">Register</button>
+                </div>
+                
+                <form id="auth-form" class="auth-form">
+                    <div class="input-group">
+                        <label for="username">Username</label>
+                        <input type="text" id="username" name="username" required maxlength="16" placeholder="admin">
+                    </div>
+                    <div class="input-group">
+                        <label for="password">Password</label>
+                        <input type="password" id="password" name="password" required minlength="4" placeholder="••••••••">
+                    </div>
+                    <button type="submit" id="btn-auth-submit" class="primary-btn">Login</button>
+                </form>
+                <p id="auth-status" class="status-msg"></p>
+            </div>
+
+            <!-- Dashboard View -->
+            <div id="dashboard-view" class="view">
+                <h2>Device Dashboard</h2>
+                <p>Manage your Smart Door Bridge.</p>
+                
+                <div class="dashboard-section">
+                    <h3>Configuration</h3>
+                    <button id="btn-read-config" class="secondary-btn">Read Config</button>
+                    <!-- Expandable config UI would go here -->
+                </div>
+
+                <div class="dashboard-section">
+                    <h3>Firmware Update (OTA)</h3>
+                    <div class="alert warning">
+                        <strong>Warning:</strong> Ensure your battery is above 20%. OTA uses Wi-Fi and draws significant power.
+                    </div>
+                    <form id="ota-form">
+                        <div class="input-group">
+                            <label for="wifi-ssid">Wi-Fi SSID</label>
+                            <input type="text" id="wifi-ssid" required placeholder="MyNetwork">
+                        </div>
+                        <div class="input-group">
+                            <label for="wifi-password">Wi-Fi Password</label>
+                            <input type="password" id="wifi-password" required placeholder="••••••••">
+                        </div>
+                        <div class="input-group">
+                            <label for="firmware-url">Firmware HTTPS URL</label>
+                            <input type="url" id="firmware-url" required pattern="https://.*" placeholder="https://example.com/firmware.bin">
+                        </div>
+                        <button type="submit" id="btn-ota" class="primary-btn danger-btn">Start OTA Update</button>
+                    </form>
+                    <p id="ota-status" class="status-msg"></p>
+                </div>
+
+                <button id="btn-disconnect" class="secondary-btn" style="margin-top: 1rem;">Disconnect</button>
+            </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>

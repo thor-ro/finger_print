@@ -5,6 +5,7 @@
 
 #include "sdf_services.h"
 #include "sdf_lock_guard.h"
+#include "sdf_storage.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -43,6 +44,14 @@ typedef struct {
   uint8_t permission_change_permission;
   esp_err_t permission_change_result;
   size_t enrolled_user_count;
+
+  /* Web Companion registration authorization */
+  bool web_reg_auth_pending;
+  char request_web_username[SDF_STORAGE_WEB_USER_NAME_MAX];
+  uint8_t request_web_password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  uint8_t request_web_permission;
+  int64_t web_reg_auth_start_us;
+
 #ifndef CONFIG_IDF_TARGET_LINUX
   button_handle_t btn_handle;
 #endif

@@ -31,6 +31,14 @@ typedef void (*sdf_nuki_ble_rx_cb)(void *ctx, sdf_nuki_ble_channel_t channel,
 
 typedef void (*sdf_nuki_ble_ready_cb)(void *ctx);
 
+/**
+ * Hooks for GATT services that share the Nuki transport's NimBLE host.
+ * The init hook runs after nimble_port_init() but before the host task starts.
+ * The sync hook runs after the NimBLE host has synchronized with the controller.
+ */
+typedef int (*sdf_nuki_ble_server_init_cb)(void *ctx);
+typedef void (*sdf_nuki_ble_server_sync_cb)(void *ctx);
+
 typedef struct {
   ble_addr_t target_addr;
   bool has_target;
@@ -67,6 +75,11 @@ typedef struct {
 int sdf_nuki_ble_init(sdf_nuki_ble_transport_t *transport,
                       sdf_nuki_ble_rx_cb rx_cb, void *rx_ctx,
                       sdf_nuki_ble_ready_cb ready_cb, void *ready_ctx);
+
+/** Register a GATT service before calling sdf_nuki_ble_init(). */
+int sdf_nuki_ble_register_server_service(sdf_nuki_ble_server_init_cb init_cb,
+                                         sdf_nuki_ble_server_sync_cb sync_cb,
+                                         void *ctx);
 
 int sdf_nuki_ble_start(sdf_nuki_ble_transport_t *transport);
 

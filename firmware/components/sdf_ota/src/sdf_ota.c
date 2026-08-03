@@ -214,6 +214,28 @@ esp_err_t sdf_ota_write(sdf_ota_handle_t handle, const void *data, uint32_t len)
     return ESP_OK;
 }
 
+esp_err_t sdf_ota_abort(sdf_ota_handle_t handle)
+{
+    if (handle == NULL || s_session_mutex == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (xSemaphoreTake(s_session_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (!s_session.active || handle != &s_session) {
+        xSemaphoreGive(s_session_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t err = esp_ota_abort(s_session.ota_handle);
+    s_session.active = false;
+    (void)sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+    xSemaphoreGive(s_session_mutex);
+    return err;
+}
+
 esp_err_t sdf_ota_verify_integrity(sdf_ota_handle_t handle)
 {
     if (handle == NULL) {

@@ -61,6 +61,18 @@ static sdf_nuki_ble_transport_t *s_transport;
 static ble_addr_t s_pending_addr;
 static bool s_pending_connect;
 
+#define SDF_NUKI_BLE_MAX_SERVER_SERVICES 4
+
+typedef struct {
+  sdf_nuki_ble_server_init_cb init_cb;
+  sdf_nuki_ble_server_sync_cb sync_cb;
+  void *ctx;
+} sdf_nuki_ble_server_service_t;
+
+static sdf_nuki_ble_server_service_t
+    s_server_services[SDF_NUKI_BLE_MAX_SERVER_SERVICES];
+static size_t s_server_service_count;
+
 typedef enum {
   SDF_NUKI_DISC_NONE = 0,
   SDF_NUKI_DISC_PAIRING_SVC,
@@ -109,9 +121,32 @@ static void sdf_nuki_ble_on_sync(void) {
   ble_hs_id_infer_auto(0, &s_transport->own_addr_type);
   s_transport->synced = true;
 
+  for (size_t i = 0; i < s_server_service_count; ++i) {
+    if (s_server_services[i].sync_cb != NULL) {
+      s_server_services[i].sync_cb(s_server_services[i].ctx);
+    }
+  }
+
   if (s_transport->start_requested) {
     sdf_nuki_ble_start_scan();
   }
+}
+
+int sdf_nuki_ble_register_server_service(sdf_nuki_ble_server_init_cb init_cb,
+                                         sdf_nuki_ble_server_sync_cb sync_cb,
+                                         void *ctx) {
+  if (init_cb == NULL || s_transport != NULL ||
+      s_server_service_count >= SDF_NUKI_BLE_MAX_SERVER_SERVICES) {
+    return -1;
+  }
+
+  s_server_services[s_server_service_count++] =
+      (sdf_nuki_ble_server_service_t){
+          .init_cb = init_cb,
+          .sync_cb = sync_cb,
+          .ctx = ctx,
+      };
+  return 0;
 }
 
 static void sdf_nuki_ble_host_task(void *param) {
@@ -669,6 +704,15 @@ int sdf_nuki_ble_init(sdf_nuki_ble_transport_t *transport,
   if (rc != 0) {
     ESP_LOGE(TAG, "nimble_port_init failed: %d", rc);
     return rc;
+  }
+
+  for (size_t i = 0; i < s_server_service_count; ++i) {
+    rc = s_server_services[i].init_cb(s_server_services[i].ctx);
+    if (rc != 0) {
+      ESP_LOGE(TAG, "GATT service registration failed: %d", rc);
+      nimble_port_deinit();
+      return rc;
+    }
   }
 
   ble_hs_cfg.reset_cb = sdf_nuki_ble_on_reset;

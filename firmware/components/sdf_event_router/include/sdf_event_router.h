@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "sdf_common.h"
+#include "sdf_storage.h"
 
 typedef enum {
     SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
@@ -31,7 +32,11 @@ typedef enum {
     SDF_EVENT_ROUTER_ADMIN_AUTH_RESULT,
     SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
 
-/* Button */
+    /* Web Companion */
+    SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST,
+    SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
+
+    /* Button */
     SDF_EVENT_ROUTER_BUTTON_PRESS,
     SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,
     SDF_EVENT_ROUTER_BUTTON_MULTI_PRESS,
@@ -115,6 +120,17 @@ typedef struct {
 } sdf_event_router_admin_action_complete_payload_t;
 
 typedef struct {
+    char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+    uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+} sdf_event_router_web_reg_auth_request_payload_t;
+
+typedef struct {
+    char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+    bool authorized;
+    uint8_t permission;
+} sdf_event_router_web_reg_auth_result_payload_t;
+
+typedef struct {
     uint8_t press_type;
     uint32_t press_duration_ms;
 } sdf_event_router_button_payload_t;
@@ -144,6 +160,8 @@ typedef struct {
         sdf_event_router_enrollment_failed_payload_t enrollment_failed;
         sdf_event_router_admin_auth_payload_t admin_auth;
         sdf_event_router_admin_action_complete_payload_t admin_action_complete;
+        sdf_event_router_web_reg_auth_request_payload_t web_reg_auth_request;
+        sdf_event_router_web_reg_auth_result_payload_t web_reg_auth_result;
         sdf_event_router_button_payload_t button;
         sdf_event_router_audit_payload_t audit;
     } payload;

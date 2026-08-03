@@ -35,6 +35,7 @@ typedef void *sdf_ota_handle_t;
 esp_err_t sdf_ota_init(void);
 esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_handle_t *handle_out);
 esp_err_t sdf_ota_write(sdf_ota_handle_t handle, const void *data, uint32_t len);
+esp_err_t sdf_ota_abort(sdf_ota_handle_t handle);
 esp_err_t sdf_ota_verify_integrity(sdf_ota_handle_t handle);
 esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle);
 esp_err_t sdf_ota_rollback(void);

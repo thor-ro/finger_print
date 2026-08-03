@@ -2,14 +2,14 @@
 
 ## 📱 Mobile App & BLE Peripheral Support
 Currently, the device relies heavily on Zigbee (for remote management) or local button presses (for local management).
-* [ ] **Smartphone Companion App:** A BLE GATT service to allow users to configure the device, enroll fingerprints, and perform OTA updates directly from their smartphone without needing a Zigbee coordinator.
+* [*] **Smartphone Companion App:** A BLE GATT service to allow users to configure the device, enroll fingerprints, and perform OTA updates directly from their smartphone without needing a Zigbee coordinator.
 * [ ] **BLE OTA Updates:** The OTA mechanism is currently Zigbee-focused or CLI-driven. BLE-initiated OTA is marked as a "future" architectural path.
 
 ## 👥 Advanced Access Control
 The current permission model is basic (Admin vs. Standard).
 * [ ] **Schedule-Based Access:** The ability to restrict certain fingerprints to specific days or times (e.g., a cleaner or dog walker who can only unlock the door on Tuesdays between 10 AM and 12 PM). This would require implementing an RTC and time-sync via Zigbee.
 * [ ] **Elevated User Role:** Permission level 2 ("Elevated User") is currently a placeholder. We need to define its capabilities (e.g., perhaps they can unlock the door and view logs, but cannot enroll new users).
-* [ ] **User Naming:** The system only tracks `User ID` (1-500). Allowing a text string to be associated with an ID (e.g., ID 42 = "Alice") would make Zigbee management and local CLI management much more user-friendly.
+* [*] **User Naming:** The system only tracks `User ID` (1-500). Allowing a text string to be associated with an ID (e.g., ID 42 = "Alice") would make Zigbee management and local CLI management much more user-friendly.
 
 ## 🔄 State Synchronization
 * [ ] **Bidirectional Nuki Sync:** The SDF updates the Zigbee lock state when it successfully sends a BLE command to Nuki. However, if a user unlocks the Nuki lock manually from the inside, it's unclear if the SDF polls the Nuki lock to report this physical change back to the Zigbee network.

@@ -339,6 +339,161 @@ esp_err_t sdf_storage_ble_target_clear(void) {
   return err;
 }
 
+#define SDF_STORAGE_KEY_WEB_USER_PREFIX "web_user_"
+
+static void sdf_storage_web_user_key(char *buf, size_t buf_size, uint8_t index) {
+    snprintf(buf, buf_size, "%s%u", SDF_STORAGE_KEY_WEB_USER_PREFIX, (unsigned)index);
+}
+
+esp_err_t sdf_storage_web_user_save(uint8_t index, const sdf_storage_web_user_t *user) {
+    if (index >= SDF_STORAGE_WEB_USER_MAX || user == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char key[32];
+    sdf_storage_web_user_key(key, sizeof(key), index);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_blob(handle, key, user, sizeof(sdf_storage_web_user_t));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t sdf_storage_web_user_load(uint8_t index, sdf_storage_web_user_t *user) {
+    if (index >= SDF_STORAGE_WEB_USER_MAX || user == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char key[32];
+    sdf_storage_web_user_key(key, sizeof(key), index);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    size_t len = sizeof(sdf_storage_web_user_t);
+    err = nvs_get_blob(handle, key, user, &len);
+    if (err == ESP_OK && len != sizeof(sdf_storage_web_user_t)) {
+        err = ESP_ERR_NVS_INVALID_LENGTH;
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t sdf_storage_web_user_clear(uint8_t index) {
+    if (index >= SDF_STORAGE_WEB_USER_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char key[32];
+    sdf_storage_web_user_key(key, sizeof(key), index);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_erase_key(handle, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t sdf_storage_web_user_count(size_t *count) {
+    if (count == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    size_t cnt = 0;
+    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+        char key[32];
+        sdf_storage_web_user_key(key, sizeof(key), i);
+        sdf_storage_web_user_t u;
+        size_t len = sizeof(sdf_storage_web_user_t);
+        err = nvs_get_blob(handle, key, &u, &len);
+        if (err == ESP_OK && u.valid) {
+            cnt++;
+        }
+    }
+
+    nvs_close(handle);
+    *count = cnt;
+    return ESP_OK;
+}
+
+esp_err_t sdf_storage_web_user_find_by_name(const char *username, sdf_storage_web_user_t *user, uint8_t *index_out) {
+    if (username == NULL || user == NULL || index_out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+        char key[32];
+        sdf_storage_web_user_key(key, sizeof(key), i);
+        sdf_storage_web_user_t u;
+        size_t len = sizeof(sdf_storage_web_user_t);
+        err = nvs_get_blob(handle, key, &u, &len);
+        if (err == ESP_OK && u.valid && strcmp(u.username, username) == 0) {
+            *user = u;
+            *index_out = i;
+            nvs_close(handle);
+            return ESP_OK;
+        }
+    }
+
+    nvs_close(handle);
+    return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t sdf_storage_web_user_clear_all(void) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+        char key[32];
+        sdf_storage_web_user_key(key, sizeof(key), i);
+        nvs_erase_key(handle, key);
+    }
+
+    err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
 esp_err_t sdf_storage_erase_all(void) {
   esp_err_t err = nvs_flash_erase();
   if (err != ESP_OK) {
