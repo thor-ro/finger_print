@@ -15,8 +15,6 @@
 #include "fingerprint.h"
 #include "sdf_state_machines.h"
 
-typedef int (*sdf_services_unlock_cb)(void *ctx, uint16_t user_id);
-
 typedef enum {
   SDF_SERVICES_ADMIN_ACTION_NONE = 0,
   SDF_SERVICES_ADMIN_ACTION_ENROLL = 1,
@@ -52,8 +50,6 @@ typedef struct {
   uint32_t failed_attempt_threshold;
   uint32_t failed_attempt_window_ms;
   uint32_t lockout_duration_ms;
-  sdf_services_unlock_cb unlock_cb;
-  void *unlock_ctx;
   sdf_services_admin_action_cb admin_action_cb;
   void *admin_action_ctx;
   gpio_num_t wake_gpio;

@@ -500,26 +500,6 @@ static void sdf_ble_companion_on_ota_write(void *ctx,
     }
 }
 
-
-
-static int sdf_app_on_fingerprint_unlock(void *ctx, uint16_t user_id) {
-  (void)ctx;
-  sdf_power_mark_activity();
-
-  if (!s_has_creds || s_pairing_active) {
-    return SDF_NUKI_RESULT_ERR_NO_KEY;
-  }
-
-  int percent = sdf_drivers_battery_get_percent();
-  if (percent <= 20) {
-    sdf_services_trigger_low_battery_warning();
-  }
-
-ESP_LOGI(TAG, "Fingerprint match for user_id=%u, requesting direct unlatch",
-            (unsigned)user_id);
-  return sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
-}
-
 static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
   (void)ctx;
   if (event == NULL) {
@@ -1433,8 +1413,6 @@ sub_done:
 
   sdf_services_config_t services_cfg;
   sdf_services_get_default_config(&services_cfg);
-  services_cfg.unlock_cb = sdf_app_on_fingerprint_unlock;
-  services_cfg.unlock_ctx = NULL;
   services_cfg.admin_action_cb = sdf_app_on_admin_action;
   services_cfg.admin_action_ctx = NULL;
 

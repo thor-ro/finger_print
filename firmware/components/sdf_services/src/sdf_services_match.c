@@ -85,8 +85,6 @@ static void sdf_match_emit_lockout_cleared(void) {
 
 static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) {
     sdf_services_state_t *s = sdf_services_state();
-    sdf_services_unlock_cb unlock_cb = NULL;
-    void *unlock_ctx = NULL;
     uint32_t cooldown_ms;
     uint32_t failed_attempt_threshold;
     uint32_t failed_attempt_window_ms;
@@ -118,8 +116,6 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         run_match = true;
     }
 
-    unlock_cb = s->config.unlock_cb;
-    unlock_ctx = s->config.unlock_ctx;
     cooldown_ms = s->config.match_cooldown_ms;
     failed_attempt_threshold = s->config.failed_attempt_threshold;
     failed_attempt_window_ms = s->config.failed_attempt_window_ms;
@@ -131,10 +127,6 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     }
 
     if (!run_match) {
-        return;
-    }
-
-    if (unlock_cb == NULL) {
         return;
     }
 
@@ -225,12 +217,6 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
 
     if (sdf_services_try_claim_admin_action(&match)) {
         return;
-    }
-
-    int unlock_result = unlock_cb(unlock_ctx, match.user_id);
-    if (unlock_result != 0) {
-        ESP_LOGW(TAG, "Unlock callback returned %d for user_id=%u", unlock_result,
-                 (unsigned)match.user_id);
     }
 
     if (!sdf_services_is_ready()) {

@@ -441,8 +441,6 @@ static void sdf_services_btn_cb(void *arg, void *usr_data) {
 #endif
 
 static void sdf_services_run_match_cycle(void) {
-  sdf_services_unlock_cb unlock_cb = NULL;
-  void *unlock_ctx = NULL;
   uint32_t cooldown_ms = SDF_SERVICES_DEFAULT_MATCH_COOLDOWN_MS;
   uint32_t failed_attempt_threshold =
       SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_THRESHOLD;
@@ -483,8 +481,6 @@ static void sdf_services_run_match_cycle(void) {
       return;
     }
 
-    unlock_cb = s_state.config.unlock_cb;
-  unlock_ctx = s_state.config.unlock_ctx;
   cooldown_ms = s_state.config.match_cooldown_ms;
   failed_attempt_threshold = s_state.config.failed_attempt_threshold;
   failed_attempt_window_ms = s_state.config.failed_attempt_window_ms;
@@ -494,10 +490,6 @@ static void sdf_services_run_match_cycle(void) {
   if (lockout_cleared) {
     sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
                                          0, 0, 0);
-  }
-
-  if (unlock_cb == NULL) {
-    return;
   }
 
   sdf_fingerprint_match_t match = {0};
@@ -576,12 +568,6 @@ static void sdf_services_run_match_cycle(void) {
 
   if (sdf_services_try_claim_admin_action(&match)) {
     return;
-  }
-
-  int unlock_result = unlock_cb(unlock_ctx, match.user_id);
-  if (unlock_result != 0) {
-    ESP_LOGW(TAG, "Unlock callback returned %d for user_id=%u", unlock_result,
-             (unsigned)match.user_id);
   }
 
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
@@ -736,8 +722,6 @@ void sdf_services_get_default_config(sdf_services_config_t *config) {
   config->failed_attempt_threshold = sdf_cfg->failed_attempt_threshold;
   config->failed_attempt_window_ms = sdf_cfg->failed_attempt_window_ms;
   config->lockout_duration_ms = sdf_cfg->lockout_duration_ms;
-  config->unlock_cb = NULL;
-  config->unlock_ctx = NULL;
   config->wake_gpio = (gpio_num_t)sdf_cfg->fp_wake_gpio;
   config->power_en_gpio = (gpio_num_t)sdf_cfg->fp_en_gpio;
   config->enrollment_btn_gpio = (gpio_num_t)sdf_cfg->enrollment_btn_gpio;
