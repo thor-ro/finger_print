@@ -27,6 +27,8 @@
 #define SDF_BLE_OTA_WIFI_CONNECTED BIT0
 #define SDF_BLE_OTA_WIFI_FAILED BIT1
 
+#define SDF_BLE_OTA_TASK_PRIORITY (tskIDLE_PRIORITY + 8)
+
 static const char *TAG = "sdf_ble_ota";
 
 typedef struct {
@@ -285,7 +287,7 @@ esp_err_t sdf_ble_companion_start_ota_request(const uint8_t *data, size_t len) {
 
     s_ota_task_running = true;
     if (xTaskCreate(sdf_ble_ota_task, "sdf_ble_ota", 8192, request,
-                    tskIDLE_PRIORITY + 2, NULL) != pdPASS) {
+                    SDF_BLE_OTA_TASK_PRIORITY, NULL) != pdPASS) {
         s_ota_task_running = false;
         mbedtls_platform_zeroize(request, sizeof(*request));
         free(request);

@@ -348,7 +348,7 @@ sdf_app_power_wake_reason_name(sdf_power_wake_reason_t reason) {
 
 static void sdf_app_update_battery_percent(uint8_t battery_percent) {
   esp_err_t err = sdf_power_set_battery_percent(battery_percent);
-  if (err != ESP_OK && sdf_protocol_zigbee_is_enabled()) {
+  if (err == ESP_OK && sdf_protocol_zigbee_is_enabled()) {
     sdf_protocol_zigbee_update_battery_percent(battery_percent);
   }
 }
@@ -574,6 +574,17 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
     ESP_LOGI(TAG, "Event: Enrollment COMPLETE user_id=%u",
              (unsigned)event->payload.enrollment_complete.user_id);
     sdf_app_set_alarm_mask_bits(0, SDF_APP_ZB_ALARM_ACTION_FAILURE);
+    break;
+  }
+  case SDF_EVENT_ROUTER_ENROLLMENT_FAILED: {
+    sdf_power_mark_activity();
+    ESP_LOGW(TAG, "Event: Enrollment FAILED step=%u error=%d",
+             (unsigned)event->payload.enrollment_failed.step,
+             (int)event->payload.enrollment_failed.error_code);
+    sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_FAILED, 0,
+                       (int32_t)event->payload.enrollment_failed.error_code, 0);
+    led_flash_red();
     break;
   }
   case SDF_EVENT_ROUTER_AUDIT: {
