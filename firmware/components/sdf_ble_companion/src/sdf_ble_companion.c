@@ -19,6 +19,7 @@
 #include "freertos/semphr.h"
 #include "mbedtls/constant_time.h"
 #include "cJSON.h"
+#include "esp_timer.h"
 
 #define TAG "sdf_ble_companion"
 
@@ -51,6 +52,12 @@
     0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
     0x8a, 0x4f, 0x2b, 0x5c, 0x04, 0x00, 0x5a, 0x7d
 
+#define SDF_BLE_COMPANION_ADV_FAST_DURATION_MS 30000
+
+// Slow advertising intervals (approx 1 second)
+#define SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MIN BLE_GAP_ADV_ITVL_MS(1000)
+#define SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MAX BLE_GAP_ADV_ITVL_MS(2000)
+
 static sdf_ble_companion_connection_t s_connections[SDF_BLE_COMPANION_MAX_CONNECTIONS];
 static sdf_ble_companion_callbacks_t s_callbacks = {0};
 static bool s_initialized = false;
@@ -64,8 +71,26 @@ static uint16_t s_ota_val_handle = 0;
 static sdf_event_router_subscriber_t *s_enrollment_sub = NULL;
 static sdf_event_router_subscriber_t *s_enrollment_failed_sub = NULL;
 
+static esp_timer_handle_t s_adv_timer;
+
 static uint8_t s_adv_data[31];
 static uint8_t s_adv_data_len = 0;
+
+// Forward declarations
+static void sdf_ble_companion_adv_timer_cb(void *arg);
+
+void sdf_ble_companion_start_advertising_fast(void);
+void sdf_ble_companion_start_advertising_slow(void);
+void sdf_ble_companion_start_advertising(void);
+
+static sdf_ble_companion_connection_t *sdf_ble_companion_get_conn(uint16_t conn_handle);
+static sdf_ble_companion_connection_t *sdf_ble_companion_get_free_conn(void);
+
+static void sdf_ble_companion_adv_timer_cb(void *arg) {
+    (void)arg;
+    ESP_LOGI(TAG, "Fast advertising duration expired, switching to slow advertising");
+    sdf_ble_companion_start_advertising_slow();
+}
 
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_conn(uint16_t conn_handle) {
     for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
@@ -142,8 +167,6 @@ static void sdf_ble_companion_enrollment_failed_handler(void *ctx,
         free(json_str);
     }
 }
-
-static void sdf_ble_companion_start_advertising(void);
 
 static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_handle,
                                           struct ble_gatt_access_ctxt *ctxt, void *arg) {
@@ -513,7 +536,7 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
             } else {
                 ESP_LOGW(TAG, "gap_event disconnect: lock contention");
             }
-            sdf_ble_companion_start_advertising();
+            sdf_ble_companion_start_advertising_fast();
             break;
         }
         case BLE_GAP_EVENT_ADV_COMPLETE: {
@@ -537,7 +560,7 @@ static void sdf_ble_companion_on_host_sync(void *ctx) {
     sdf_ble_companion_start_advertising();
 }
 
-void sdf_ble_companion_start_advertising(void) {
+void sdf_ble_companion_start_advertising_fast(void) {
     struct ble_gap_adv_params adv_params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
@@ -554,10 +577,42 @@ void sdf_ble_companion_start_advertising(void) {
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
                            &adv_params, sdf_ble_companion_gap_event, NULL);
     if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to start advertising: %d", rc);
+        ESP_LOGE(TAG, "Failed to start fast advertising: %d", rc);
     } else {
-        ESP_LOGI(TAG, "Advertising started");
+        ESP_LOGI(TAG, "Fast advertising started");
     }
+
+    // Cancel any existing timer and arm a new one to switch to slow advertising after 30 seconds
+    esp_timer_stop(s_adv_timer);
+    esp_timer_start_once(s_adv_timer, SDF_BLE_COMPANION_ADV_FAST_DURATION_MS * 1000);
+}
+
+void sdf_ble_companion_start_advertising_slow(void) {
+    struct ble_gap_adv_params adv_params = {
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MIN,
+        .itvl_max = SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MAX,
+    };
+
+    int rc = ble_gap_adv_set_data(s_adv_data, s_adv_data_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to set advertising data: %d", rc);
+        return;
+    }
+
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                           &adv_params, sdf_ble_companion_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to start slow advertising: %d", rc);
+    } else {
+        ESP_LOGI(TAG, "Slow advertising started");
+    }
+}
+
+// Keep the old function name for compatibility
+void sdf_ble_companion_start_advertising(void) {
+    sdf_ble_companion_start_advertising_fast();
 }
 
 static void sdf_ble_companion_build_adv_data(void) {
@@ -623,19 +678,35 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
 
     memset(s_connections, 0, sizeof(s_connections));
 
+    // Initialize the advertising timer
+    esp_timer_create_args_t timer_args = {
+        .callback = sdf_ble_companion_adv_timer_cb,
+        .arg = NULL,
+        .name = "sdf_ble_adv_timer",
+    };
+    esp_err_t err = esp_timer_create(&timer_args, &s_adv_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create advertising timer: %s", esp_err_to_name(err));
+        vSemaphoreDelete(s_lock);
+        s_lock = NULL;
+        return err;
+    }
+
     if (sdf_nuki_ble_register_server_service(sdf_ble_companion_register_gatt,
                                              sdf_ble_companion_on_host_sync,
                                              NULL) != 0) {
+        esp_timer_delete(s_adv_timer);
+        s_adv_timer = NULL;
         vSemaphoreDelete(s_lock);
         s_lock = NULL;
         return ESP_ERR_INVALID_STATE;
     }
 
     // Subscribe to enrollment events
-    esp_err_t err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
-                                                SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                                sdf_ble_companion_enrollment_complete_handler,
-                                                NULL, &s_enrollment_sub);
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
+                                      SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                      sdf_ble_companion_enrollment_complete_handler,
+                                      NULL, &s_enrollment_sub);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
     }
@@ -671,6 +742,13 @@ esp_err_t sdf_ble_companion_deinit(void) {
     if (s_enrollment_failed_sub) {
         sdf_event_router_unsubscribe(s_enrollment_failed_sub);
         s_enrollment_failed_sub = NULL;
+    }
+
+    // Stop and delete the advertising timer
+    if (s_adv_timer) {
+        esp_timer_stop(s_adv_timer);
+        esp_timer_delete(s_adv_timer);
+        s_adv_timer = NULL;
     }
 
     if (s_lock) {
