@@ -873,3 +873,34 @@ esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data
     int rc = ble_gatts_notify_custom(conn_handle, s_ota_val_handle, om);
     return rc == 0 ? ESP_OK : ESP_FAIL;
 }
+
+esp_err_t sdf_ble_companion_broadcast_ota(const uint8_t *data, size_t len) {
+    if (!data || len == 0 || len >= SDF_BLE_COMPANION_ATTR_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // Copy connection handles for authenticated connections
+    uint16_t conn_handles[SDF_BLE_COMPANION_MAX_CONNECTIONS];
+    int count = 0;
+    for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+        if (s_connections[i].connected &&
+            s_connections[i].auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+            conn_handles[count++] = s_connections[i].conn_handle;
+        }
+    }
+    xSemaphoreGive(s_lock);
+
+    // Send notifications outside the lock
+    for (int i = 0; i < count; i++) {
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
+        if (om) {
+            ble_gatts_notify_custom(conn_handles[i], s_ota_val_handle, om);
+        }
+    }
+
+    return ESP_OK;
+}

@@ -65,6 +65,12 @@ esp_err_t sdf_ble_companion_notify_enroll(uint16_t conn_handle, const uint8_t *d
 esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data, size_t len);
 
 /**
+ * Broadcast data to all authenticated connections.
+ * Iterates over all connections and sends notifications to authenticated ones.
+ */
+esp_err_t sdf_ble_companion_broadcast_ota(const uint8_t *data, size_t len);
+
+/**
  * Validate and start an HTTPS OTA request encoded as UTF-8 JSON:
  * {"ssid":"...","password":"...","firmwareUrl":"https://..."}.
  */

@@ -42,6 +42,10 @@ static esp_netif_t *s_wifi_netif;
 static bool s_wifi_initialized;
 static bool s_ota_task_running;
 
+static void sdf_ble_ota_notify(const char *json_str) {
+    sdf_ble_companion_broadcast_ota((const uint8_t *)json_str, strlen(json_str));
+}
+
 static void sdf_ble_ota_event_handler(void *arg, esp_event_base_t event_base,
                                       int32_t event_id, void *event_data) {
     (void)arg;
@@ -124,6 +128,9 @@ static esp_err_t sdf_ble_ota_connect(const sdf_ble_ota_request_t *request) {
     memcpy(wifi_config.sta.password, request->password,
            strlen(request->password));
 
+    // Notify: WiFi connecting
+    sdf_ble_ota_notify("{\"status\":\"wifi_connecting\"}");
+
     xEventGroupClearBits(s_wifi_events,
                          SDF_BLE_OTA_WIFI_CONNECTED | SDF_BLE_OTA_WIFI_FAILED);
     esp_err_t err = esp_wifi_disconnect();
@@ -143,6 +150,8 @@ static esp_err_t sdf_ble_ota_connect(const sdf_ble_ota_request_t *request) {
         s_wifi_events, SDF_BLE_OTA_WIFI_CONNECTED | SDF_BLE_OTA_WIFI_FAILED,
         pdFALSE, pdFALSE, pdMS_TO_TICKS(SDF_BLE_OTA_CONNECT_TIMEOUT_MS));
     if ((bits & SDF_BLE_OTA_WIFI_CONNECTED) != 0) {
+        // Notify: WiFi connected
+        sdf_ble_ota_notify("{\"status\":\"wifi_connected\"}");
         return ESP_OK;
     }
     return (bits & SDF_BLE_OTA_WIFI_FAILED) != 0 ? ESP_FAIL : ESP_ERR_TIMEOUT;
@@ -174,6 +183,11 @@ static esp_err_t sdf_ble_ota_download(const char *firmware_url) {
         return ESP_ERR_INVALID_SIZE;
     }
 
+    // Notify: downloading started
+    char notify_buf[128];
+    snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"downloading\",\"progress\":0,\"total\":%lld}", (long long)content_length);
+    sdf_ble_ota_notify(notify_buf);
+
     err = sdf_ota_init();
     sdf_ota_handle_t ota_handle = NULL;
     if (err == ESP_OK) {
@@ -189,6 +203,9 @@ static esp_err_t sdf_ble_ota_download(const char *firmware_url) {
         }
     }
 
+    uint32_t bytes_downloaded = 0;
+    int last_reported_progress = 0;
+
     while (err == ESP_OK) {
         const int read_len = esp_http_client_read(
             client, (char *)buffer, SDF_BLE_OTA_DOWNLOAD_BUFFER_LEN);
@@ -198,10 +215,21 @@ static esp_err_t sdf_ble_ota_download(const char *firmware_url) {
             break;
         } else {
             err = sdf_ota_write(ota_handle, buffer, (uint32_t)read_len);
+            bytes_downloaded += read_len;
+
+            // Report progress at 25%, 50%, 75%, 100%
+            int progress = (int)((bytes_downloaded * 100LL) / content_length);
+            if (progress >= last_reported_progress + 25 || progress == 100) {
+                snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"downloading\",\"progress\":%d}", progress);
+                sdf_ble_ota_notify(notify_buf);
+                last_reported_progress = progress;
+            }
         }
     }
 
     if (err == ESP_OK) {
+        // Notify: verifying
+        sdf_ble_ota_notify("{\"status\":\"verifying\"}");
         err = sdf_ota_verify_integrity(ota_handle);
     }
     if (err == ESP_OK) {
@@ -231,6 +259,12 @@ static void sdf_ble_ota_task(void *arg) {
     }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BLE OTA failed: %s", esp_err_to_name(err));
+        char notify_buf[128];
+        snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"failed\",\"error\":\"%s\"}", esp_err_to_name(err));
+        sdf_ble_ota_notify(notify_buf);
+    } else {
+        // Notify: success
+        sdf_ble_ota_notify("{\"status\":\"success\"}");
     }
 
     mbedtls_platform_zeroize(request, sizeof(*request));
