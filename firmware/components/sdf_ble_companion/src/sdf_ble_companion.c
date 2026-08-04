@@ -274,25 +274,25 @@ static const struct ble_gatt_chr_def s_characteristics[] = {
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_AUTH_UUID128),
         .access_cb = sdf_ble_companion_auth_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_auth_val_handle,
     },
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_CONFIG_UUID128),
         .access_cb = sdf_ble_companion_config_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_config_val_handle,
     },
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_ENROLL_UUID128),
         .access_cb = sdf_ble_companion_enroll_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_enroll_val_handle,
     },
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_OTA_UUID128),
         .access_cb = sdf_ble_companion_ota_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_INDICATE,
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_ota_val_handle,
     },
     { 0 }
@@ -516,7 +516,7 @@ esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authent
     if (conn->connected) {
         struct os_mbuf *om = ble_hs_mbuf_from_flat(s_auth_value, s_auth_value_len);
         if (om) {
-            ble_gatts_indicate_custom(conn->conn_handle, s_auth_val_handle, om);
+            ble_gatts_notify_custom(conn->conn_handle, s_auth_val_handle, om);
         }
     }
 
