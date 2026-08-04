@@ -2,6 +2,7 @@
 #include "sdf_storage.h"
 #include "sdf_event_router.h"
 #include "sdf_nuki_ble_transport.h"
+#include "sdf_config.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -17,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "mbedtls/constant_time.h"
+#include "cJSON.h"
 
 #define TAG "sdf_ble_companion"
 
@@ -68,6 +70,9 @@ static uint16_t s_config_value_len = 0;
 static uint16_t s_enroll_value_len = 0;
 static uint16_t s_ota_value_len = 0;
 
+static sdf_event_router_subscriber_t *s_enrollment_sub = NULL;
+static sdf_event_router_subscriber_t *s_enrollment_failed_sub = NULL;
+
 static uint8_t s_adv_data[31];
 static uint8_t s_adv_data_len = 0;
 
@@ -87,6 +92,64 @@ static sdf_ble_companion_connection_t *sdf_ble_companion_get_free_conn(void) {
         }
     }
     return NULL;
+}
+
+static void sdf_ble_companion_enrollment_complete_handler(void *ctx,
+                                                           const sdf_event_router_event_t *event) {
+    (void)ctx;
+    if (!event) return;
+
+    uint16_t user_id = event->payload.enrollment_complete.user_id;
+    ESP_LOGI(TAG, "Enrollment complete for user_id=%u", (unsigned)user_id);
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "status", "success");
+    cJSON_AddNumberToObject(root, "user_id", user_id);
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (json_str) {
+        // Broadcast to all authenticated connections
+        for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+            if (s_connections[i].connected &&
+                s_connections[i].auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+                sdf_ble_companion_notify_enroll(s_connections[i].conn_handle,
+                                                 (const uint8_t *)json_str, strlen(json_str));
+            }
+        }
+        free(json_str);
+    }
+}
+
+static void sdf_ble_companion_enrollment_failed_handler(void *ctx,
+                                                         const sdf_event_router_event_t *event) {
+    (void)ctx;
+    if (!event) return;
+
+    uint8_t step = event->payload.enrollment_failed.step;
+    int8_t error_code = event->payload.enrollment_failed.error_code;
+    ESP_LOGW(TAG, "Enrollment failed at step=%u error=%d", (unsigned)step, (int)error_code);
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "status", "failed");
+    cJSON_AddNumberToObject(root, "step", step);
+    cJSON_AddNumberToObject(root, "error_code", error_code);
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (json_str) {
+        // Broadcast to all authenticated connections
+        for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+            if (s_connections[i].connected &&
+                s_connections[i].auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+                sdf_ble_companion_notify_enroll(s_connections[i].conn_handle,
+                                                 (const uint8_t *)json_str, strlen(json_str));
+            }
+        }
+        free(json_str);
+    }
 }
 
 static void sdf_ble_companion_start_advertising(void);
@@ -218,11 +281,44 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-        uint16_t tmp_len = s_config_value_len;
-        memcpy(tmp, s_config_value, tmp_len);
+        // Serialize current config subset to JSON
+        const sdf_config_t *cfg = sdf_config_get();
+        if (!cfg) {
+            xSemaphoreGive(s_lock);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+
+        cJSON *root = cJSON_CreateObject();
+        if (!root) {
+            xSemaphoreGive(s_lock);
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+
+        cJSON_AddNumberToObject(root, "checkin_interval_ms", cfg->checkin_interval_ms);
+        cJSON_AddNumberToObject(root, "idle_before_sleep_ms", cfg->idle_before_sleep_ms);
+        cJSON_AddNumberToObject(root, "post_wake_guard_ms", cfg->post_wake_guard_ms);
+        cJSON_AddNumberToObject(root, "battery_default_percent", cfg->battery_default_percent);
+        cJSON_AddBoolToObject(root, "ble_connect_on_demand", cfg->ble_connect_on_demand);
+        cJSON_AddNumberToObject(root, "match_poll_interval_ms", cfg->match_poll_interval_ms);
+        cJSON_AddNumberToObject(root, "battery_report_interval_ms", cfg->battery_report_interval_ms);
+        cJSON_AddNumberToObject(root, "power_loop_interval_ms", cfg->power_loop_interval_ms);
+        cJSON_AddNumberToObject(root, "failed_attempt_threshold", cfg->failed_attempt_threshold);
+        cJSON_AddNumberToObject(root, "failed_attempt_window_ms", cfg->failed_attempt_window_ms);
+        cJSON_AddNumberToObject(root, "lockout_duration_ms", cfg->lockout_duration_ms);
+
+        char *json_str = cJSON_PrintUnformatted(root);
+        cJSON_Delete(root);
+
+        if (!json_str) {
+            xSemaphoreGive(s_lock);
+            return BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
+
+        size_t json_len = strlen(json_str);
         xSemaphoreGive(s_lock);
-        int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
+
+        int rc = os_mbuf_append(ctxt->om, json_str, json_len);
+        free(json_str);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
@@ -396,6 +492,12 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
                 } else {
                     ESP_LOGW(TAG, "gap_event connect: lock contention");
                 }
+
+                // Request MTU exchange after connection
+                int rc = ble_gattc_exchange_mtu(event->connect.conn_handle, NULL, NULL);
+                if (rc != 0) {
+                    ESP_LOGW(TAG, "Failed to request MTU exchange: %d", rc);
+                }
             } else {
                 ESP_LOGW(TAG, "Connection failed: %d", event->connect.status);
             }
@@ -542,6 +644,23 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Subscribe to enrollment events
+    esp_err_t err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
+                                                SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                                sdf_ble_companion_enrollment_complete_handler,
+                                                NULL, &s_enrollment_sub);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
+    }
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_FAILED,
+                                      SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                      sdf_ble_companion_enrollment_failed_handler,
+                                      NULL, &s_enrollment_failed_sub);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
+    }
+
     s_initialized = true;
     ESP_LOGI(TAG, "BLE Companion Service registered with shared NimBLE host");
     return ESP_OK;
@@ -556,6 +675,15 @@ esp_err_t sdf_ble_companion_deinit(void) {
         if (s_connections[i].connected) {
             ble_gap_terminate(s_connections[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
         }
+    }
+
+    if (s_enrollment_sub) {
+        sdf_event_router_unsubscribe(s_enrollment_sub);
+        s_enrollment_sub = NULL;
+    }
+    if (s_enrollment_failed_sub) {
+        sdf_event_router_unsubscribe(s_enrollment_failed_sub);
+        s_enrollment_failed_sub = NULL;
     }
 
     if (s_lock) {

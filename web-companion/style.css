@@ -26,13 +26,13 @@ body {
     border-radius: 16px;
     padding: 2rem;
     width: 100%;
-    max-width: 400px;
+    max-width: 480px;
     box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
 }
 
 header {
     text-align: center;
-    margin-bottom: 2rem;
+    margin-bottom: 1.5rem;
 }
 
 header h1 {
@@ -45,6 +45,38 @@ header p {
     margin: 0.25rem 0 0;
     color: #94a3b8;
     font-size: 0.9rem;
+}
+
+/* Status Cards */
+.status-cards {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+    justify-content: center;
+}
+
+.status-card {
+    background: rgba(0, 0, 0, 0.2);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 0.75rem 1.25rem;
+    min-width: 120px;
+    text-align: center;
+}
+
+.status-label {
+    display: block;
+    font-size: 0.75rem;
+    color: #94a3b8;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 0.25rem;
+}
+
+.status-value {
+    font-size: 1.25rem;
+    font-weight: 600;
+    color: var(--primary-color);
 }
 
 .view {
@@ -150,7 +182,8 @@ header p {
     margin-bottom: 0.4rem;
 }
 
-.input-group input {
+.input-group input,
+.input-group select {
     width: 100%;
     padding: 0.75rem;
     background: rgba(0, 0, 0, 0.2);
@@ -161,7 +194,8 @@ header p {
     box-sizing: border-box;
 }
 
-.input-group input:focus {
+.input-group input:focus,
+.input-group select:focus {
     outline: none;
     border-color: var(--primary-color);
 }
@@ -194,4 +228,95 @@ header p {
     background-color: rgba(245, 158, 11, 0.1);
     color: #fcd34d;
     border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+/* Config Table */
+.config-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.config-table tr {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.config-table td {
+    padding: 0.5rem 0;
+}
+
+.config-table td:first-child {
+    width: 50%;
+    color: #cbd5e1;
+}
+
+.config-table td:last-child {
+    text-align: right;
+}
+
+.config-table input[type="number"],
+.config-table input[type="checkbox"] {
+    width: auto;
+    min-width: 80px;
+    padding: 0.4rem 0.6rem;
+    font-size: 0.85rem;
+}
+
+/* Enrollment Panel */
+.enrollment-panel {
+    text-align: left;
+}
+
+.enroll-progress {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: rgba(0, 0, 0, 0.15);
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+
+.step-indicator {
+    margin-bottom: 0.5rem;
+}
+
+.progress-bar {
+    height: 8px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-top: 0.5rem;
+}
+
+.progress-fill {
+    height: 100%;
+    background: var(--primary-color);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+/* OTA Progress */
+progress {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 8px;
+    border: none;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.3);
+}
+
+progress::-webkit-progress-bar {
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 4px;
+}
+
+progress::-webkit-progress-value {
+    background: var(--primary-color);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+progress::-moz-progress-bar {
+    background: var(--primary-color);
+    border-radius: 4px;
 }

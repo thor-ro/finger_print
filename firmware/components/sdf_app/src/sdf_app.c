@@ -32,6 +32,7 @@
 #include "sdf_event_router.h"
 #include "sdf_storage.h"
 #include "sdf_ble_companion.h"
+#include "cJSON.h"
 
 #define SDF_APP_ID 1u
 #define SDF_APP_NAME "SDF"
@@ -480,6 +481,92 @@ static void sdf_ble_companion_on_config_write(void *ctx,
                                                size_t len) {
     (void)ctx;
     ESP_LOGI(TAG, "BLE Companion: Config write, len=%u", (unsigned)len);
+
+    cJSON *root = cJSON_ParseWithLength((const char *)data, len);
+    if (!root) {
+        ESP_LOGW(TAG, "Config write: invalid JSON");
+        return;
+    }
+
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        ESP_LOGW(TAG, "Config write: runtime overrides disabled");
+        cJSON_Delete(root);
+        return;
+    }
+
+    cJSON *item;
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "checkin_interval_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->checkin_interval_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: checkin_interval_ms=%lu", (unsigned long)cfg->checkin_interval_ms);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "idle_before_sleep_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->idle_before_sleep_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: idle_before_sleep_ms=%lu", (unsigned long)cfg->idle_before_sleep_ms);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "post_wake_guard_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->post_wake_guard_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: post_wake_guard_ms=%lu", (unsigned long)cfg->post_wake_guard_ms);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "battery_default_percent");
+    if (cJSON_IsNumber(item)) {
+        cfg->battery_default_percent = (uint8_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: battery_default_percent=%u", (unsigned)cfg->battery_default_percent);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "ble_connect_on_demand");
+    if (cJSON_IsBool(item)) {
+        cfg->ble_connect_on_demand = cJSON_IsTrue(item);
+        ESP_LOGI(TAG, "Config: ble_connect_on_demand=%d", cfg->ble_connect_on_demand);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "match_poll_interval_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->match_poll_interval_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: match_poll_interval_ms=%lu", (unsigned long)cfg->match_poll_interval_ms);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "battery_report_interval_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->battery_report_interval_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: battery_report_interval_ms=%lu", (unsigned long)cfg->battery_report_interval_ms);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "power_loop_interval_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->power_loop_interval_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: power_loop_interval_ms=%lu", (unsigned long)cfg->power_loop_interval_ms);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "failed_attempt_threshold");
+    if (cJSON_IsNumber(item)) {
+        cfg->failed_attempt_threshold = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: failed_attempt_threshold=%lu", (unsigned long)cfg->failed_attempt_threshold);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "failed_attempt_window_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->failed_attempt_window_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: failed_attempt_window_ms=%lu", (unsigned long)cfg->failed_attempt_window_ms);
+    }
+
+    item = cJSON_GetObjectItemCaseSensitive(root, "lockout_duration_ms");
+    if (cJSON_IsNumber(item)) {
+        cfg->lockout_duration_ms = (uint32_t)item->valuedouble;
+        ESP_LOGI(TAG, "Config: lockout_duration_ms=%lu", (unsigned long)cfg->lockout_duration_ms);
+    }
+
+    cJSON_Delete(root);
+
+    // Send confirmation notify with current config subset
+    // This will be handled by the caller after the callback returns
 }
 
 static void sdf_ble_companion_on_enroll_write(void *ctx,
@@ -487,6 +574,43 @@ static void sdf_ble_companion_on_enroll_write(void *ctx,
                                                size_t len) {
     (void)ctx;
     ESP_LOGI(TAG, "BLE Companion: Enroll write, len=%u", (unsigned)len);
+
+    cJSON *root = cJSON_ParseWithLength((const char *)data, len);
+    if (!root) {
+        ESP_LOGW(TAG, "Enroll write: invalid JSON");
+        return;
+    }
+
+    cJSON *user_id_item = cJSON_GetObjectItemCaseSensitive(root, "user_id");
+    cJSON *permission_item = cJSON_GetObjectItemCaseSensitive(root, "permission");
+
+    if (!cJSON_IsNumber(user_id_item) || !cJSON_IsNumber(permission_item)) {
+        ESP_LOGW(TAG, "Enroll write: missing or invalid user_id/permission");
+        cJSON_Delete(root);
+        return;
+    }
+
+    uint16_t user_id = (uint16_t)user_id_item->valuedouble;
+    uint8_t permission = (uint8_t)permission_item->valuedouble;
+
+    if (user_id == 0 || user_id > SDF_FINGERPRINT_USER_ID_MAX) {
+        ESP_LOGW(TAG, "Enroll write: user_id out of range (1-%d)", SDF_FINGERPRINT_USER_ID_MAX);
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (permission < 1 || permission > 3) {
+        ESP_LOGW(TAG, "Enroll write: permission out of range (1-3)");
+        cJSON_Delete(root);
+        return;
+    }
+
+    esp_err_t err = sdf_services_request_enrollment(user_id, permission);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to request enrollment: %s", esp_err_to_name(err));
+    }
+
+    cJSON_Delete(root);
 }
 
 static void sdf_ble_companion_on_ota_write(void *ctx,
