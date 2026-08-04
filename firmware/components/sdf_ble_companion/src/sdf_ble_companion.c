@@ -95,21 +95,24 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                                           struct ble_gatt_access_ctxt *ctxt, void *arg) {
     (void)attr_handle;
     (void)arg;
+
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
+        ESP_LOGW(TAG, "auth_access: lock contention");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn) {
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_HANDLE;
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        if (conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
-            const char *resp = "AUTH_OK";
-            int rc = os_mbuf_append(ctxt->om, resp, strlen(resp));
-            return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-        } else {
-            const char *resp = "AUTH_REQUIRED";
-            int rc = os_mbuf_append(ctxt->om, resp, strlen(resp));
-            return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-        }
+        const char *resp = (conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED)
+                               ? "AUTH_OK" : "AUTH_REQUIRED";
+        xSemaphoreGive(s_lock);
+        int rc = os_mbuf_append(ctxt->om, resp, strlen(resp));
+        return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
@@ -123,6 +126,7 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 if (username_len == 0 ||
                     username_len >= SDF_STORAGE_WEB_USER_NAME_MAX ||
                     len != 2 + username_len + SDF_STORAGE_WEB_USER_HASH_LEN) {
+                    xSemaphoreGive(s_lock);
                     return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
                 }
 
@@ -145,9 +149,11 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                         conn->auth_pending = false;
                         memset(conn->password_hash, 0,
                                sizeof(conn->password_hash));
+                        xSemaphoreGive(s_lock);
                         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
                     }
 
+                    xSemaphoreGive(s_lock);
                     if (sdf_ble_companion_set_authenticated(conn_handle, true) !=
                         ESP_OK) {
                         return BLE_ATT_ERR_UNLIKELY;
@@ -157,15 +163,23 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
 
                 conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_PENDING;
                 conn->auth_pending = true;
-                if (s_callbacks.on_auth_request) {
-                    s_callbacks.on_auth_request(s_callbacks.ctx,
-                                                conn->username,
-                                                conn->password_hash,
-                                                SDF_STORAGE_WEB_USER_HASH_LEN);
-                }
+                /* Copy callback pointer before releasing lock */
+                void (*on_auth_req)(void *, const char *, const uint8_t *, size_t) =
+                    s_callbacks.on_auth_request;
+                void *cb_ctx = s_callbacks.ctx;
+                char username_copy[SDF_STORAGE_WEB_USER_NAME_MAX];
+                uint8_t hash_copy[SDF_STORAGE_WEB_USER_HASH_LEN];
+                strlcpy(username_copy, conn->username, sizeof(username_copy));
+                memcpy(hash_copy, conn->password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
 
                 s_auth_value_len = 1;
                 s_auth_value[0] = SDF_BLE_COMPANION_AUTH_RESULT_PENDING;
+                xSemaphoreGive(s_lock);
+
+                if (on_auth_req) {
+                    on_auth_req(cb_ctx, username_copy, hash_copy,
+                                SDF_STORAGE_WEB_USER_HASH_LEN);
+                }
                 return 0;
             } else if (cmd == SDF_BLE_COMPANION_AUTH_LOGOUT) {
                 conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
@@ -174,12 +188,16 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 memset(conn->password_hash, 0, sizeof(conn->password_hash));
                 s_auth_value_len = 1;
                 s_auth_value[0] = SDF_BLE_COMPANION_AUTH_LOGOUT;
+                xSemaphoreGive(s_lock);
                 return 0;
             }
+            xSemaphoreGive(s_lock);
             return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
         }
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
+    xSemaphoreGive(s_lock);
     return BLE_ATT_ERR_UNLIKELY;
 }
 
@@ -187,13 +205,24 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
                                             struct ble_gatt_access_ctxt *ctxt, void *arg) {
     (void)attr_handle;
     (void)arg;
+
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
+        ESP_LOGW(TAG, "config_access: lock contention");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn || conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        int rc = os_mbuf_append(ctxt->om, s_config_value, s_config_value_len);
+        uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+        uint16_t tmp_len = s_config_value_len;
+        memcpy(tmp, s_config_value, tmp_len);
+        xSemaphoreGive(s_lock);
+        int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
@@ -201,14 +230,20 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
             os_mbuf_copydata(om, 0, len, s_config_value);
             s_config_value_len = len;
-
-            if (s_callbacks.on_config_write) {
-                s_callbacks.on_config_write(s_callbacks.ctx, s_config_value, len);
+            void (*on_config)(void *, const uint8_t *, size_t) = s_callbacks.on_config_write;
+            void *cb_ctx = s_callbacks.ctx;
+            uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+            memcpy(tmp, s_config_value, len);
+            xSemaphoreGive(s_lock);
+            if (on_config) {
+                on_config(cb_ctx, tmp, len);
             }
             return 0;
         }
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
+    xSemaphoreGive(s_lock);
     return BLE_ATT_ERR_UNLIKELY;
 }
 
@@ -216,13 +251,24 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
                                             struct ble_gatt_access_ctxt *ctxt, void *arg) {
     (void)attr_handle;
     (void)arg;
+
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
+        ESP_LOGW(TAG, "enroll_access: lock contention");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn || conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        int rc = os_mbuf_append(ctxt->om, s_enroll_value, s_enroll_value_len);
+        uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+        uint16_t tmp_len = s_enroll_value_len;
+        memcpy(tmp, s_enroll_value, tmp_len);
+        xSemaphoreGive(s_lock);
+        int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
@@ -230,14 +276,20 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
             os_mbuf_copydata(om, 0, len, s_enroll_value);
             s_enroll_value_len = len;
-
-            if (s_callbacks.on_enroll_write) {
-                s_callbacks.on_enroll_write(s_callbacks.ctx, s_enroll_value, len);
+            void (*on_enroll)(void *, const uint8_t *, size_t) = s_callbacks.on_enroll_write;
+            void *cb_ctx = s_callbacks.ctx;
+            uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+            memcpy(tmp, s_enroll_value, len);
+            xSemaphoreGive(s_lock);
+            if (on_enroll) {
+                on_enroll(cb_ctx, tmp, len);
             }
             return 0;
         }
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
+    xSemaphoreGive(s_lock);
     return BLE_ATT_ERR_UNLIKELY;
 }
 
@@ -245,13 +297,24 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
                                          struct ble_gatt_access_ctxt *ctxt, void *arg) {
     (void)attr_handle;
     (void)arg;
+
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
+        ESP_LOGW(TAG, "ota_access: lock contention");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn || conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        int rc = os_mbuf_append(ctxt->om, s_ota_value, s_ota_value_len);
+        uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+        uint16_t tmp_len = s_ota_value_len;
+        memcpy(tmp, s_ota_value, tmp_len);
+        xSemaphoreGive(s_lock);
+        int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
@@ -259,14 +322,20 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
             os_mbuf_copydata(om, 0, len, s_ota_value);
             s_ota_value_len = len;
-
-            if (s_callbacks.on_ota_write) {
-                s_callbacks.on_ota_write(s_callbacks.ctx, s_ota_value, len);
+            void (*on_ota)(void *, const uint8_t *, size_t) = s_callbacks.on_ota_write;
+            void *cb_ctx = s_callbacks.ctx;
+            uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+            memcpy(tmp, s_ota_value, len);
+            xSemaphoreGive(s_lock);
+            if (on_ota) {
+                on_ota(cb_ctx, tmp, len);
             }
             return 0;
         }
+        xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
+    xSemaphoreGive(s_lock);
     return BLE_ATT_ERR_UNLIKELY;
 }
 
@@ -313,14 +382,19 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
             if (event->connect.status == 0) {
                 ESP_LOGI(TAG, "Connected, conn_handle=%d", event->connect.conn_handle);
 
-                sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_free_conn();
-                if (conn) {
-                    conn->conn_handle = event->connect.conn_handle;
-                    conn->connected = true;
-                    conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
-                    conn->auth_pending = false;
-                    memset(conn->username, 0, sizeof(conn->username));
-                    memset(conn->password_hash, 0, sizeof(conn->password_hash));
+                if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_free_conn();
+                    if (conn) {
+                        conn->conn_handle = event->connect.conn_handle;
+                        conn->connected = true;
+                        conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
+                        conn->auth_pending = false;
+                        memset(conn->username, 0, sizeof(conn->username));
+                        memset(conn->password_hash, 0, sizeof(conn->password_hash));
+                    }
+                    xSemaphoreGive(s_lock);
+                } else {
+                    ESP_LOGW(TAG, "gap_event connect: lock contention");
                 }
             } else {
                 ESP_LOGW(TAG, "Connection failed: %d", event->connect.status);
@@ -331,15 +405,20 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
             ESP_LOGI(TAG, "Disconnected, conn_handle=%d, reason=%d",
                      event->disconnect.conn.conn_handle, event->disconnect.reason);
 
-            for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
-                if (s_connections[i].connected &&
-                    s_connections[i].conn_handle == event->disconnect.conn.conn_handle) {
-                    s_connections[i].connected = false;
-                    s_connections[i].conn_handle = 0;
-                    s_connections[i].auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
-                    s_connections[i].auth_pending = false;
-                    break;
+            if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+                for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+                    if (s_connections[i].connected &&
+                        s_connections[i].conn_handle == event->disconnect.conn.conn_handle) {
+                        s_connections[i].connected = false;
+                        s_connections[i].conn_handle = 0;
+                        s_connections[i].auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
+                        s_connections[i].auth_pending = false;
+                        break;
+                    }
                 }
+                xSemaphoreGive(s_lock);
+            } else {
+                ESP_LOGW(TAG, "gap_event disconnect: lock contention");
             }
             sdf_ble_companion_start_advertising();
             break;
@@ -491,13 +570,23 @@ esp_err_t sdf_ble_companion_deinit(void) {
 }
 
 bool sdf_ble_companion_is_authenticated(uint16_t conn_handle) {
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return false;
+    }
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
-    return conn && conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED;
+    bool result = conn && conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED;
+    xSemaphoreGive(s_lock);
+    return result;
 }
 
 esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authenticated) {
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn) {
+        xSemaphoreGive(s_lock);
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -513,10 +602,16 @@ esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authent
         s_auth_value[0] = 0x00;
     }
 
-    if (conn->connected) {
-        struct os_mbuf *om = ble_hs_mbuf_from_flat(s_auth_value, s_auth_value_len);
+    bool connected = conn->connected;
+    uint16_t handle = conn->conn_handle;
+    uint8_t val[1] = {s_auth_value[0]};
+    xSemaphoreGive(s_lock);
+
+    /* BLE call outside lock */
+    if (connected) {
+        struct os_mbuf *om = ble_hs_mbuf_from_flat(val, 1);
         if (om) {
-            ble_gatts_notify_custom(conn->conn_handle, s_auth_val_handle, om);
+            ble_gatts_notify_custom(handle, s_auth_val_handle, om);
         }
     }
 
@@ -527,15 +622,29 @@ esp_err_t sdf_ble_companion_reply_auth(const char *username, bool authorized) {
     if (!username) {
         return ESP_ERR_INVALID_ARG;
     }
-    
+
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    uint16_t found_handle = 0;
+    bool found = false;
     for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
         if (s_connections[i].connected && s_connections[i].auth_pending) {
             if (strncmp(s_connections[i].username, username, SDF_STORAGE_WEB_USER_NAME_MAX) == 0) {
-                return sdf_ble_companion_set_authenticated(s_connections[i].conn_handle, authorized);
+                found_handle = s_connections[i].conn_handle;
+                found = true;
+                break;
             }
         }
     }
-    return ESP_ERR_NOT_FOUND;
+    xSemaphoreGive(s_lock);
+
+    if (!found) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    /* set_authenticated acquires the lock internally */
+    return sdf_ble_companion_set_authenticated(found_handle, authorized);
 }
 
 esp_err_t sdf_ble_companion_notify_config(uint16_t conn_handle, const uint8_t *data, size_t len) {
@@ -543,17 +652,24 @@ esp_err_t sdf_ble_companion_notify_config(uint16_t conn_handle, const uint8_t *d
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn || !conn->connected) {
+        xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
 
     if (conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+        xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
 
     memcpy(s_config_value, data, len);
     s_config_value_len = len;
+    xSemaphoreGive(s_lock);
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
     if (!om) {
@@ -569,17 +685,24 @@ esp_err_t sdf_ble_companion_notify_enroll(uint16_t conn_handle, const uint8_t *d
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn || !conn->connected) {
+        xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
 
     if (conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+        xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
 
     memcpy(s_enroll_value, data, len);
     s_enroll_value_len = len;
+    xSemaphoreGive(s_lock);
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
     if (!om) {
@@ -595,17 +718,24 @@ esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data
         return ESP_ERR_INVALID_ARG;
     }
 
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
     if (!conn || !conn->connected) {
+        xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
 
     if (conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+        xSemaphoreGive(s_lock);
         return ESP_ERR_INVALID_STATE;
     }
 
     memcpy(s_ota_value, data, len);
     s_ota_value_len = len;
+    xSemaphoreGive(s_lock);
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
     if (!om) {
