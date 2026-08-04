@@ -63,6 +63,7 @@ static bool s_latch_sequence_active;
 static bool s_lock_action_pending;
 static uint8_t s_pending_lock_action;
 static uint8_t s_pending_lock_flags;
+static bool s_periodic_poll_pending;
 
 static sdf_lock_flow_t s_lock_flow;
 
@@ -374,10 +375,15 @@ static void sdf_app_power_wakeup(void *ctx, sdf_power_wake_reason_t reason) {
   ESP_LOGI(TAG, "Power wake event: %s", sdf_app_power_wake_reason_name(reason));
 
   if (reason == SDF_POWER_WAKE_REASON_TIMER && s_has_creds &&
-      !s_pairing_active && sdf_nuki_ble_is_ready(&s_ble)) {
-    int res = sdf_app_request_keyturner_state();
-    if (res != SDF_NUKI_RESULT_OK) {
-      ESP_LOGD(TAG, "Periodic keyturner refresh skipped: %d", res);
+      !s_pairing_active) {
+    if (sdf_nuki_ble_is_ready(&s_ble)) {
+      int res = sdf_app_request_keyturner_state();
+      if (res != SDF_NUKI_RESULT_OK) {
+        ESP_LOGD(TAG, "Periodic keyturner refresh skipped: %d", res);
+      }
+    } else {
+      s_periodic_poll_pending = true;
+      sdf_app_resume_ble_transport("periodic state poll");
     }
   }
 }
@@ -1258,6 +1264,16 @@ static void sdf_app_on_ble_ready(void *ctx) {
     int res = sdf_app_dispatch_pending_lock_action();
     if (res != SDF_NUKI_RESULT_OK) {
       ESP_LOGW(TAG, "Queued lock action still waiting after BLE ready: %d", res);
+    }
+    return;
+  }
+
+  // Handle periodic state poll if pending
+  if (s_periodic_poll_pending) {
+    s_periodic_poll_pending = false;
+    int res = sdf_app_request_keyturner_state();
+    if (res != SDF_NUKI_RESULT_OK) {
+      ESP_LOGW(TAG, "Periodic keyturner state request failed: %d", res);
     }
     return;
   }

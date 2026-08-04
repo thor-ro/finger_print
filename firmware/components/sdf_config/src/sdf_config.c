@@ -82,6 +82,7 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     config->nuki_target_addr_type = 1; // BLE_ADDR_RANDOM
     memset(config->nuki_target_addr, 0, 6);
     config->ble_connect_on_demand = CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND;
+    config->nuki_state_poll_interval_ms = CONFIG_SDF_POWER_NUKI_STATE_POLL_INTERVAL_MS;
 
     /* Security */
     config->nonce_replay_window = CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW;
@@ -332,5 +333,17 @@ esp_err_t sdf_config_set_post_wake_guard(uint32_t interval_ms) {
         return ESP_ERR_INVALID_STATE;
     }
     cfg->post_wake_guard_ms = interval_ms;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_nuki_state_poll_interval(uint32_t interval_ms) {
+    if (interval_ms < 1000 || interval_ms > 86400000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->nuki_state_poll_interval_ms = interval_ms;
     return ESP_OK;
 }

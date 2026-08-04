@@ -69,6 +69,7 @@ typedef struct {
     uint8_t nuki_target_addr_type;
     uint8_t nuki_target_addr[6];
     bool ble_connect_on_demand;
+    uint32_t nuki_state_poll_interval_ms;
 
     /* Security */
     uint8_t nonce_replay_window;
@@ -185,6 +186,14 @@ esp_err_t sdf_config_set_idle_before_sleep(uint32_t interval_ms);
  * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
  */
 esp_err_t sdf_config_set_post_wake_guard(uint32_t interval_ms);
+
+/**
+ * @brief Set Nuki state poll interval.
+ *
+ * @param interval_ms New interval in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_nuki_state_poll_interval(uint32_t interval_ms);
 
 #ifdef __cplusplus
 }
