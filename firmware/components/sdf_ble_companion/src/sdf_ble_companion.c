@@ -61,15 +61,6 @@ static uint16_t s_config_val_handle = 0;
 static uint16_t s_enroll_val_handle = 0;
 static uint16_t s_ota_val_handle = 0;
 
-static uint8_t s_auth_value[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-static uint8_t s_config_value[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-static uint8_t s_enroll_value[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-static uint8_t s_ota_value[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-static uint16_t s_auth_value_len = 0;
-static uint16_t s_config_value_len = 0;
-static uint16_t s_enroll_value_len = 0;
-static uint16_t s_ota_value_len = 0;
-
 static sdf_event_router_subscriber_t *s_enrollment_sub = NULL;
 static sdf_event_router_subscriber_t *s_enrollment_failed_sub = NULL;
 
@@ -235,8 +226,8 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 strlcpy(username_copy, conn->username, sizeof(username_copy));
                 memcpy(hash_copy, conn->password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
 
-                s_auth_value_len = 1;
-                s_auth_value[0] = SDF_BLE_COMPANION_AUTH_RESULT_PENDING;
+                conn->auth_value_len = 1;
+                conn->auth_value[0] = SDF_BLE_COMPANION_AUTH_RESULT_PENDING;
                 xSemaphoreGive(s_lock);
 
                 if (on_auth_req) {
@@ -249,8 +240,8 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 conn->auth_pending = false;
                 memset(conn->username, 0, sizeof(conn->username));
                 memset(conn->password_hash, 0, sizeof(conn->password_hash));
-                s_auth_value_len = 1;
-                s_auth_value[0] = SDF_BLE_COMPANION_AUTH_LOGOUT;
+                conn->auth_value_len = 1;
+                conn->auth_value[0] = SDF_BLE_COMPANION_AUTH_LOGOUT;
                 xSemaphoreGive(s_lock);
                 return 0;
             }
@@ -324,12 +315,12 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            os_mbuf_copydata(om, 0, len, s_config_value);
-            s_config_value_len = len;
+            os_mbuf_copydata(om, 0, len, conn->config_value);
+            conn->config_value_len = len;
             void (*on_config)(void *, const uint8_t *, size_t) = s_callbacks.on_config_write;
             void *cb_ctx = s_callbacks.ctx;
             uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-            memcpy(tmp, s_config_value, len);
+            memcpy(tmp, conn->config_value, len);
             xSemaphoreGive(s_lock);
             if (on_config) {
                 on_config(cb_ctx, tmp, len);
@@ -361,8 +352,8 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-        uint16_t tmp_len = s_enroll_value_len;
-        memcpy(tmp, s_enroll_value, tmp_len);
+        uint16_t tmp_len = conn->enroll_value_len;
+        memcpy(tmp, conn->enroll_value, tmp_len);
         xSemaphoreGive(s_lock);
         int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
@@ -370,12 +361,12 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            os_mbuf_copydata(om, 0, len, s_enroll_value);
-            s_enroll_value_len = len;
+            os_mbuf_copydata(om, 0, len, conn->enroll_value);
+            conn->enroll_value_len = len;
             void (*on_enroll)(void *, const uint8_t *, size_t) = s_callbacks.on_enroll_write;
             void *cb_ctx = s_callbacks.ctx;
             uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-            memcpy(tmp, s_enroll_value, len);
+            memcpy(tmp, conn->enroll_value, len);
             xSemaphoreGive(s_lock);
             if (on_enroll) {
                 on_enroll(cb_ctx, tmp, len);
@@ -407,8 +398,8 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-        uint16_t tmp_len = s_ota_value_len;
-        memcpy(tmp, s_ota_value, tmp_len);
+        uint16_t tmp_len = conn->ota_value_len;
+        memcpy(tmp, conn->ota_value, tmp_len);
         xSemaphoreGive(s_lock);
         int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
@@ -416,12 +407,12 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            os_mbuf_copydata(om, 0, len, s_ota_value);
-            s_ota_value_len = len;
+            os_mbuf_copydata(om, 0, len, conn->ota_value);
+            conn->ota_value_len = len;
             void (*on_ota)(void *, const uint8_t *, size_t) = s_callbacks.on_ota_write;
             void *cb_ctx = s_callbacks.ctx;
             uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-            memcpy(tmp, s_ota_value, len);
+            memcpy(tmp, conn->ota_value, len);
             xSemaphoreGive(s_lock);
             if (on_ota) {
                 on_ota(cb_ctx, tmp, len);
@@ -631,10 +622,6 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
     }
 
     memset(s_connections, 0, sizeof(s_connections));
-    memset(s_auth_value, 0, sizeof(s_auth_value));
-    memset(s_config_value, 0, sizeof(s_config_value));
-    memset(s_enroll_value, 0, sizeof(s_enroll_value));
-    memset(s_ota_value, 0, sizeof(s_ota_value));
 
     if (sdf_nuki_ble_register_server_service(sdf_ble_companion_register_gatt,
                                              sdf_ble_companion_on_host_sync,
@@ -721,18 +708,18 @@ esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authent
     if (authenticated) {
         conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED;
         conn->auth_pending = false;
-        s_auth_value_len = 1;
-        s_auth_value[0] = 0x01;
+        conn->auth_value_len = 1;
+        conn->auth_value[0] = 0x01;
     } else {
         conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
         conn->auth_pending = false;
-        s_auth_value_len = 1;
-        s_auth_value[0] = 0x00;
+        conn->auth_value_len = 1;
+        conn->auth_value[0] = 0x00;
     }
 
     bool connected = conn->connected;
     uint16_t handle = conn->conn_handle;
-    uint8_t val[1] = {s_auth_value[0]};
+    uint8_t val[1] = {conn->auth_value[0]};
     xSemaphoreGive(s_lock);
 
     /* BLE call outside lock */
@@ -795,8 +782,8 @@ esp_err_t sdf_ble_companion_notify_config(uint16_t conn_handle, const uint8_t *d
         return ESP_ERR_INVALID_STATE;
     }
 
-    memcpy(s_config_value, data, len);
-    s_config_value_len = len;
+    memcpy(conn->config_value, data, len);
+    conn->config_value_len = len;
     xSemaphoreGive(s_lock);
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
@@ -828,8 +815,8 @@ esp_err_t sdf_ble_companion_notify_enroll(uint16_t conn_handle, const uint8_t *d
         return ESP_ERR_INVALID_STATE;
     }
 
-    memcpy(s_enroll_value, data, len);
-    s_enroll_value_len = len;
+    memcpy(conn->enroll_value, data, len);
+    conn->enroll_value_len = len;
     xSemaphoreGive(s_lock);
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
@@ -861,8 +848,8 @@ esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data
         return ESP_ERR_INVALID_STATE;
     }
 
-    memcpy(s_ota_value, data, len);
-    s_ota_value_len = len;
+    memcpy(conn->ota_value, data, len);
+    conn->ota_value_len = len;
     xSemaphoreGive(s_lock);
 
     struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);

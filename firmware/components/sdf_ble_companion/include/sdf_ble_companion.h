@@ -25,6 +25,14 @@ typedef struct {
     bool auth_pending;
     char username[SDF_STORAGE_WEB_USER_NAME_MAX];
     uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+    uint8_t auth_value[512];
+    uint16_t auth_value_len;
+    uint8_t config_value[512];
+    uint16_t config_value_len;
+    uint8_t enroll_value[512];
+    uint16_t enroll_value_len;
+    uint8_t ota_value[512];
+    uint16_t ota_value_len;
 } sdf_ble_companion_connection_t;
 
 typedef void (*sdf_ble_companion_auth_request_cb)(void *ctx,
