@@ -340,6 +340,7 @@ esp_err_t sdf_storage_ble_target_clear(void) {
 }
 
 #define SDF_STORAGE_KEY_WEB_USER_PREFIX "web_user_"
+#define SDF_STORAGE_KEY_FP_USER_NAME_PREFIX "fp_user_name_"
 
 static void sdf_storage_web_user_key(char *buf, size_t buf_size, uint8_t index) {
     snprintf(buf, buf_size, "%s%u", SDF_STORAGE_KEY_WEB_USER_PREFIX, (unsigned)index);
@@ -490,6 +491,79 @@ esp_err_t sdf_storage_web_user_clear_all(void) {
     }
 
     err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+static void sdf_storage_fp_user_name_key(char *buf, size_t buf_size, uint16_t user_id) {
+    snprintf(buf, buf_size, "%s%u", SDF_STORAGE_KEY_FP_USER_NAME_PREFIX, (unsigned)user_id);
+}
+
+esp_err_t sdf_storage_save_user_name(uint16_t user_id, const char *name) {
+    if (user_id == 0 || user_id > 10 || name == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char key[32];
+    sdf_storage_fp_user_name_key(key, sizeof(key), user_id);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_set_str(handle, key, name);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t sdf_storage_load_user_name(uint16_t user_id, char *name_out, size_t max_len) {
+    if (user_id == 0 || user_id > 10 || name_out == NULL || max_len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char key[32];
+    sdf_storage_fp_user_name_key(key, sizeof(key), user_id);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_get_str(handle, key, name_out, &max_len);
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t sdf_storage_delete_user_name(uint16_t user_id) {
+    if (user_id == 0 || user_id > 10) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char key[32];
+    sdf_storage_fp_user_name_key(key, sizeof(key), user_id);
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_erase_key(handle, key);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        err = ESP_OK;
+    }
+
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
     nvs_close(handle);
     return err;
 }

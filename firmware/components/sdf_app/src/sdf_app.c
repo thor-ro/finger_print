@@ -824,31 +824,41 @@ static void sdf_app_update_zigbee_user_list(void) {
     return;
   }
 
-  /* Serialize to CSV-like bracketed list: e.g. [1:3, 5:1] meaning ID 1 (perm
-   * 3), ID 5 (perm 1) */
-  char buf[255];
-  size_t offset = 0;
-  buf[offset++] = '[';
-  for (size_t i = 0; i < count; i++) {
-    int written =
-        snprintf(&buf[offset], sizeof(buf) - offset, "%s%u:%u",
-                 i > 0 ? ", " : "", (unsigned)user_ids[i], (unsigned)perms[i]);
-    if (written > 0 && (size_t)written < sizeof(buf) - offset) {
-      offset += written;
-    } else {
-      break; // truncation
-    }
-  }
-  if (offset < sizeof(buf)) {
-    buf[offset++] = ']';
-    buf[offset] = '\0';
-  } else {
-    buf[sizeof(buf) - 2] = ']';
-    buf[sizeof(buf) - 1] = '\0';
+  /* Serialize to JSON array: e.g. [{"id":1,"perm":3,"name":"Alice"},{"id":5,"perm":1}] */
+  cJSON *root = cJSON_CreateArray();
+  if (!root) {
+    ESP_LOGE(TAG, "Failed to create JSON array for Zigbee user sync");
+    return;
   }
 
-  sdf_protocol_zigbee_update_user_list(buf);
-  ESP_LOGI(TAG, "Synced active users to Zigbee: %s", buf);
+  for (size_t i = 0; i < count; i++) {
+    char name[SDF_STORAGE_FP_USER_NAME_MAX];
+    err = sdf_storage_load_user_name(user_ids[i], name, sizeof(name));
+    if (err != ESP_OK) {
+      name[0] = '\0';
+    }
+
+    cJSON *user_obj = cJSON_CreateObject();
+    if (user_obj) {
+      cJSON_AddNumberToObject(user_obj, "id", user_ids[i]);
+      cJSON_AddNumberToObject(user_obj, "perm", perms[i]);
+      if (name[0] != '\0') {
+        cJSON_AddStringToObject(user_obj, "name", name);
+      }
+      cJSON_AddItemToArray(root, user_obj);
+    }
+  }
+
+  char *json_str = cJSON_PrintUnformatted(root);
+  cJSON_Delete(root);
+
+  if (json_str) {
+    sdf_protocol_zigbee_update_user_list(json_str);
+    ESP_LOGI(TAG, "Synced active users to Zigbee: %s", json_str);
+    free(json_str);
+  } else {
+    ESP_LOGE(TAG, "Failed to serialize user list JSON");
+  }
 }
 
 static esp_err_t

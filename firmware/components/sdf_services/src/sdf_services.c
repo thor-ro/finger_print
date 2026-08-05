@@ -4,6 +4,7 @@
 #include "sdf_config.h"
 #include "sdf_event_router.h"
 #include "sdf_app.h"
+#include "sdf_storage.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -951,6 +952,9 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
       s_state.enrolled_user_count--;
     }
   }
+  if (res == SDF_FINGERPRINT_OP_OK) {
+    sdf_storage_delete_user_name(user_id);
+  }
   return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
 }
 
@@ -965,6 +969,11 @@ esp_err_t sdf_services_clear_all_users(void) {
     res = fp_delete_all_users();
     if (res == SDF_FINGERPRINT_OP_OK) {
       s_state.enrolled_user_count = 0;
+    }
+  }
+  if (res == SDF_FINGERPRINT_OP_OK) {
+    for (uint16_t i = 1; i <= 10; i++) {
+      sdf_storage_delete_user_name(i);
     }
   }
   return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;

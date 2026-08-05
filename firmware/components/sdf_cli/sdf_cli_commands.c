@@ -105,11 +105,84 @@ static int cmd_user_list(int argc, char **argv) {
     return 0;
   }
 
-  printf("User ID  Permission\n");
-  printf("-------  ----------\n");
+  printf("User ID  Permission  Name\n");
+  printf("-------  ----------  ----\n");
   for (size_t i = 0; i < count; i++) {
-    printf("%-7u  %u (%s)\n", (unsigned)user_ids[i], (unsigned)permissions[i],
-           permission_name(permissions[i]));
+    char name[SDF_STORAGE_FP_USER_NAME_MAX];
+    err = sdf_storage_load_user_name(user_ids[i], name, sizeof(name));
+    if (err != ESP_OK) {
+      name[0] = '\0';
+    }
+    printf("%-7u  %u (%s)  %s\n", (unsigned)user_ids[i], (unsigned)permissions[i],
+           permission_name(permissions[i]), name);
+  }
+  return 0;
+}
+
+static int cmd_user_set_name(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc != 4) {
+    printf("Usage: user set-name <user_id> <name>\n");
+    return 0;
+  }
+
+  uint16_t user_id = 0;
+  if (!parse_uint16_arg(argv[2], SDF_FINGERPRINT_USER_ID_MIN,
+                        SDF_FINGERPRINT_USER_ID_MAX, &user_id)) {
+    printf("Invalid user_id. Expected %u-%u.\n",
+           (unsigned)SDF_FINGERPRINT_USER_ID_MIN,
+           (unsigned)SDF_FINGERPRINT_USER_ID_MAX);
+    return 0;
+  }
+
+  const char *name = argv[3];
+  if (strlen(name) >= SDF_STORAGE_FP_USER_NAME_MAX) {
+    printf("Name too long. Max %d characters.\n", SDF_STORAGE_FP_USER_NAME_MAX - 1);
+    return 0;
+  }
+
+  // Check if user exists
+  uint8_t permission = 0;
+  sdf_fingerprint_op_result_t res = fp_query_user_permission(user_id, &permission);
+  if (res != SDF_FINGERPRINT_OP_OK) {
+    printf("User %u not enrolled.\n", (unsigned)user_id);
+    return 0;
+  }
+
+  esp_err_t err = sdf_storage_save_user_name(user_id, name);
+  if (err == ESP_OK) {
+    printf("Name '%s' set for user %u.\n", name, (unsigned)user_id);
+  } else {
+    printf("Failed to save name: %s\n", esp_err_to_name(err));
+  }
+  return 0;
+}
+
+static int cmd_user_clear_name(int argc, char **argv) {
+  if (!check_auth())
+    return 0;
+
+  if (argc != 3) {
+    printf("Usage: user clear-name <user_id>\n");
+    return 0;
+  }
+
+  uint16_t user_id = 0;
+  if (!parse_uint16_arg(argv[2], SDF_FINGERPRINT_USER_ID_MIN,
+                        SDF_FINGERPRINT_USER_ID_MAX, &user_id)) {
+    printf("Invalid user_id. Expected %u-%u.\n",
+           (unsigned)SDF_FINGERPRINT_USER_ID_MIN,
+           (unsigned)SDF_FINGERPRINT_USER_ID_MAX);
+    return 0;
+  }
+
+  esp_err_t err = sdf_storage_delete_user_name(user_id);
+  if (err == ESP_OK) {
+    printf("Name cleared for user %u.\n", (unsigned)user_id);
+  } else {
+    printf("Failed to clear name: %s\n", esp_err_to_name(err));
   }
   return 0;
 }
@@ -135,8 +208,13 @@ static int cmd_user_get(int argc, char **argv) {
   uint8_t permission = 0;
   sdf_fingerprint_op_result_t res = fp_query_user_permission(user_id, &permission);
   if (res == SDF_FINGERPRINT_OP_OK) {
-    printf("User ID: %u, Permission: %u (%s)\n", (unsigned)user_id,
-           (unsigned)permission, permission_name(permission));
+    char name[SDF_STORAGE_FP_USER_NAME_MAX];
+    esp_err_t err = sdf_storage_load_user_name(user_id, name, sizeof(name));
+    if (err != ESP_OK) {
+      name[0] = '\0';
+    }
+    printf("User ID: %u, Permission: %u (%s), Name: %s\n", (unsigned)user_id,
+           (unsigned)permission, permission_name(permission), name);
   } else if (res == SDF_FINGERPRINT_OP_NO_MATCH) {
     printf("User %u not found.\n", (unsigned)user_id);
   } else {
@@ -281,7 +359,7 @@ static int cmd_user(int argc, char **argv) {
     return 0;
 
   if (argc < 2) {
-    printf("Usage: user <permission|add|get|del|list>\n");
+    printf("Usage: user <permission|add|get|set-name|clear-name|del|list>\n");
     return 0;
   }
   const char *action = argv[1];
@@ -329,6 +407,10 @@ static int cmd_user(int argc, char **argv) {
     return cmd_user_add(argc, argv);
   } else if (strcmp(action, "get") == 0) {
     return cmd_user_get(argc, argv);
+  } else if (strcmp(action, "set-name") == 0) {
+    return cmd_user_set_name(argc, argv);
+  } else if (strcmp(action, "clear-name") == 0) {
+    return cmd_user_clear_name(argc, argv);
   } else if (strcmp(action, "update") == 0) {
     printf("User update not implemented. Use 'user permission <id> <perm>'.\n");
   } else if (strcmp(action, "del") == 0) {
