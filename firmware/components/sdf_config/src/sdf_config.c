@@ -4,6 +4,9 @@
 #include <string.h>
 #include <stdio.h>
 
+#include "nvs.h"
+#include "nvs_flash.h"
+
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_log.h"
 #else
@@ -12,6 +15,15 @@
 #define ESP_LOGW(tag, fmt, ...) printf("[W] " fmt "\n", ##__VA_ARGS__)
 #define ESP_LOGE(tag, fmt, ...) printf("[E] " fmt "\n", ##__VA_ARGS__)
 #endif
+
+/* Runtime overrides (see sdf_config_save()/sdf_config_init()) are persisted
+ * as a single blob holding the whole sdf_config_t. That struct is plain
+ * data (no pointers), so this is safe as long as its layout doesn't change
+ * between the write and the read - sdf_config_init() below guards against a
+ * stale/mismatched blob (e.g. after a firmware upgrade that resized the
+ * struct) by checking the read-back length before trusting it. */
+#define SDF_CONFIG_NVS_NAMESPACE "sdf_cfg"
+#define SDF_CONFIG_NVS_KEY "cfg"
 
 static const char *TAG = "sdf_config";
 static sdf_config_t s_config = {0};
@@ -98,12 +110,58 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     config->event_router_queue_depth = CONFIG_SDF_EVENT_ROUTER_QUEUE_DEPTH;
 }
 
+/* Reads a previously sdf_config_save()'d blob into *out. Returns ESP_OK only
+ * if a full-size blob was found and read - ESP_ERR_NVS_NOT_FOUND on first
+ * boot (namespace/key never written) is expected and not logged as an
+ * error; anything else (including a size mismatch, which most likely means
+ * a firmware upgrade changed sdf_config_t's layout) is treated the same way
+ * by the caller - discard it and fall back to Kconfig defaults - but is
+ * worth a warning since it means the previously persisted overrides were
+ * silently dropped. */
+static esp_err_t sdf_config_load_persisted(sdf_config_t *out) {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_CONFIG_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    sdf_config_t loaded;
+    size_t len = sizeof(loaded);
+    err = nvs_get_blob(handle, SDF_CONFIG_NVS_KEY, &loaded, &len);
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        return err;
+    }
+    if (len != sizeof(loaded)) {
+        ESP_LOGW(TAG, "Persisted config size mismatch (got %u, expected %u), discarding",
+                 (unsigned)len, (unsigned)sizeof(loaded));
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    *out = loaded;
+    return ESP_OK;
+}
+
 esp_err_t sdf_config_init(void) {
     if (s_initialized) {
         return ESP_OK;
     }
 
     sdf_config_get_defaults(&s_config);
+
+    sdf_config_t persisted;
+    esp_err_t load_err = sdf_config_load_persisted(&persisted);
+    if (load_err == ESP_OK) {
+        if (sdf_config_validate(&persisted) == ESP_OK) {
+            ESP_LOGI(TAG, "Loaded persisted runtime config overrides from NVS");
+            s_config = persisted;
+        } else {
+            ESP_LOGW(TAG, "Persisted config failed validation, using Kconfig defaults");
+        }
+    } else if (load_err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "Could not read persisted config: %s", esp_err_to_name(load_err));
+    }
 
 #if CONFIG_SDF_CONFIG_VALIDATE_AT_BOOT
     esp_err_t err = sdf_config_validate(&s_config);
@@ -346,4 +404,97 @@ esp_err_t sdf_config_set_nuki_state_poll_interval(uint32_t interval_ms) {
     }
     cfg->nuki_state_poll_interval_ms = interval_ms;
     return ESP_OK;
+}
+
+esp_err_t sdf_config_set_battery_default_percent(uint8_t percent) {
+    if (percent > 100) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->battery_default_percent = percent;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_power_loop_interval(uint32_t interval_ms) {
+    if (interval_ms < 100 || interval_ms > 600000) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->power_loop_interval_ms = interval_ms;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_ble_connect_on_demand(bool enabled) {
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->ble_connect_on_demand = enabled;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_failed_attempt_threshold(uint32_t threshold) {
+    if (threshold == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->failed_attempt_threshold = threshold;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_failed_attempt_window(uint32_t window_ms) {
+    if (window_ms == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->failed_attempt_window_ms = window_ms;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_set_lockout_duration(uint32_t duration_ms) {
+    if (duration_ms == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    sdf_config_t *cfg = sdf_config_get_mutable();
+    if (!cfg) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    cfg->lockout_duration_ms = duration_ms;
+    return ESP_OK;
+}
+
+esp_err_t sdf_config_save(void) {
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_CONFIG_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Config save: nvs_open failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = nvs_set_blob(handle, SDF_CONFIG_NVS_KEY, &s_config, sizeof(s_config));
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Config save failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }

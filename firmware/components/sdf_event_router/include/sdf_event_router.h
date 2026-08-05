@@ -57,6 +57,10 @@ typedef enum {
 typedef struct {
     uint16_t user_id;
     uint16_t confidence;
+    /* 1-3, sensor-stored access level for this user (3 = admin). Carried
+     * so consumers of BIOMETRIC_MATCH (e.g. the unlatch decision) don't
+     * have to re-query the sensor to find out who just matched. */
+    uint8_t permission;
 } sdf_event_router_biometric_payload_t;
 
 typedef struct {
@@ -116,7 +120,7 @@ typedef struct {
 
 typedef struct {
     uint8_t action;
-    int8_t result;
+    esp_err_t result;
 } sdf_event_router_admin_action_complete_payload_t;
 
 typedef struct {

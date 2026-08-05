@@ -64,8 +64,14 @@ esp_err_t sdf_storage_web_user_count(size_t *count);
 esp_err_t sdf_storage_web_user_find_by_name(const char *username, sdf_storage_web_user_t *user, uint8_t *index_out);
 esp_err_t sdf_storage_web_user_clear_all(void);
 
-/* Fingerprint user name storage (max 10 users, user_id 1-10) */
+/* Fingerprint user name storage (max 10 users, user_id 1-10). Duplicated
+ * here (rather than depending on sdf_drivers/fingerprint.h's
+ * SDF_FINGERPRINT_USER_ID_MIN/MAX) to avoid a storage->drivers layering
+ * dependency - keep these two definitions in sync if the sensor's user
+ * capacity ever changes. */
 #define SDF_STORAGE_FP_USER_NAME_MAX 32
+#define SDF_STORAGE_FP_USER_ID_MIN 1u
+#define SDF_STORAGE_FP_USER_ID_MAX 10u
 
 esp_err_t sdf_storage_save_user_name(uint16_t user_id, const char *name);
 esp_err_t sdf_storage_load_user_name(uint16_t user_id, char *name_out, size_t max_len);

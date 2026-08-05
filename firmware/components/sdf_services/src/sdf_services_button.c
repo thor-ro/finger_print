@@ -62,12 +62,16 @@ static void sdf_button_task_event_cb(void *ctx, const sdf_event_router_event_t *
 static void sdf_button_task_init_subscriptions(sdf_button_task_state_t *state) {
     state->event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
 
+    /* min_prio is the *lowest* importance this subscriber accepts (the
+     * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
+     * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
+     * both out. Use LOW to accept every priority for these two types. */
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_button_task_event_cb, state, &state->sub_power_wake);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_button_task_event_cb, state, &state->sub_power_sleep);
 }
 
@@ -215,6 +219,13 @@ void sdf_button_task(void *arg) {
 #endif
 
     while (true) {
+        {
+            SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+            if (guard.acquired == pdTRUE && s->stop_requested) {
+                break;
+            }
+        }
+
         sdf_event_router_event_t event;
         TickType_t wait_ticks = pdMS_TO_TICKS(100);
 
@@ -241,4 +252,21 @@ void sdf_button_task(void *arg) {
         }
 #endif
     }
+
+    /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
+     * cleanly instead of being killed from outside. */
+    sdf_button_task_deinit_subscriptions(&s_button_state);
+#ifndef CONFIG_IDF_TARGET_LINUX
+    if (s_button_state.btn_handle != NULL) {
+        iot_button_delete(s_button_state.btn_handle);
+        s_button_state.btn_handle = NULL;
+    }
+#endif
+    {
+        SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+        if (guard.acquired == pdTRUE) {
+            s->button_task = NULL;
+        }
+    }
+    vTaskDelete(NULL);
 }

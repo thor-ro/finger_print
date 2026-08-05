@@ -144,8 +144,10 @@ static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *c
   sdf_event_router_emit(&sleep_evt);
 
   sdf_platform_sleep_disable_all_wakeup_sources();
-  sdf_platform_sleep_enable_timer_wakeup((uint64_t)config->checkin_interval_ms *
-                                             1000ULL);
+  /* sdf_platform_sleep_enable_timer_wakeup() takes milliseconds and does its
+   * own ms->us conversion internally - passing pre-multiplied microseconds
+   * here made every light-sleep check-in ~1000x longer than configured. */
+  sdf_platform_sleep_enable_timer_wakeup(config->checkin_interval_ms);
 
   if (sdf_power_gpio_valid(config->fingerprint_wake_gpio)) {
     esp_err_t wake_err =
@@ -206,20 +208,20 @@ static void sdf_power_task(void *arg) {
 #endif
     bool initialized = false;
     int64_t now_us = esp_timer_get_time();
-    int64_t last_activity_us = 0;
     int64_t wake_guard_until_us = 0;
     int64_t next_battery_report_us = 0;
     uint8_t battery_percent = 0;
     sdf_power_manager_config_t config_snapshot = {0};
+    uint32_t enabled_sources_snapshot = 0;
 
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS)) ==
         pdTRUE) {
       initialized = s_state.initialized;
       config_snapshot = s_state.config;
-      last_activity_us = s_state.last_activity_us;
       wake_guard_until_us = s_state.wake_guard_until_us;
       next_battery_report_us = s_state.next_battery_report_us;
       battery_percent = s_state.battery_percent;
+      enabled_sources_snapshot = s_state.enabled_sources;
       xSemaphoreGive(s_state.lock);
     } else {
       vTaskDelay(pdMS_TO_TICKS(SDF_POWER_LOCK_WAIT_MS));
@@ -231,12 +233,18 @@ static void sdf_power_task(void *arg) {
       continue;
     }
 
-    /* Update policy state from platform state */
-    sdf_power_policy_mark_activity();
-
-    /* Evaluate policy decision */
+    /* Evaluate policy decision. last_activity_us is sourced from the
+     * policy module's own tracked state (sdf_power_policy_get_last_activity_us())
+     * rather than a locally-cached snapshot, so that activity recorded via
+     * sdf_power_policy_mark_activity() - called from sdf_power_mark_activity()
+     * whenever real activity occurs - is actually visible here instead of
+     * being silently discarded. Do NOT call sdf_power_policy_mark_activity()
+     * unconditionally on every loop tick: that would stamp "now" as the last
+     * activity time on every iteration and prevent idle timeout from ever
+     * being reached, permanently disabling light/deep sleep. */
     sdf_power_policy_decision_t decision = sdf_power_policy_evaluate(
-        now_us, last_activity_us, wake_guard_until_us, next_battery_report_us);
+        now_us, sdf_power_policy_get_last_activity_us(), wake_guard_until_us,
+        next_battery_report_us);
 
     if (now_us >= next_battery_report_us) {
       int battery_cb_result = -1;
@@ -283,10 +291,10 @@ static void sdf_power_task(void *arg) {
     if (decision == SDF_POWER_POLICY_DECISION_SLEEP_DEEP) {
       sdf_platform_power_disable_all_wake();
       if (sdf_power_gpio_valid(config_snapshot.fingerprint_wake_gpio) &&
-          (s_state.enabled_sources & SDF_WAKE_SRC_FINGERPRINT_GPIO)) {
+          (enabled_sources_snapshot & SDF_WAKE_SRC_FINGERPRINT_GPIO)) {
         sdf_platform_sleep_enable_gpio_wakeup_deep(config_snapshot.fingerprint_wake_gpio, 1);
       }
-      if (s_state.enabled_sources & SDF_WAKE_SRC_TIMER) {
+      if (enabled_sources_snapshot & SDF_WAKE_SRC_TIMER) {
         sdf_platform_sleep_enable_timer_wakeup(config_snapshot.checkin_interval_ms);
       }
 
@@ -453,6 +461,12 @@ void sdf_power_mark_activity(void) {
     s_state.last_activity_us = now_us;
     xSemaphoreGive(s_state.lock);
   }
+
+  /* Keep the power policy module's own activity timestamp in sync so that
+   * sdf_power_policy_evaluate() (which reads it via
+   * sdf_power_policy_get_last_activity_us()) actually observes real
+   * activity events instead of the call being a no-op. */
+  sdf_power_policy_mark_activity();
 }
 
 esp_err_t sdf_power_set_checkin_interval_ms(uint32_t checkin_interval_ms) {

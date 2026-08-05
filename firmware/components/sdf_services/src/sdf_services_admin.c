@@ -30,7 +30,6 @@ static const char *TAG = "sdf_services_admin";
 typedef struct {
     QueueHandle_t event_queue;
     sdf_event_router_subscriber_t *sub_action_req;
-    sdf_event_router_subscriber_t *sub_match;
     sdf_event_router_subscriber_t *sub_power_wake;
     sdf_event_router_subscriber_t *sub_power_sleep;
     TaskHandle_t task_handle;
@@ -54,43 +53,42 @@ static void sdf_admin_task_init_subscriptions(sdf_admin_task_state_t *state) {
                                SDF_EVENT_ROUTER_PRIO_HIGH,
                                sdf_admin_task_event_cb, state, &state->sub_action_req);
 
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
-                               SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_admin_task_event_cb, state, &state->sub_match);
+    /* Deliberately not subscribed to SDF_EVENT_ROUTER_BIOMETRIC_MATCH here:
+     * sdf_match_task claims/authorizes any pending admin action itself
+     * (sdf_services_try_claim_admin_action, gated on match->permission ==
+     * ADMIN) before a BIOMETRIC_MATCH event is ever emitted, so this task
+     * never legitimately needs to see that event. An earlier version of
+     * this task duplicated the claim here with a weaker check (any
+     * user_id > 0, no permission check) that could never actually run in
+     * practice since the match task always intercepts pending actions
+     * first - but it was a latent privilege-escalation trap for anyone who
+     * removed that interception later without noticing this fallback. Do
+     * not re-add a BIOMETRIC_MATCH subscription/case here without routing
+     * a real permission check through it. */
 
+    /* min_prio is the *lowest* importance this subscriber accepts (the
+     * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
+     * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
+     * both out. Use LOW to accept every priority for these two types. */
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_admin_task_event_cb, state, &state->sub_power_wake);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_admin_task_event_cb, state, &state->sub_power_sleep);
 }
 
 static void sdf_admin_task_deinit_subscriptions(sdf_admin_task_state_t *state) {
     if (state->sub_action_req) sdf_event_router_unsubscribe(state->sub_action_req);
-    if (state->sub_match) sdf_event_router_unsubscribe(state->sub_match);
     if (state->sub_power_wake) sdf_event_router_unsubscribe(state->sub_power_wake);
     if (state->sub_power_sleep) sdf_event_router_unsubscribe(state->sub_power_sleep);
     if (state->event_queue) vQueueDelete(state->event_queue);
     state->event_queue = NULL;
 }
 
-static void sdf_admin_task_emit_auth_result(uint16_t user_id, uint8_t permission,
-                                             bool authorized) {
-    sdf_event_router_event_t evt = {
-        .type = SDF_EVENT_ROUTER_ADMIN_AUTH_RESULT,
-        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
-        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-        .payload.admin_auth = {.user_id = user_id,
-                               .permission = permission,
-                               .authorized = authorized}
-    };
-    sdf_event_router_emit(&evt);
-}
-
 static void sdf_admin_task_emit_action_complete(sdf_services_admin_action_t action,
-                                                 int8_t result) {
+                                                 esp_err_t result) {
     sdf_event_router_event_t evt = {
         .type = SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
         .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
@@ -108,6 +106,13 @@ void sdf_admin_task(void *arg) {
     s_admin_state.task_handle = xTaskGetCurrentTaskHandle();
 
     while (true) {
+        {
+            SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+            if (guard.acquired == pdTRUE && s->stop_requested) {
+                break;
+            }
+        }
+
         sdf_event_router_event_t event;
         if (xQueueReceive(s_admin_state.event_queue, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
             switch (event.type) {
@@ -143,50 +148,6 @@ void sdf_admin_task(void *arg) {
                             ESP_LOGI(TAG, "Pending admin action set: %d", (int)s->pending_admin_action);
                         }
                         xSemaphoreGive(s->lock);
-                    }
-                    break;
-                }
-
-                case SDF_EVENT_ROUTER_BIOMETRIC_MATCH: {
-                    /* Check if we have a pending admin action */
-                    sdf_services_admin_action_t action = SDF_SERVICES_ADMIN_ACTION_NONE;
-                    sdf_services_admin_action_cb action_cb = NULL;
-                    void *action_ctx = NULL;
-                    bool authorized = false;
-
-                    if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-                        if (s->pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE) {
-                            if (event.payload.biometric.user_id > 0 && event.payload.biometric.confidence > 0) {
-                                /* The biometric event doesn't have permission, we'd need to check it */
-                                /* For now, assume admin permission if user_id > 0 */
-                                authorized = true;
-                                action = s->pending_admin_action;
-                                action_cb = s->config.admin_action_cb;
-                                action_ctx = s->config.admin_action_ctx;
-                                s->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-                                s->pending_admin_action_start_us = 0;
-                            } else {
-                                authorized = false;
-                            }
-                        }
-                        xSemaphoreGive(s->lock);
-                    }
-
-                    if (s->pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE) {
-                        sdf_admin_task_emit_auth_result(event.payload.biometric.user_id,
-                                                         event.payload.biometric.confidence,
-                                                         authorized);
-
-                        if (authorized) {
-                            ESP_LOGI(TAG, "Admin auth success for action %d", (int)action);
-                            led_admin_auth_green();
-                            sdf_services_execute_admin_action(action, action_cb, action_ctx);
-                            sdf_admin_task_emit_action_complete(action, ESP_OK);
-                        } else {
-                            ESP_LOGW(TAG, "Admin auth rejected: non-admin user");
-                            led_admin_auth_red();
-                            sdf_admin_task_emit_action_complete(action, ESP_ERR_NOT_SUPPORTED);
-                        }
                     }
                     break;
                 }
@@ -229,4 +190,15 @@ void sdf_admin_task(void *arg) {
             xSemaphoreGive(s->lock);
         }
     }
+
+    /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
+     * cleanly instead of being killed from outside. */
+    sdf_admin_task_deinit_subscriptions(&s_admin_state);
+    {
+        SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+        if (guard.acquired == pdTRUE) {
+            s->admin_task = NULL;
+        }
+    }
+    vTaskDelete(NULL);
 }

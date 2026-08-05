@@ -81,8 +81,8 @@ static void sdf_app_on_web_reg_auth_request(void *ctx,
                                              const sdf_event_router_event_t *event);
 static void sdf_app_on_web_reg_auth_result(void *ctx,
                                             const sdf_event_router_event_t *event);
-static void sdf_app_on_web_reg_auth_request(void *ctx,
-                                             const sdf_event_router_event_t *event);
+static void sdf_app_on_admin_action_complete(void *ctx,
+                                              const sdf_event_router_event_t *event);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
@@ -482,6 +482,36 @@ static void sdf_ble_companion_on_auth_request(void *ctx,
     sdf_event_router_emit(&evt);
 }
 
+/* Applies one numeric field from a BLE config write through a validated
+ * sdf_config_set_*() setter, logging and counting the outcome. `name` must
+ * match the JSON key. Returns true if the field was present and applied
+ * (whether or not it changed anything), so the caller can tell "present but
+ * rejected" apart from "absent". */
+typedef esp_err_t (*sdf_app_config_set_u32_fn)(uint32_t value);
+
+static bool sdf_ble_companion_apply_config_u32(cJSON *root, const char *name,
+                                                sdf_app_config_set_u32_fn setter,
+                                                bool *any_rejected) {
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, name);
+    if (!cJSON_IsNumber(item)) {
+        return false;
+    }
+    if (item->valuedouble < 0) {
+        ESP_LOGW(TAG, "Config write: %s rejected (negative)", name);
+        *any_rejected = true;
+        return true;
+    }
+    esp_err_t err = setter((uint32_t)item->valuedouble);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Config write: %s=%.0f rejected: %s", name, item->valuedouble,
+                 esp_err_to_name(err));
+        *any_rejected = true;
+    } else {
+        ESP_LOGI(TAG, "Config: %s=%lu", name, (unsigned long)item->valuedouble);
+    }
+    return true;
+}
+
 static void sdf_ble_companion_on_config_write(void *ctx,
                                                const uint8_t *data,
                                                size_t len) {
@@ -494,82 +524,71 @@ static void sdf_ble_companion_on_config_write(void *ctx,
         return;
     }
 
-    sdf_config_t *cfg = sdf_config_get_mutable();
-    if (!cfg) {
-        ESP_LOGW(TAG, "Config write: runtime overrides disabled");
-        cJSON_Delete(root);
-        return;
-    }
+    /* Runtime overrides being disabled (sdf_config_get_mutable() would
+     * return NULL) surfaces the same way as any other rejected field: each
+     * setter below returns ESP_ERR_INVALID_STATE in that case, so there's
+     * no need to special-case it here - every field just gets logged as
+     * rejected and any_applied/any_rejected reflect that accurately. */
+    bool any_applied = false;
+    bool any_rejected = false;
 
-    cJSON *item;
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "checkin_interval_ms", sdf_config_set_checkin_interval, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "idle_before_sleep_ms", sdf_config_set_idle_before_sleep, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "post_wake_guard_ms", sdf_config_set_post_wake_guard, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "match_poll_interval_ms", sdf_config_set_match_poll_interval, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "battery_report_interval_ms", sdf_config_set_battery_report_interval, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "power_loop_interval_ms", sdf_config_set_power_loop_interval, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "failed_attempt_threshold", sdf_config_set_failed_attempt_threshold, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "failed_attempt_window_ms", sdf_config_set_failed_attempt_window, &any_rejected);
+    any_applied |= sdf_ble_companion_apply_config_u32(
+        root, "lockout_duration_ms", sdf_config_set_lockout_duration, &any_rejected);
 
-    item = cJSON_GetObjectItemCaseSensitive(root, "checkin_interval_ms");
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "battery_default_percent");
     if (cJSON_IsNumber(item)) {
-        cfg->checkin_interval_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: checkin_interval_ms=%lu", (unsigned long)cfg->checkin_interval_ms);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "idle_before_sleep_ms");
-    if (cJSON_IsNumber(item)) {
-        cfg->idle_before_sleep_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: idle_before_sleep_ms=%lu", (unsigned long)cfg->idle_before_sleep_ms);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "post_wake_guard_ms");
-    if (cJSON_IsNumber(item)) {
-        cfg->post_wake_guard_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: post_wake_guard_ms=%lu", (unsigned long)cfg->post_wake_guard_ms);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "battery_default_percent");
-    if (cJSON_IsNumber(item)) {
-        cfg->battery_default_percent = (uint8_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: battery_default_percent=%u", (unsigned)cfg->battery_default_percent);
+        any_applied = true;
+        if (item->valuedouble < 0 || item->valuedouble > 255) {
+            ESP_LOGW(TAG, "Config write: battery_default_percent rejected (out of range)");
+            any_rejected = true;
+        } else {
+            esp_err_t err = sdf_config_set_battery_default_percent((uint8_t)item->valuedouble);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "Config write: battery_default_percent=%.0f rejected: %s",
+                         item->valuedouble, esp_err_to_name(err));
+                any_rejected = true;
+            } else {
+                ESP_LOGI(TAG, "Config: battery_default_percent=%u", (unsigned)item->valuedouble);
+            }
+        }
     }
 
     item = cJSON_GetObjectItemCaseSensitive(root, "ble_connect_on_demand");
     if (cJSON_IsBool(item)) {
-        cfg->ble_connect_on_demand = cJSON_IsTrue(item);
-        ESP_LOGI(TAG, "Config: ble_connect_on_demand=%d", cfg->ble_connect_on_demand);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "match_poll_interval_ms");
-    if (cJSON_IsNumber(item)) {
-        cfg->match_poll_interval_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: match_poll_interval_ms=%lu", (unsigned long)cfg->match_poll_interval_ms);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "battery_report_interval_ms");
-    if (cJSON_IsNumber(item)) {
-        cfg->battery_report_interval_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: battery_report_interval_ms=%lu", (unsigned long)cfg->battery_report_interval_ms);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "power_loop_interval_ms");
-    if (cJSON_IsNumber(item)) {
-        cfg->power_loop_interval_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: power_loop_interval_ms=%lu", (unsigned long)cfg->power_loop_interval_ms);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "failed_attempt_threshold");
-    if (cJSON_IsNumber(item)) {
-        cfg->failed_attempt_threshold = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: failed_attempt_threshold=%lu", (unsigned long)cfg->failed_attempt_threshold);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "failed_attempt_window_ms");
-    if (cJSON_IsNumber(item)) {
-        cfg->failed_attempt_window_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: failed_attempt_window_ms=%lu", (unsigned long)cfg->failed_attempt_window_ms);
-    }
-
-    item = cJSON_GetObjectItemCaseSensitive(root, "lockout_duration_ms");
-    if (cJSON_IsNumber(item)) {
-        cfg->lockout_duration_ms = (uint32_t)item->valuedouble;
-        ESP_LOGI(TAG, "Config: lockout_duration_ms=%lu", (unsigned long)cfg->lockout_duration_ms);
+        any_applied = true;
+        esp_err_t err = sdf_config_set_ble_connect_on_demand(cJSON_IsTrue(item));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Config write: ble_connect_on_demand rejected: %s", esp_err_to_name(err));
+            any_rejected = true;
+        } else {
+            ESP_LOGI(TAG, "Config: ble_connect_on_demand=%d", cJSON_IsTrue(item));
+        }
     }
 
     cJSON_Delete(root);
+
+    if (any_applied && !any_rejected) {
+        esp_err_t err = sdf_config_save();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Config write: failed to persist to NVS: %s", esp_err_to_name(err));
+        }
+    }
 
     // Send confirmation notify with current config subset
     // This will be handled by the caller after the callback returns
@@ -638,14 +657,35 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
 
   switch (event->type) {
   case SDF_EVENT_ROUTER_BIOMETRIC_MATCH: {
-    ESP_LOGI(TAG, "Event: Biometric match user_id=%u", (unsigned)event->payload.biometric.user_id);
+    uint16_t match_user_id = event->payload.biometric.user_id;
+    uint8_t match_permission = event->payload.biometric.permission;
+    ESP_LOGI(TAG, "Event: Biometric match user_id=%u permission=%u",
+             (unsigned)match_user_id, (unsigned)match_permission);
     if (!s_has_creds || s_pairing_active) {
+      return;
+    }
+    /* Defensive check only: today every valid permission level (1-3, see
+     * doc/features.md - Standard/Elevated/Admin) is entitled to unlatch,
+     * so this does not implement tiered access control. It refuses to act
+     * on a permission value that couldn't have come from a real enrolled
+     * user (sdf_services_change_user_permission()/enrollment both reject
+     * 0 and >3), which would indicate corrupt/unexpected sensor data.
+     * If unlatch should ever be restricted by permission tier, that's a
+     * product decision the "Elevated User" placeholder in doc/features.md
+     * says is still open - decide it there, not by guessing here. */
+    if (match_permission < 1 || match_permission > 3) {
+      ESP_LOGE(TAG, "Rejecting unlatch: invalid permission %u for user_id=%u",
+               (unsigned)match_permission, (unsigned)match_user_id);
+      sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_FAILED, match_user_id,
+                         ESP_ERR_INVALID_STATE, match_permission);
       return;
     }
     int percent = sdf_drivers_battery_get_percent();
     if (percent <= 20) {
       sdf_services_trigger_low_battery_warning();
     }
+    sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_MATCH_SUCCESS, match_user_id, ESP_OK,
+                       match_permission);
     sdf_app_lock_action(SDF_LOCK_ACTION_UNLATCH, 0);
     break;
   }
@@ -763,33 +803,73 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
            event->payload.web_reg_auth_result.username);
 
   if (event->payload.web_reg_auth_result.authorized) {
-    sdf_storage_web_user_t user = {0};
-    strncpy(user.username, event->payload.web_reg_auth_result.username,
-            SDF_STORAGE_WEB_USER_NAME_MAX - 1);
-    user.username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
-    user.permission = event->payload.web_reg_auth_result.permission;
-    user.valid = true;
-
     uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
-    if (sdf_services_get_web_reg_auth(NULL, 0, NULL) == ESP_OK) {
-      // Get the stored password hash
-      sdf_services_get_web_reg_password_hash(password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+    esp_err_t hash_err = sdf_services_get_web_reg_password_hash(
+        password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+    if (hash_err != ESP_OK) {
+      /* No pending request to pull the hash from (e.g. it was already
+       * cleared) - do not persist a user with a zeroed-out credential. */
+      ESP_LOGE(TAG, "Failed to fetch web reg password hash: %s",
+               esp_err_to_name(hash_err));
+    } else {
+      sdf_storage_web_user_t user = {0};
+      strncpy(user.username, event->payload.web_reg_auth_result.username,
+              SDF_STORAGE_WEB_USER_NAME_MAX - 1);
+      user.username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
+      user.permission = event->payload.web_reg_auth_result.permission;
+      user.valid = true;
       memcpy(user.password_hash, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
-    }
 
-    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
-      sdf_storage_web_user_t existing;
-      if (sdf_storage_web_user_load(i, &existing) == ESP_OK && !existing.valid) {
-        sdf_storage_web_user_save(i, &user);
-        ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
-        break;
+      for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+        sdf_storage_web_user_t existing;
+        if (sdf_storage_web_user_load(i, &existing) == ESP_OK && !existing.valid) {
+          sdf_storage_web_user_save(i, &user);
+          ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
+          break;
+        }
       }
     }
   }
 
-  sdf_ble_companion_reply_auth(event->payload.web_reg_auth_result.username, 
+  sdf_ble_companion_reply_auth(event->payload.web_reg_auth_result.username,
                                event->payload.web_reg_auth_result.authorized);
 
+  sdf_services_clear_web_reg_auth();
+}
+
+/* Handles the non-success side of a WEB_REG_AUTH admin action: a timeout
+ * (no admin fingerprint presented within SDF_ADMIN_ACTION_TIMEOUT_MS) or a
+ * rejection (a non-admin fingerprint claimed the pending action instead).
+ * Either way sdf_admin_task only emits ADMIN_ACTION_COMPLETE with a
+ * non-OK result - never WEB_REG_AUTH_RESULT - so this is the only place
+ * that resolves the request in those cases. Without it the BLE client
+ * waiting on the auth characteristic would never be notified, and
+ * s_state.web_reg_auth_pending would stay latched, permanently blocking
+ * any subsequent web registration request. */
+static void sdf_app_on_admin_action_complete(void *ctx,
+                                              const sdf_event_router_event_t *event) {
+  (void)ctx;
+  if (!event) {
+    return;
+  }
+
+  if (event->payload.admin_action_complete.action != SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH ||
+      event->payload.admin_action_complete.result == ESP_OK) {
+    return;
+  }
+
+  char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+  uint8_t permission = 0;
+  esp_err_t err = sdf_services_get_web_reg_auth(username, sizeof(username), &permission);
+  if (err != ESP_OK) {
+    /* Already cleared/consumed by another path - nothing to deny. */
+    return;
+  }
+
+  ESP_LOGW(TAG, "Web registration auth for user '%s' not granted: %s",
+           username, esp_err_to_name(event->payload.admin_action_complete.result));
+
+  sdf_ble_companion_reply_auth(username, false);
   sdf_services_clear_web_reg_auth();
 }
 
@@ -1403,6 +1483,18 @@ esp_err_t sdf_app_init(void) {
     sdf_app_emit_audit(SDF_AUDIT_STORAGE_POLICY_FAILED, 0, err, 0);
   }
 
+  /* Must run after sdf_storage_init() (which brings up NVS): it loads any
+   * persisted runtime config overrides via NVS, falling back to Kconfig
+   * defaults if there aren't any. Without this call sdf_config_get()/
+   * _get_mutable() below would read an all-zero, never-populated struct -
+   * every field defaults to whatever sdf_config_t's static zero-initializer
+   * gives it, not the CONFIG_SDF_* Kconfig values. */
+  err = sdf_config_init();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Config init failed: %s", esp_err_to_name(err));
+    return err;
+  }
+
 
 #ifndef CONFIG_IDF_TARGET_LINUX
   esp_task_wdt_config_t twdt_config = {
@@ -1466,7 +1558,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
 
   // Subscribe to events
-  sdf_event_router_subscriber_t *subs[9];
+  sdf_event_router_subscriber_t *subs[10];
   size_t subs_count = 0;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
@@ -1550,6 +1642,22 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
   subs_count++;
 
+  /* WEB_REG_AUTH_RESULT above is only ever emitted on success (see
+   * sdf_services_execute_admin_action()); if the admin fingerprint auth
+   * times out or is denied, sdf_admin_task instead emits
+   * ADMIN_ACTION_COMPLETE with a non-OK result and nothing else. Without
+   * this subscription that left the BLE client's auth request stuck
+   * pending forever (no notify ever sent) and s_state.web_reg_auth_pending
+   * latched true server-side, blocking any future web reg auth request. */
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
+                                        SDF_EVENT_ROUTER_PRIO_HIGH,
+                                        sdf_app_on_admin_action_complete, NULL, &subs[subs_count]);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to admin action complete: %s", esp_err_to_name(err));
+    goto sub_cleanup;
+  }
+  subs_count++;
+
   goto sub_done;
 
 sub_cleanup:
@@ -1560,6 +1668,10 @@ sub_cleanup:
   return err;
 
 sub_done:
+  /* Tracks the first subsystem-init failure below so the function can
+   * return an honest status while still attempting to bring up every
+   * other subsystem (a partially-working door lock beats a hard abort). */
+  esp_err_t degraded_err = ESP_OK;
 
   sdf_services_config_t services_cfg;
   sdf_services_get_default_config(&services_cfg);
@@ -1570,6 +1682,9 @@ sub_done:
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to initialize fingerprint services: %s",
              esp_err_to_name(err));
+    if (degraded_err == ESP_OK) {
+      degraded_err = err;
+    }
   }
 
   sdf_ble_companion_callbacks_t ble_companion_cbs = {
@@ -1583,6 +1698,9 @@ sub_done:
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to initialize BLE companion service: %s",
              esp_err_to_name(err));
+    if (degraded_err == ESP_OK) {
+      degraded_err = err;
+    }
   }
 
   if (sdf_protocol_zigbee_is_enabled()) {
@@ -1590,6 +1708,9 @@ sub_done:
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to set Zigbee check-in interval: %s",
                esp_err_to_name(err));
+      if (degraded_err == ESP_OK) {
+        degraded_err = err;
+      }
     }
 
     err = sdf_protocol_zigbee_set_command_handler(sdf_app_on_zigbee_command,
@@ -1597,12 +1718,18 @@ sub_done:
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to set Zigbee command handler: %s",
                esp_err_to_name(err));
+      if (degraded_err == ESP_OK) {
+        degraded_err = err;
+      }
     }
 
     err = sdf_protocol_zigbee_init();
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to start Zigbee protocol: %s",
                esp_err_to_name(err));
+      if (degraded_err == ESP_OK) {
+        degraded_err = err;
+      }
     } else {
       sdf_protocol_zigbee_update_lock_state(
           SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED);
@@ -1677,16 +1804,22 @@ if (!sdf_nuki_ble_addr_is_empty(&ble_target)) {
   err = sdf_power_init_power_manager(&power_cfg);
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to start power manager: %s", esp_err_to_name(err));
+    if (degraded_err == ESP_OK) {
+      degraded_err = err;
+    }
   }
 
   err = sdf_cli_init();
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Failed to initialize CLI: %s", esp_err_to_name(err));
+    if (degraded_err == ESP_OK) {
+      degraded_err = err;
+    }
   }
 
   sdf_power_mark_activity();
 
-  return ESP_OK;
+  return degraded_err;
 }
 
 sdf_nuki_ble_transport_t *sdf_app_get_ble_transport(void) {

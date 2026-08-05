@@ -62,8 +62,11 @@
 #define SDF_SERVICES_ADMIN_ACTION_TIMEOUT_MS 10000u
 #define SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS 15000u
 
-/* Maximum users supported by firmware (sensor supports up to 4095) */
-#define SDF_SERVICES_MAX_USERS 10u
+/* Maximum users supported by firmware. Aliased to the fingerprint driver's
+ * own limit (fingerprint.h) rather than a separate hardcoded literal, so
+ * the two can't silently drift apart. The sensor itself supports far more
+ * (up to 4095); this cap is a firmware-side RAM/UX choice. */
+#define SDF_SERVICES_MAX_USERS SDF_FINGERPRINT_USER_ID_MAX
 /* Packed permissions: 2 bits per user, 8 users per uint8_t */
 #define SDF_SERVICES_PERM_PACKED_SIZE 4u  /* 16 users * 2 bits = 32 bits = 4 bytes */
 
@@ -90,7 +93,23 @@ void sdf_services_pack_user_list(const uint16_t *user_ids,
 {
     *bmp = 0;
     memset(perm_packed, 0, SDF_SERVICES_PERM_PACKED_SIZE);
-    for (size_t i = 0; i < count && user_ids[i] <= SDF_SERVICES_MAX_USERS; i++) {
+    for (size_t i = 0; i < count; i++) {
+        /* user_ids[] comes straight from the sensor's query response, not
+         * from data we control. An out-of-range entry (0, or beyond the
+         * bitmap/packed-permissions capacity) must be skipped, not treated
+         * as "stop processing the rest of the list" - a `&&` loop condition
+         * here would silently drop every user after the first bad one.
+         * id 0 specifically also can't be passed to the SDF_SERVICES_BMP_SET
+         * macro or sdf_services_perm_set() below: they compute (id - 1) as a
+         * bit/array index, and id=0 makes that wrap to a huge unsigned value
+         * (or, via the intermediate signed subtraction, a negative
+         * shift/index) - undefined behavior. */
+        if (user_ids[i] < SDF_FINGERPRINT_USER_ID_MIN ||
+            user_ids[i] > SDF_SERVICES_MAX_USERS) {
+            ESP_LOGW(TAG, "Skipping out-of-range user_id=%u from sensor query",
+                     (unsigned)user_ids[i]);
+            continue;
+        }
         SDF_SERVICES_BMP_SET(*bmp, user_ids[i]);
         sdf_services_perm_set(perm_packed, user_ids[i], permissions[i]);
     }
@@ -197,49 +216,6 @@ sdf_services_emit_enrollment_event(sdf_event_router_type_t type,
   sdf_event_router_emit(&evt);
 }
 
-static void
-sdf_services_emit_security_event(sdf_services_security_event_type_t type,
-                                     uint16_t user_id,
-                                     uint32_t failed_attempts,
-                                     uint32_t lockout_remaining_ms) {
-  if (!sdf_services_is_ready()) {
-    return;
-  }
-
-  sdf_event_router_event_t evt = {
-      .type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
-      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-      .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
-  };
-
-  switch (type) {
-  case SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED:
-    evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH;
-    evt.payload.biometric.user_id = user_id;
-    evt.payload.biometric.confidence = 100;
-    evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
-    break;
-  case SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED:
-    evt.type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED;
-    evt.payload.security.user_id = user_id;
-    evt.payload.security.failed_attempts = failed_attempts;
-    evt.priority = SDF_EVENT_ROUTER_PRIO_HIGH;
-    break;
-  case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED:
-    evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
-    evt.payload.security.user_id = user_id;
-    evt.payload.security.failed_attempts = failed_attempts;
-    evt.priority = SDF_EVENT_ROUTER_PRIO_CRITICAL;
-    break;
-  case SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED:
-    evt.type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT;
-    evt.payload.security.user_id = 0;
-    evt.payload.security.failed_attempts = 0;
-    evt.priority = SDF_EVENT_ROUTER_PRIO_NORMAL;
-    break;
-  }
-  sdf_event_router_emit(&evt);
-}
 static void
 sdf_services_start_local_enrollment_with_permission(
     uint8_t permission) {
@@ -379,210 +355,6 @@ void sdf_services_execute_admin_action(
   }
 }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-static void sdf_services_btn_cb(void *arg, void *usr_data) {
-  sdf_services_admin_action_t action =
-      (sdf_services_admin_action_t)(uintptr_t)usr_data;
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE) {
-    return;
-  }
-
-  // If there are 0 users, there is no admin to authorize.
-  // Execute the requested action immediately.
-  if (s_state.enrolled_user_count == 0) {
-    s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-    s_state.pending_admin_action_start_us = 0;
-    xSemaphoreGive(s_state.lock);
-
-    if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL ||
-        action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN) {
-      led_pulse_blue();
-      sdf_services_request_enrollment(1, 3);
-    } else {
-      // For other actions (pairing, reset, etc.), trigger the callback immediately
-      sdf_services_admin_action_cb action_cb = s_state.config.admin_action_cb;
-      void *action_ctx = s_state.config.admin_action_ctx;
-      if (action_cb != NULL) {
-        action_cb(action_ctx, action);
-      }
-    }
-    return;
-  }
-
-  // Set the pending action and wait for Admin fingerprint
-  if (s_state.pending_admin_action == SDF_SERVICES_ADMIN_ACTION_NONE) {
-    s_state.pending_admin_action = action;
-    s_state.pending_admin_action_start_us = esp_timer_get_time();
-
-    switch (action) {
-    case SDF_SERVICES_ADMIN_ACTION_ENROLL:
-    case SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN:
-      led_pulse_blue();
-      break;
-    case SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR:
-      led_pulse_yellow();
-      break;
-    case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
-      led_pulse_purple();
-      break;
-    case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET:
-      led_pulse_red();
-      break;
-    default:
-      break;
-    }
-    ESP_LOGI(TAG, "Hardware button pressed, pending admin action: %d",
-             (int)action);
-  }
-
-  xSemaphoreGive(s_state.lock);
-}
-#endif
-
-static void sdf_services_run_match_cycle(void) {
-  uint32_t cooldown_ms = SDF_SERVICES_DEFAULT_MATCH_COOLDOWN_MS;
-  uint32_t failed_attempt_threshold =
-      SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_THRESHOLD;
-  uint32_t failed_attempt_window_ms =
-      SDF_SERVICES_DEFAULT_FAILED_ATTEMPT_WINDOW_MS;
-  uint32_t lockout_duration_ms = SDF_SERVICES_DEFAULT_LOCKOUT_DURATION_MS;
-  int64_t now_us = esp_timer_get_time();
-  bool lockout_cleared = false;
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) !=
-      pdTRUE) {
-    return;
-  }
-
-  // If there are no enrolled users, matching is impossible and polling the
-  // sensor will just result in 12-second timeouts waiting for a finger.
-  // We can safely skip the match cycle entirely.
-  if (s_state.enrolled_user_count == 0) {
-    xSemaphoreGive(s_state.lock);
-    return;
-  }
-
-  if (s_state.lockout_until_us > 0 && now_us >= s_state.lockout_until_us) {
-    s_state.lockout_until_us = 0;
-    s_state.failed_attempt_count = 0;
-    s_state.failed_attempt_window_start_us = 0;
-    lockout_cleared = true;
-  }
-
-  if (now_us < s_state.match_cooldown_until_us ||
-      sdf_enrollment_sm_is_active(&s_state.enrollment) ||
-      s_state.enrollment_request_pending || now_us < s_state.lockout_until_us) {
-      xSemaphoreGive(s_state.lock);
-      if (lockout_cleared) {
-        sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
-                                             0, 0, 0);
-      }
-      return;
-    }
-
-  cooldown_ms = s_state.config.match_cooldown_ms;
-  failed_attempt_threshold = s_state.config.failed_attempt_threshold;
-  failed_attempt_window_ms = s_state.config.failed_attempt_window_ms;
-  lockout_duration_ms = s_state.config.lockout_duration_ms;
-  xSemaphoreGive(s_state.lock);
-
-  if (lockout_cleared) {
-    sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED,
-                                         0, 0, 0);
-  }
-
-  sdf_fingerprint_match_t match = {0};
-
-  // fp_match_1n() can block for up to the full UART timeout (~12 s).
-  // Reset the watchdog before calling it, especially since the previous
-  // function in the loop (sdf_services_run_enrollment_step) could have
-  // already blocked for ~12 s.
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_reset();
-#endif
-  sdf_fingerprint_op_result_t match_result =
-      fp_match_1n(&match);
-  if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
-      match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
-    bool emit_failed_attempt = false;
-    bool emit_lockout = false;
-    uint32_t failed_attempts = 0;
-    uint32_t lockout_remaining_ms = 0;
-
-    if (xSemaphoreTake(s_state.lock,
-                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-      s_state.match_cooldown_until_us =
-          now_us + ((int64_t)cooldown_ms * 1000LL);
-
-      if (match_result == SDF_FINGERPRINT_OP_NO_MATCH) {
-        if (s_state.failed_attempt_window_start_us == 0 ||
-            (now_us - s_state.failed_attempt_window_start_us) >
-                ((int64_t)failed_attempt_window_ms * 1000LL)) {
-          s_state.failed_attempt_window_start_us = now_us;
-          s_state.failed_attempt_count = 0;
-        }
-
-        s_state.failed_attempt_count++;
-        failed_attempts = s_state.failed_attempt_count;
-        emit_failed_attempt = true;
-
-        if (s_state.failed_attempt_count >= failed_attempt_threshold) {
-          s_state.lockout_until_us =
-              now_us + ((int64_t)lockout_duration_ms * 1000LL);
-          s_state.failed_attempt_count = 0;
-          s_state.failed_attempt_window_start_us = 0;
-          lockout_remaining_ms = lockout_duration_ms;
-          emit_lockout = true;
-        }
-      }
-      xSemaphoreGive(s_state.lock);
-    }
-
-    if (emit_failed_attempt) {
-      sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED,
-                                              0, failed_attempts, lockout_remaining_ms);
-    }
-
-    if (emit_lockout) {
-      sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED,
-                                              0, failed_attempt_threshold, lockout_remaining_ms);
-    }
-    return;
-  }
-
-  if (match_result != SDF_FINGERPRINT_OP_OK) {
-    ESP_LOGW(TAG, "Fingerprint match error: %s",
-             sdf_services_fingerprint_result_name(match_result));
-    if (xSemaphoreTake(s_state.lock,
-                       pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-      s_state.match_cooldown_until_us =
-          now_us + ((int64_t)cooldown_ms * 1000LL);
-      xSemaphoreGive(s_state.lock);
-    }
-    return;
-  }
-
-  ESP_LOGI(TAG, "Fingerprint match user_id=%u permission=%u",
-           (unsigned)match.user_id, (unsigned)match.permission);
-
-  if (sdf_services_try_claim_admin_action(&match)) {
-    return;
-  }
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
-      pdTRUE) {
-    s_state.match_cooldown_until_us = now_us + ((int64_t)cooldown_ms * 1000LL);
-    s_state.failed_attempt_count = 0;
-    s_state.failed_attempt_window_start_us = 0;
-    xSemaphoreGive(s_state.lock);
-  }
-
-  sdf_services_emit_security_event(SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED,
-                                         match.user_id, 0, 0);
-}
-
 static void IRAM_ATTR sdf_services_wake_isr(void *arg) {
   (void)arg;
   BaseType_t higher_priority_task_woken = pdFALSE;
@@ -663,44 +435,6 @@ bool sdf_services_try_claim_admin_action(
   return true;
 }
 
-static void sdf_services_run_admin_auth_cycle(void) {
-  if (s_state.pending_admin_action == SDF_SERVICES_ADMIN_ACTION_NONE) {
-    return;
-  }
-
-  sdf_fingerprint_match_t match = {0};
-
-  // fp_match_1n() can block for up to the full UART timeout (~12 s).
-  // Reset the watchdog before calling it to avoid accumulating time.
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_reset();
-#endif
-  sdf_fingerprint_op_result_t match_result =
-      fp_match_1n(&match);
-
-  // fp_match_1n() can block for up to the full UART timeout (~12 s).
-  // Reset the watchdog immediately after to avoid accumulating time with the
-  // subsequent query_users call in sdf_services_start_local_enrollment_with_permission.
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_reset();
-#endif
-
-  if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
-      match_result == SDF_FINGERPRINT_OP_TIMEOUT) {
-    return;
-  }
-
-  if (match_result != SDF_FINGERPRINT_OP_OK) {
-    ESP_LOGW(TAG, "Fingerprint match error in admin auth: %s",
-             sdf_services_fingerprint_result_name(match_result));
-    return;
-  }
-
-ESP_LOGI(TAG, "Admin Auth Match: user_id=%u, permission=%u",
-           (unsigned)match.user_id, (unsigned)match.permission);
-  sdf_services_try_claim_admin_action(&match);
-}
-
 /* Legacy task removed - boot init now handled by sdf_match_task, enrollment by sdf_enroll_task */
 
 void sdf_services_get_default_config(sdf_services_config_t *config) {
@@ -739,11 +473,16 @@ esp_err_t sdf_services_start_tasks(void) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Create match task queue for ISR to wake the task */
-    s->match_task_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+    /* Create match task queue for ISR to wake the task. sdf_services_init()
+     * already creates this queue, so only create it here if it's somehow
+     * missing (e.g. this is called outside the normal init path) -
+     * unconditionally recreating it would leak the previous queue handle. */
     if (s->match_task_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create match task queue");
-        return ESP_FAIL;
+        s->match_task_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+        if (s->match_task_queue == NULL) {
+            ESP_LOGE(TAG, "Failed to create match task queue");
+            return ESP_FAIL;
+        }
     }
 
     /* Create match task */
@@ -801,25 +540,84 @@ esp_err_t sdf_services_start_tasks(void) {
 esp_err_t sdf_services_stop_tasks(void) {
     sdf_services_state_t *s = &s_state;
 
-    if (s->match_task) {
-        vTaskDelete(s->match_task);
-        s->match_task = NULL;
+    /* Stop the wake GPIO ISR first so it can't push a new event into
+     * match_task_queue (sdf_services_wake_isr) once the tasks/queue below
+     * are torn down - that would be a use-after-free of the queue handle. */
+    if (s->config.wake_gpio >= 0) {
+        sdf_platform_gpio_isr_handler_remove(s->config.wake_gpio);
     }
-    if (s->enroll_task) {
-        vTaskDelete(s->enroll_task);
-        s->enroll_task = NULL;
+
+    if (s->lock != NULL) {
+        SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+        if (guard.acquired == pdTRUE) {
+            s->stop_requested = true;
+        }
     }
-    if (s->admin_task) {
-        vTaskDelete(s->admin_task);
-        s->admin_task = NULL;
+
+    /* Each task polls stop_requested (see sdf_match_task / sdf_enroll_task /
+     * sdf_admin_task / sdf_button_task) and exits on its own -
+     * unsubscribing from the event router and self-deleting - instead of
+     * being killed from outside via vTaskDelete(). Killing a task from
+     * outside can leave s_state.lock permanently held if the victim
+     * happened to be inside a critical section (or, for match/enroll, mid
+     * the ~12s blocking fingerprint UART call) at the moment of deletion.
+     * Poll for all four to clear their handles, bounded generously enough
+     * to cover that worst-case 12s UART timeout. */
+    const int poll_interval_ms = 50;
+    const int max_wait_ms = 13000;
+    int waited_ms = 0;
+    bool all_stopped = false;
+    while (waited_ms < max_wait_ms) {
+        {
+            /* Scoped so the lock is released before vTaskDelay() below -
+             * holding it across the delay would needlessly block every
+             * other s_state.lock user for the whole polling window. */
+            SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+            all_stopped = (guard.acquired == pdTRUE) && s->match_task == NULL &&
+                          s->enroll_task == NULL && s->admin_task == NULL &&
+                          s->button_task == NULL;
+        }
+        if (all_stopped) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(poll_interval_ms));
+        waited_ms += poll_interval_ms;
     }
-    if (s->button_task) {
-        vTaskDelete(s->button_task);
-        s->button_task = NULL;
+
+    if (!all_stopped) {
+        ESP_LOGE(TAG,
+                 "One or more services tasks did not stop within %dms; "
+                 "forcing deletion (may leave s_state.lock permanently held "
+                 "if a task was mid-critical-section)",
+                 max_wait_ms);
+        if (s->match_task) {
+            vTaskDelete(s->match_task);
+            s->match_task = NULL;
+        }
+        if (s->enroll_task) {
+            vTaskDelete(s->enroll_task);
+            s->enroll_task = NULL;
+        }
+        if (s->admin_task) {
+            vTaskDelete(s->admin_task);
+            s->admin_task = NULL;
+        }
+        if (s->button_task) {
+            vTaskDelete(s->button_task);
+            s->button_task = NULL;
+        }
     }
+
     if (s->match_task_queue) {
         vQueueDelete(s->match_task_queue);
         s->match_task_queue = NULL;
+    }
+
+    if (s->lock != NULL) {
+        SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+        if (guard.acquired == pdTRUE) {
+            s->stop_requested = false;
+        }
     }
 
     ESP_LOGI(TAG, "All services tasks stopped");
@@ -942,13 +740,16 @@ void sdf_services_trigger_low_battery_warning(void) {
 esp_err_t sdf_services_delete_user(uint16_t user_id) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
-  sdf_fingerprint_op_result_t res;
-  {
+  /* fp_delete_user() is a blocking UART round-trip (up to the ~12s sensor
+   * timeout) and is already serialized by the fingerprint driver's own
+   * internal mutex, so s_state.lock does not need to be held across it -
+   * doing so would stall every other s_state.lock user (match cycle, admin
+   * actions, enrollment) for up to 12s. Only take the lock for the brief
+   * enrolled_user_count update below. */
+  sdf_fingerprint_op_result_t res = fp_delete_user(user_id);
+  if (res == SDF_FINGERPRINT_OP_OK) {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired != pdTRUE)
-      return ESP_ERR_TIMEOUT;
-    res = fp_delete_user(user_id);
-    if (res == SDF_FINGERPRINT_OP_OK && s_state.enrolled_user_count > 0) {
+    if (guard.acquired == pdTRUE && s_state.enrolled_user_count > 0) {
       s_state.enrolled_user_count--;
     }
   }
@@ -961,18 +762,18 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
 esp_err_t sdf_services_clear_all_users(void) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
-  sdf_fingerprint_op_result_t res;
-  {
+  /* See sdf_services_delete_user(): fp_delete_all_users() is a long
+   * blocking UART call already serialized by the fingerprint driver's own
+   * mutex, so don't hold s_state.lock across it. */
+  sdf_fingerprint_op_result_t res = fp_delete_all_users();
+  if (res == SDF_FINGERPRINT_OP_OK) {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired != pdTRUE)
-      return ESP_ERR_TIMEOUT;
-    res = fp_delete_all_users();
-    if (res == SDF_FINGERPRINT_OP_OK) {
+    if (guard.acquired == pdTRUE) {
       s_state.enrolled_user_count = 0;
     }
   }
   if (res == SDF_FINGERPRINT_OP_OK) {
-    for (uint16_t i = 1; i <= 10; i++) {
+    for (uint16_t i = SDF_FINGERPRINT_USER_ID_MIN; i <= SDF_SERVICES_MAX_USERS; i++) {
       sdf_storage_delete_user_name(i);
     }
   }
@@ -983,13 +784,12 @@ esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
                                    size_t *count, size_t max_count) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
-  sdf_fingerprint_op_result_t res;
-  {
-    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired != pdTRUE)
-      return ESP_ERR_TIMEOUT;
-    res = fp_query_users(user_ids, permissions, count, max_count);
-  }
+  /* See sdf_services_delete_user(): fp_query_users() is a long blocking
+   * UART call already serialized by the fingerprint driver's own mutex, so
+   * don't hold s_state.lock across it - there's no s_state to protect here
+   * anyway, this call only touches the sensor. */
+  sdf_fingerprint_op_result_t res =
+      fp_query_users(user_ids, permissions, count, max_count);
   return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
 }
 

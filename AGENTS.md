@@ -48,7 +48,7 @@ Each component exposes public API in `include/` and internals in `src/`:
 - `sdf_storage` — NVS storage and persistence
 - `sdf_config` — Static configuration and defaults
 - `sdf_common` — Shared types and utilities
-- `sdf_ota` — OTA update mechanism (version, signature, rollback) (owns `sdf_ota_task`, future)
+- `sdf_ota` — OTA update mechanism (version, signature, rollback). Driven by CLI (`ota` commands), Zigbee (automatic query), and BLE companion (`sdf_ble_companion_ota.c`: phone supplies WiFi credentials + HTTPS firmware URL over the OTA characteristic).
 
 ## Critical Setup Steps
 1. **Set real lock BLE address** in `firmware/components/sdf_app/src/sdf_app.c` (`SDF_NUKI_TARGET_ADDR_TYPE` and `SDF_NUKI_TARGET_ADDR`). Current values are placeholders.

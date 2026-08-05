@@ -3,7 +3,7 @@
 ## 📱 Mobile App & BLE Peripheral Support
 Currently, the device relies heavily on Zigbee (for remote management) or local button presses (for local management).
 * [*] **Smartphone Companion App:** A BLE GATT service to allow users to configure the device, enroll fingerprints, and perform OTA updates directly from their smartphone without needing a Zigbee coordinator.
-* [ ] **BLE OTA Updates:** The OTA mechanism is currently Zigbee-focused or CLI-driven. BLE-initiated OTA is marked as a "future" architectural path.
+* [*] **BLE OTA Updates:** A phone can write WiFi credentials + an HTTPS firmware URL to the OTA characteristic; the device joins WiFi, downloads and verifies the signed image (`sdf_ble_companion_ota.c`), and reports progress back over BLE notifications.
 
 ## 👥 Advanced Access Control
 The current permission model is basic (Admin vs. Standard).
@@ -12,7 +12,7 @@ The current permission model is basic (Admin vs. Standard).
 * [*] **User Naming:** The system only tracks `User ID` (1-500). Allowing a text string to be associated with an ID (e.g., ID 42 = "Alice") would make Zigbee management and local CLI management much more user-friendly.
 
 ## 🔄 State Synchronization
-* [ ] **Bidirectional Nuki Sync:** The SDF updates the Zigbee lock state when it successfully sends a BLE command to Nuki. However, if a user unlocks the Nuki lock manually from the inside, it's unclear if the SDF polls the Nuki lock to report this physical change back to the Zigbee network.
+* [*] **Bidirectional Nuki Sync:** The SDF polls Nuki keyturner state after each wake-from-timer cycle (`nuki_state_poll_interval_ms`, default 15s) and updates the Zigbee lock state accordingly, so a manual unlock at the Nuki lock is reflected back to the Zigbee network.
 
 ## 🔔 Hardware & Usability Enhancements
 * [ ] **Audio Feedback:** The device relies entirely on the WS2812 LED ring for feedback. Adding a small piezo buzzer for auditory confirmation (success chime, error beep) would improve accessibility and user confidence.

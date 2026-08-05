@@ -855,11 +855,18 @@ static int cmd_ota_trigger(int argc, char **argv) {
   
   if (strcmp(source, "zigbee://") == 0) {
     printf("Triggering Zigbee OTA query...\n");
-    // The Zigbee stack handles OTA queries automatically based on query interval
-    // This just triggers an immediate query
-    // TODO: Add API to trigger immediate OTA query in Zigbee stack
-    printf("Zigbee OTA query interval: %d hours\n", CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS);
-    printf("Note: OTA queries happen automatically. Use 'zigbee status' to check network.\n");
+    esp_err_t err = sdf_protocol_zigbee_trigger_ota_query();
+    if (err == ESP_OK) {
+      printf("Query interval temporarily shortened; expect a query within "
+             "~1 minute (restores to %d hour(s) automatically).\n",
+             CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS);
+    } else if (err == ESP_ERR_INVALID_STATE) {
+      printf("Zigbee not joined to a network. Use 'zigbee status' to check.\n");
+    } else if (err == ESP_ERR_TIMEOUT) {
+      printf("Timed out acquiring the Zigbee stack lock. Try again.\n");
+    } else {
+      printf("Failed to trigger OTA query: %s\n", esp_err_to_name(err));
+    }
   } else {
     printf("Source '%s' not yet implemented\n", source);
   }
@@ -935,8 +942,23 @@ static int cmd_ota_verify(int argc, char **argv) {
 
 #if CONFIG_SDF_OTA_SIGNATURE_VERIFY
   printf("Verifying signature...\n");
-  // sdf_ota_verify_signature() reads from partition
-  err = sdf_ota_verify_signature(next);
+  /* This command verifies an out-of-band partition (e.g. flashed outside
+   * a tracked sdf_ota_begin()/write() session), so there's no session-
+   * recorded "actual bytes written" to fall back on the way
+   * sdf_ota_verify_and_commit() does. Accept an optional explicit size
+   * ("ota verify <image_size_bytes>"); without it, fall back to the full
+   * partition size, which only works when the image was written to exactly
+   * fill the partition - warn loudly since that's rarely true. */
+  uint32_t image_size = next->size;
+  if (argc >= 3) {
+    image_size = (uint32_t)strtoul(argv[2], NULL, 0);
+  } else {
+    printf("Warning: no image size given, assuming image fills the whole "
+           "partition (%" PRIu32 " bytes). Pass the real size as "
+           "'ota verify <bytes>' for a reliable result.\n",
+           (uint32_t)next->size);
+  }
+  err = sdf_ota_verify_signature(next, image_size);
   if (err == ESP_OK) {
     printf("Signature verification: PASSED\n");
   } else {

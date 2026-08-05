@@ -66,6 +66,21 @@ esp_err_t sdf_protocol_zigbee_factory_reset(void);
 esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms);
 uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void);
 
+/**
+ * @brief Prompt a near-immediate OTA image query instead of waiting for the
+ *        configured periodic interval (CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS).
+ *
+ * The Zigbee OTA client only supports a periodic query timer, not a
+ * one-shot "query now" primitive, so this temporarily shortens the query
+ * interval to prompt a query within roughly a minute, then restores the
+ * configured interval automatically.
+ *
+ * @return ESP_OK on success, ESP_ERR_INVALID_STATE if not joined to a
+ *         network, ESP_ERR_TIMEOUT if the Zigbee stack lock could not be
+ *         acquired.
+ */
+esp_err_t sdf_protocol_zigbee_trigger_ota_query(void);
+
 #define SDF_ZIGBEE_ATTR_ACTIVE_USERS_LIST_ID 0x4000
 esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array);
 

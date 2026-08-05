@@ -52,12 +52,16 @@ static void sdf_match_task_init_subscriptions(sdf_match_task_state_t *state) {
                                SDF_EVENT_ROUTER_PRIO_HIGH,
                                sdf_match_task_event_cb, state, &state->sub_match_req);
 
+    /* min_prio is the *lowest* importance this subscriber accepts (the
+     * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
+     * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
+     * both out. Use LOW to accept every priority for these two types. */
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_match_task_event_cb, state, &state->sub_power_wake);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_match_task_event_cb, state, &state->sub_power_sleep);
 }
 
@@ -228,6 +232,7 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
         .payload.biometric.user_id = match.user_id,
         .payload.biometric.confidence = 100,
+        .payload.biometric.permission = match.permission,
     };
     sdf_event_router_emit(&evt);
 }
@@ -266,12 +271,12 @@ void sdf_match_task(void *arg) {
 #endif
 
     /* Check unclaimed state on boot */
-    uint16_t users[1];
-    uint8_t perms[1];
+    uint16_t users[SDF_FINGERPRINT_USER_ID_MAX];
+    uint8_t perms[SDF_FINGERPRINT_USER_ID_MAX];
     size_t count = 0;
     esp_err_t query_err = ESP_FAIL;
     if (probe_err == ESP_OK) {
-        query_err = sdf_services_query_users(users, perms, &count, 1);
+        query_err = sdf_services_query_users(users, perms, &count, SDF_FINGERPRINT_USER_ID_MAX);
     } else {
         ESP_LOGW(TAG, "Skipping user query - sensor probe failed");
     }
@@ -317,12 +322,26 @@ void sdf_match_task(void *arg) {
     }
 
     while (true) {
+        {
+            SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+            if (guard.acquired == pdTRUE && s->stop_requested) {
+                break;
+            }
+        }
+
 #ifndef CONFIG_IDF_TARGET_LINUX
         esp_task_wdt_reset();
 #endif
 
         sdf_event_router_event_t event;
-        const TickType_t wait_ticks = portMAX_DELAY;
+        /* Bounded wait (matches sdf_enroll_task/sdf_button_task) so the loop
+         * always comes back around to esp_task_wdt_reset() above even when
+         * idle. A 15s TWDT is configured in sdf_app_init; blocking here
+         * forever with portMAX_DELAY would starve the reset and panic the
+         * device the first time no event arrives for 15s. It also bounds how
+         * long sdf_services_stop_tasks() has to wait for the stop_requested
+         * check above to be noticed. */
+        const TickType_t wait_ticks = pdMS_TO_TICKS(100);
         bool run_match = false;
 
         if (xQueueReceive(s_match_state.event_queue, &event, wait_ticks) == pdTRUE) {
@@ -368,4 +387,18 @@ void sdf_match_task(void *arg) {
             sdf_match_task_run_match_cycle(&s_match_state);
         }
     }
+
+    /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
+     * cleanly instead of being killed from outside. */
+    sdf_match_task_deinit_subscriptions(&s_match_state);
+#ifndef CONFIG_IDF_TARGET_LINUX
+    esp_task_wdt_delete(NULL);
+#endif
+    {
+        SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+        if (guard.acquired == pdTRUE) {
+            s->match_task = NULL;
+        }
+    }
+    vTaskDelete(NULL);
 }

@@ -195,6 +195,67 @@ esp_err_t sdf_config_set_post_wake_guard(uint32_t interval_ms);
  */
 esp_err_t sdf_config_set_nuki_state_poll_interval(uint32_t interval_ms);
 
+/**
+ * @brief Set default battery percentage reported before a real reading exists.
+ *
+ * @param percent New value, 0-100.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_battery_default_percent(uint8_t percent);
+
+/**
+ * @brief Set the power-management loop interval.
+ *
+ * @param interval_ms New interval in milliseconds.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_power_loop_interval(uint32_t interval_ms);
+
+/**
+ * @brief Set whether the Nuki BLE connection is established on demand
+ *        rather than held open.
+ *
+ * @param enabled New value.
+ * @return ESP_OK on success.
+ */
+esp_err_t sdf_config_set_ble_connect_on_demand(bool enabled);
+
+/**
+ * @brief Set the failed-attempt count that triggers a lockout.
+ *
+ * @param threshold New value, must be > 0.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_failed_attempt_threshold(uint32_t threshold);
+
+/**
+ * @brief Set the sliding window over which failed attempts are counted.
+ *
+ * @param window_ms New value in milliseconds, must be > 0.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_failed_attempt_window(uint32_t window_ms);
+
+/**
+ * @brief Set how long a lockout lasts once triggered.
+ *
+ * @param duration_ms New value in milliseconds, must be > 0.
+ * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
+ */
+esp_err_t sdf_config_set_lockout_duration(uint32_t duration_ms);
+
+/**
+ * @brief Persist the current runtime configuration to NVS.
+ *
+ * Saves the whole configuration struct as one blob, so it can be restored
+ * verbatim by sdf_config_init() on the next boot. Callers apply changes via
+ * the validated sdf_config_set_*() functions (or sdf_config_get_mutable(),
+ * used with caution) first, then call this to make them survive a reboot.
+ *
+ * @return ESP_OK on success, error from the underlying NVS write otherwise.
+ */
+esp_err_t sdf_config_save(void);
+
 #ifdef __cplusplus
 }
 #endif

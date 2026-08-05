@@ -718,6 +718,20 @@ int sdf_nuki_ble_init(sdf_nuki_ble_transport_t *transport,
   ble_hs_cfg.reset_cb = sdf_nuki_ble_on_reset;
   ble_hs_cfg.sync_cb = sdf_nuki_ble_on_sync;
 
+  /* Security manager config for the companion GATT server sharing this host.
+   * The device has no display/keyboard, so pairing is "Just Works" (no MITM
+   * protection) - it still encrypts the link and blocks passive sniffing or
+   * replay of credentials sent to the companion characteristics. This does
+   * not affect the outbound Nuki client connection, which uses its own
+   * application-layer NaCl encryption and never calls
+   * ble_gap_security_initiate(). */
+  ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+  ble_hs_cfg.sm_bonding = 1;
+  ble_hs_cfg.sm_mitm = 0;
+  ble_hs_cfg.sm_sc = 1;
+  ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+  ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC | BLE_SM_PAIR_KEY_DIST_ID;
+
   nimble_port_freertos_init(sdf_nuki_ble_host_task);
 
   return 0;

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "esp_partition.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -42,6 +43,15 @@ esp_err_t sdf_ota_rollback(void);
 const char *sdf_ota_get_version(void);
 sdf_ota_state_t sdf_ota_get_state(void);
 sdf_ota_version_cmp_t sdf_ota_version_compare(const char *current, const char *incoming);
+
+/* Verify the Ed25519 signature footer appended after the first image_size
+ * bytes of partition. image_size must be the actual size of the written
+ * app image (e.g. sdf_ota_begin()'s image_size, or a size independently
+ * derived from the image itself) - NOT partition->size, since partitions
+ * are erased-flash-padded and almost always larger than the image they
+ * hold. Passing partition->size here will read the footer from stale or
+ * erased flash for any image smaller than the full partition. */
+esp_err_t sdf_ota_verify_signature(const esp_partition_t *partition, uint32_t image_size);
 
 #ifdef __cplusplus
 }

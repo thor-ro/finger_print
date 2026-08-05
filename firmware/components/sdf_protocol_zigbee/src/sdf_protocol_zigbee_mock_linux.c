@@ -77,4 +77,8 @@ esp_err_t sdf_protocol_zigbee_update_battery_percent(uint8_t battery_percent) {
   return ESP_OK;
 }
 
+esp_err_t sdf_protocol_zigbee_trigger_ota_query(void) {
+  return sdf_protocol_zigbee_is_ready() ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
 #endif /* CONFIG_IDF_TARGET_LINUX */

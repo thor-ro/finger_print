@@ -1134,6 +1134,60 @@ esp_err_t sdf_protocol_zigbee_set_checkin_interval_ms(uint32_t interval_ms) {
   return ESP_OK;
 }
 
+/* Interval (minutes) used to prompt a near-immediate OTA query. */
+#define SDF_ZIGBEE_OTA_TRIGGER_QUERY_INTERVAL_MIN 1
+/* Delay before restoring the configured query interval, long enough for the
+ * near-immediate query above to have fired. */
+#define SDF_ZIGBEE_OTA_TRIGGER_RESTORE_DELAY_MS 90000u
+
+static void sdf_zigbee_restore_ota_query_interval_cb(uint8_t param) {
+  (void)param;
+  esp_err_t err = esp_zb_ota_upgrade_client_query_interval_set(
+      SDF_ZIGBEE_ENDPOINT, CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to restore Zigbee OTA query interval: 0x%x", err);
+  } else {
+    ESP_LOGI(TAG, "Restored Zigbee OTA query interval to %d hour(s)",
+             CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS);
+  }
+}
+
+esp_err_t sdf_protocol_zigbee_trigger_ota_query(void) {
+  if (!sdf_protocol_zigbee_is_ready()) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  if (!esp_zb_lock_acquire(pdMS_TO_TICKS(1000))) {
+    ESP_LOGW(TAG, "Timeout acquiring Zigbee lock for OTA query trigger");
+    return ESP_ERR_TIMEOUT;
+  }
+
+  esp_err_t err = esp_zb_ota_upgrade_client_query_interval_set(
+      SDF_ZIGBEE_ENDPOINT, SDF_ZIGBEE_OTA_TRIGGER_QUERY_INTERVAL_MIN);
+  if (err == ESP_OK) {
+    /* The OTA client has no one-shot "query now" API, only a periodic
+     * timer. Shorten it briefly to prompt a query within ~1 minute, then
+     * restore the configured interval so we don't keep polling fast. */
+    esp_zb_scheduler_alarm(
+        (esp_zb_callback_t)sdf_zigbee_restore_ota_query_interval_cb, 0,
+        SDF_ZIGBEE_OTA_TRIGGER_RESTORE_DELAY_MS);
+  }
+
+  esp_zb_lock_release();
+
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to trigger immediate OTA query: 0x%x", err);
+  } else {
+    ESP_LOGI(TAG,
+             "Triggered near-immediate Zigbee OTA query (restoring to %d "
+             "hour(s) interval in %u s)",
+             CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS,
+             (unsigned)(SDF_ZIGBEE_OTA_TRIGGER_RESTORE_DELAY_MS / 1000));
+  }
+
+  return err;
+}
+
 esp_err_t sdf_protocol_zigbee_permit_join(void) {
   if (!sdf_protocol_zigbee_is_enabled()) {
     return ESP_ERR_NOT_SUPPORTED;

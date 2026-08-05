@@ -305,9 +305,12 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
     ESP_LOGI(TAG, "Version check: current=%s, incoming=%s",
              running_desc.version, target_desc.version);
 
-    /* Compare versions */
+    /* Compare versions. sdf_ota_version_compare(current, incoming) returns
+     * NEWER when *incoming* is newer than *current* (i.e. a genuine
+     * upgrade) and OLDER when incoming is older (a downgrade) - the
+     * downgrade branch below must therefore check for OLDER, not NEWER. */
     sdf_ota_version_cmp_t cmp = sdf_ota_version_compare(running_desc.version, target_desc.version);
-    if (cmp == SDF_OTA_VERSION_NEWER) {
+    if (cmp == SDF_OTA_VERSION_OLDER) {
         ESP_LOGW(TAG, "Downgrade detected: %s -> %s",
                  running_desc.version, target_desc.version);
         sdf_ota_emit_audit(SDF_AUDIT_OTA_VERSION_DOWNGRADE, 0, 0);
@@ -326,7 +329,7 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
 
     /* Verify signature if enabled */
 #if CONFIG_SDF_OTA_SIGNATURE_VERIFY
-    err = sdf_ota_verify_signature(s_session.target_partition);
+    err = sdf_ota_verify_signature(s_session.target_partition, s_session.expected_size);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Signature verification failed: %s", esp_err_to_name(err));
         sdf_ota_emit_audit(SDF_AUDIT_OTA_SIGNATURE_INVALID, err, 0);

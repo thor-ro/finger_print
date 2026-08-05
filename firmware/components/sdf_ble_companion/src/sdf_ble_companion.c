@@ -63,6 +63,21 @@ static sdf_ble_companion_callbacks_t s_callbacks = {0};
 static bool s_initialized = false;
 static SemaphoreHandle_t s_lock = NULL;
 
+/* Scratch buffer used by the GATT access callbacks below (sdf_ble_companion_*
+ * _access) to snapshot a characteristic's value under s_lock so it can be
+ * handed to a user callback (on_config_write/on_enroll_write/on_ota_write/
+ * auth parsing) after the lock is released - callbacks must never run while
+ * s_lock is held, since they may themselves call back into this component.
+ * A 512-byte array used to live as a stack-local in each of these functions;
+ * that's fine size-wise on its own, but they all run on the NimBLE host
+ * task's stack (a single shared, size-constrained task - only one GATT
+ * access callback ever executes at a time on it), and stacking a 512B
+ * buffer plus the rest of each callback's locals plus the NimBLE host's own
+ * call depth was eating into an already tight budget. Since access to this
+ * buffer is inherently serialized by the host task (no reentrancy across
+ * these callbacks), a single shared static buffer is safe. */
+static uint8_t s_gatt_scratch[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+
 static uint16_t s_auth_val_handle = 0;
 static uint16_t s_config_val_handle = 0;
 static uint16_t s_enroll_val_handle = 0;
@@ -173,6 +188,14 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
     (void)attr_handle;
     (void)arg;
 
+    /* Can still be invoked by the NimBLE host after sdf_ble_companion_deinit()
+     * has run (the GATT characteristic is never unregistered) - bail out
+     * before touching s_connections/s_callbacks, which deinit may have
+     * already reset. */
+    if (!s_initialized) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "auth_access: lock contention");
         return BLE_ATT_ERR_UNLIKELY;
@@ -194,7 +217,7 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
         if (len >= 2 && len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            uint8_t buf[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+            uint8_t *buf = s_gatt_scratch;
             os_mbuf_copydata(om, 0, len, buf);
             uint8_t cmd = buf[0];
             if (cmd == SDF_BLE_COMPANION_AUTH_LOGIN ||
@@ -283,6 +306,11 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
     (void)attr_handle;
     (void)arg;
 
+    /* See the equivalent guard in sdf_ble_companion_auth_access(). */
+    if (!s_initialized) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "config_access: lock contention");
         return BLE_ATT_ERR_UNLIKELY;
@@ -342,7 +370,7 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
             conn->config_value_len = len;
             void (*on_config)(void *, const uint8_t *, size_t) = s_callbacks.on_config_write;
             void *cb_ctx = s_callbacks.ctx;
-            uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+            uint8_t *tmp = s_gatt_scratch;
             memcpy(tmp, conn->config_value, len);
             xSemaphoreGive(s_lock);
             if (on_config) {
@@ -362,6 +390,11 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
     (void)attr_handle;
     (void)arg;
 
+    /* See the equivalent guard in sdf_ble_companion_auth_access(). */
+    if (!s_initialized) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "enroll_access: lock contention");
         return BLE_ATT_ERR_UNLIKELY;
@@ -374,11 +407,12 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-        uint16_t tmp_len = conn->enroll_value_len;
-        memcpy(tmp, conn->enroll_value, tmp_len);
+        /* os_mbuf_append() only copies into an already-allocated mbuf chain,
+         * it doesn't block or call back into this component, so there's no
+         * need to snapshot conn->enroll_value into a scratch buffer first -
+         * just append directly while still holding the lock. */
+        int rc = os_mbuf_append(ctxt->om, conn->enroll_value, conn->enroll_value_len);
         xSemaphoreGive(s_lock);
-        int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
@@ -388,7 +422,7 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
             conn->enroll_value_len = len;
             void (*on_enroll)(void *, const uint8_t *, size_t) = s_callbacks.on_enroll_write;
             void *cb_ctx = s_callbacks.ctx;
-            uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+            uint8_t *tmp = s_gatt_scratch;
             memcpy(tmp, conn->enroll_value, len);
             xSemaphoreGive(s_lock);
             if (on_enroll) {
@@ -408,6 +442,11 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
     (void)attr_handle;
     (void)arg;
 
+    /* See the equivalent guard in sdf_ble_companion_auth_access(). */
+    if (!s_initialized) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "ota_access: lock contention");
         return BLE_ATT_ERR_UNLIKELY;
@@ -420,11 +459,11 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
-        uint16_t tmp_len = conn->ota_value_len;
-        memcpy(tmp, conn->ota_value, tmp_len);
+        /* See the equivalent comment in sdf_ble_companion_enroll_access():
+         * os_mbuf_append() doesn't block or call back into this component,
+         * so append directly from conn->ota_value while still locked. */
+        int rc = os_mbuf_append(ctxt->om, conn->ota_value, conn->ota_value_len);
         xSemaphoreGive(s_lock);
-        int rc = os_mbuf_append(ctxt->om, tmp, tmp_len);
         return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
@@ -434,7 +473,7 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
             conn->ota_value_len = len;
             void (*on_ota)(void *, const uint8_t *, size_t) = s_callbacks.on_ota_write;
             void *cb_ctx = s_callbacks.ctx;
-            uint8_t tmp[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+            uint8_t *tmp = s_gatt_scratch;
             memcpy(tmp, conn->ota_value, len);
             xSemaphoreGive(s_lock);
             if (on_ota) {
@@ -453,25 +492,53 @@ static const struct ble_gatt_chr_def s_characteristics[] = {
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_AUTH_UUID128),
         .access_cb = sdf_ble_companion_auth_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
+        /* _ENC requires the link to be encrypted (paired/bonded) before a
+         * read or write is allowed; the stack triggers pairing on the first
+         * access if the link isn't already secured. These characteristics
+         * carry password hashes, WiFi credentials and OTA URLs, so they must
+         * not be reachable over a plaintext connection. */
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
+                 BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_auth_val_handle,
     },
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_CONFIG_UUID128),
         .access_cb = sdf_ble_companion_config_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
+        /* _ENC requires the link to be encrypted (paired/bonded) before a
+         * read or write is allowed; the stack triggers pairing on the first
+         * access if the link isn't already secured. These characteristics
+         * carry password hashes, WiFi credentials and OTA URLs, so they must
+         * not be reachable over a plaintext connection. */
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
+                 BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_config_val_handle,
     },
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_ENROLL_UUID128),
         .access_cb = sdf_ble_companion_enroll_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
+        /* _ENC requires the link to be encrypted (paired/bonded) before a
+         * read or write is allowed; the stack triggers pairing on the first
+         * access if the link isn't already secured. These characteristics
+         * carry password hashes, WiFi credentials and OTA URLs, so they must
+         * not be reachable over a plaintext connection. */
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
+                 BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_enroll_val_handle,
     },
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_OTA_UUID128),
         .access_cb = sdf_ble_companion_ota_access,
-        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_NOTIFY,
+        /* _ENC requires the link to be encrypted (paired/bonded) before a
+         * read or write is allowed; the stack triggers pairing on the first
+         * access if the link isn't already secured. These characteristics
+         * carry password hashes, WiFi credentials and OTA URLs, so they must
+         * not be reachable over a plaintext connection. */
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
+                 BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC |
+                 BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_ota_val_handle,
     },
     { 0 }
@@ -487,24 +554,48 @@ static const struct ble_gatt_svc_def s_svc_defs[] = {
 };
 
 static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
+    /* See the equivalent guard in sdf_ble_companion_auth_access(): the GAP
+     * callback is never unregistered by sdf_ble_companion_deinit() either. */
+    if (!s_initialized) {
+        return 0;
+    }
+
     switch (event->type) {
         case BLE_GAP_EVENT_CONNECT: {
             if (event->connect.status == 0) {
                 ESP_LOGI(TAG, "Connected, conn_handle=%d", event->connect.conn_handle);
 
+                bool slot_claimed = false;
                 if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
                     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_free_conn();
                     if (conn) {
+                        /* Full zero, not a field-by-field reset: this slot may be
+                         * reused from a previous connection (see the equivalent
+                         * memset in BLE_GAP_EVENT_DISCONNECT below), and stale
+                         * config_value/enroll_value/ota_value/password_hash from
+                         * that prior session must not be readable by whoever
+                         * ends up authenticated on this new one. */
+                        memset(conn, 0, sizeof(*conn));
                         conn->conn_handle = event->connect.conn_handle;
                         conn->connected = true;
                         conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
-                        conn->auth_pending = false;
-                        memset(conn->username, 0, sizeof(conn->username));
-                        memset(conn->password_hash, 0, sizeof(conn->password_hash));
+                        slot_claimed = true;
                     }
                     xSemaphoreGive(s_lock);
                 } else {
                     ESP_LOGW(TAG, "gap_event connect: lock contention");
+                }
+
+                if (!slot_claimed) {
+                    /* All SDF_BLE_COMPANION_MAX_CONNECTIONS slots are in use (or
+                     * the lock was contended) - this link can never be tracked,
+                     * authenticated, or torn down by this component, so it must
+                     * not be left open. Terminate it immediately rather than
+                     * leaking a NimBLE connection slot indefinitely. */
+                    ESP_LOGW(TAG, "No free connection slot for conn_handle=%d, terminating",
+                             event->connect.conn_handle);
+                    ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                    break;
                 }
 
                 // Request MTU exchange after connection
@@ -525,10 +616,11 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
                 for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
                     if (s_connections[i].connected &&
                         s_connections[i].conn_handle == event->disconnect.conn.conn_handle) {
-                        s_connections[i].connected = false;
-                        s_connections[i].conn_handle = 0;
-                        s_connections[i].auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
-                        s_connections[i].auth_pending = false;
+                        /* Full zero (not just connected/auth_state) so the
+                         * credential and GATT-buffer fields don't linger in
+                         * memory once this session ends, and so the slot starts
+                         * clean if/when BLE_GAP_EVENT_CONNECT reclaims it. */
+                        memset(&s_connections[i], 0, sizeof(s_connections[i]));
                         break;
                     }
                 }
@@ -671,9 +763,14 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
         s_callbacks = *callbacks;
     }
 
-    s_lock = xSemaphoreCreateMutex();
+    /* s_lock deliberately survives a deinit/init cycle (see
+     * sdf_ble_companion_deinit()) rather than being recreated here every
+     * time, so only create it the first time. */
     if (!s_lock) {
-        return ESP_ERR_NO_MEM;
+        s_lock = xSemaphoreCreateMutex();
+        if (!s_lock) {
+            return ESP_ERR_NO_MEM;
+        }
     }
 
     memset(s_connections, 0, sizeof(s_connections));
@@ -729,6 +826,27 @@ esp_err_t sdf_ble_companion_deinit(void) {
         return ESP_OK;
     }
 
+    /* The NimBLE host task can be running one of the GATT access callbacks
+     * or sdf_ble_companion_gap_event() concurrently with this call (it isn't
+     * the caller's task). Neither the GATT characteristics nor the GAP
+     * callback are unregistered below - there's no clean unregister path for
+     * either through sdf_nuki_ble_transport - so events for this service can
+     * keep arriving after deinit starts. Clearing s_initialized first (under
+     * the lock) makes every one of those callbacks bail out early instead of
+     * touching s_connections/s_callbacks mid-teardown, and taking the lock
+     * here also blocks until any critical section that was *already*
+     * in-flight when we got here has finished, before we go on to reset
+     * state below. s_lock itself is intentionally never deleted (see
+     * sdf_ble_companion_init()), so a callback that slips in after this
+     * function returns still finds a valid, if now-inert, mutex instead of a
+     * dangling handle. */
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) == pdTRUE) {
+        s_initialized = false;
+        xSemaphoreGive(s_lock);
+    } else {
+        s_initialized = false;
+    }
+
     for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
         if (s_connections[i].connected) {
             ble_gap_terminate(s_connections[i].conn_handle, BLE_ERR_REM_USER_CONN_TERM);
@@ -749,11 +867,6 @@ esp_err_t sdf_ble_companion_deinit(void) {
         esp_timer_stop(s_adv_timer);
         esp_timer_delete(s_adv_timer);
         s_adv_timer = NULL;
-    }
-
-    if (s_lock) {
-        vSemaphoreDelete(s_lock);
-        s_lock = NULL;
     }
 
     memset(&s_callbacks, 0, sizeof(s_callbacks));

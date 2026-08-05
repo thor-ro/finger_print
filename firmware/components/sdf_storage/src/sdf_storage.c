@@ -440,6 +440,14 @@ esp_err_t sdf_storage_web_user_count(size_t *count) {
         err = nvs_get_blob(handle, key, &u, &len);
         if (err == ESP_OK && u.valid) {
             cnt++;
+        } else if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+            /* ESP_ERR_NVS_NOT_FOUND just means this slot has never been
+             * written - expected for unused slots. Anything else (e.g. a
+             * corrupted/truncated blob) is swallowed the same way here
+             * (the slot is simply not counted), but is worth logging since
+             * it could otherwise silently undercount valid users. */
+            ESP_LOGW(TAG, "web_user_count: unexpected error reading slot %u: %s",
+                     (unsigned)i, esp_err_to_name(err));
         }
     }
 
@@ -500,7 +508,8 @@ static void sdf_storage_fp_user_name_key(char *buf, size_t buf_size, uint16_t us
 }
 
 esp_err_t sdf_storage_save_user_name(uint16_t user_id, const char *name) {
-    if (user_id == 0 || user_id > 10 || name == NULL) {
+    if (user_id < SDF_STORAGE_FP_USER_ID_MIN ||
+        user_id > SDF_STORAGE_FP_USER_ID_MAX || name == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -523,7 +532,8 @@ esp_err_t sdf_storage_save_user_name(uint16_t user_id, const char *name) {
 }
 
 esp_err_t sdf_storage_load_user_name(uint16_t user_id, char *name_out, size_t max_len) {
-    if (user_id == 0 || user_id > 10 || name_out == NULL || max_len == 0) {
+    if (user_id < SDF_STORAGE_FP_USER_ID_MIN ||
+        user_id > SDF_STORAGE_FP_USER_ID_MAX || name_out == NULL || max_len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -542,7 +552,8 @@ esp_err_t sdf_storage_load_user_name(uint16_t user_id, char *name_out, size_t ma
 }
 
 esp_err_t sdf_storage_delete_user_name(uint16_t user_id) {
-    if (user_id == 0 || user_id > 10) {
+    if (user_id < SDF_STORAGE_FP_USER_ID_MIN ||
+        user_id > SDF_STORAGE_FP_USER_ID_MAX) {
         return ESP_ERR_INVALID_ARG;
     }
 

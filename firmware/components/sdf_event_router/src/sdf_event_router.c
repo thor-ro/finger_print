@@ -12,6 +12,11 @@
 #define SDF_EVENT_ROUTER_TASK_STACK 3072
 #define SDF_EVENT_ROUTER_TASK_PRIORITY 5
 #define SDF_EVENT_ROUTER_LOCK_WAIT_MS 100u
+/* Upper bound on subscribers dispatched for a single event. This is a
+ * fan-out cap for the dispatch snapshot below, not a global subscriber
+ * limit - comfortably above the handful of tasks that subscribe to any one
+ * event type today. */
+#define SDF_EVENT_ROUTER_MAX_DISPATCH 16u
 
 static const char *TAG = "sdf_event_router";
 
@@ -33,15 +38,46 @@ struct sdf_event_router_state {
 
 static void sdf_event_router_dispatch_sync(const sdf_event_router_event_t *event)
 {
-    sdf_event_router_subscriber_t *sub = s_state.subscribers_by_type[event->type];
+    if (event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
+        ESP_LOGE(TAG, "Dropping event with invalid type %d", (int)event->type);
+        return;
+    }
 
+    /* Snapshot matching (cb, ctx) pairs by value while holding the lock,
+     * then invoke them after releasing it. sdf_event_router_unsubscribe()
+     * frees subscriber nodes under this same lock, so walking the linked
+     * list itself outside the lock (the previous implementation) risked a
+     * use-after-free if a subscriber unsubscribed mid-dispatch. Copying the
+     * plain cb/ctx values means the callbacks stay safe to invoke even if
+     * the node they came from is freed the instant we unlock. */
+    sdf_event_router_cb cbs[SDF_EVENT_ROUTER_MAX_DISPATCH];
+    void *ctxs[SDF_EVENT_ROUTER_MAX_DISPATCH];
+    size_t n = 0;
+
+    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_EVENT_ROUTER_LOCK_WAIT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "Dispatch lock timeout, dropping event type=%d", (int)event->type);
+        return;
+    }
+
+    sdf_event_router_subscriber_t *sub = s_state.subscribers_by_type[event->type];
     while (sub != NULL) {
-        if (sub->min_prio >= event->priority) {
-            if (sub->cb != NULL) {
-                sub->cb(sub->ctx, event);
+        if (sub->min_prio >= event->priority && sub->cb != NULL) {
+            if (n < SDF_EVENT_ROUTER_MAX_DISPATCH) {
+                cbs[n] = sub->cb;
+                ctxs[n] = sub->ctx;
+                n++;
+            } else {
+                ESP_LOGW(TAG, "Dispatch fan-out cap reached for type=%d", (int)event->type);
+                break;
             }
         }
         sub = sub->next;
+    }
+
+    xSemaphoreGive(s_state.lock);
+
+    for (size_t i = 0; i < n; i++) {
+        cbs[i](ctxs[i], event);
     }
 }
 

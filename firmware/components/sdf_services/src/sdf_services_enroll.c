@@ -49,16 +49,26 @@ static void sdf_enroll_task_init_subscriptions(sdf_enroll_task_state_t *state) {
                                SDF_EVENT_ROUTER_PRIO_HIGH,
                                sdf_enroll_task_event_cb, state, &state->sub_start);
 
+    /* min_prio is the *lowest* importance this subscriber accepts (the
+     * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
+     * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
+     * both out. Use LOW to accept every priority for these two types. */
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_enroll_task_event_cb, state, &state->sub_power_wake);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
-                               SDF_EVENT_ROUTER_PRIO_CRITICAL,
+                               SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_enroll_task_event_cb, state, &state->sub_power_sleep);
 }
 
-
+static void sdf_enroll_task_deinit_subscriptions(sdf_enroll_task_state_t *state) {
+    if (state->sub_start) sdf_event_router_unsubscribe(state->sub_start);
+    if (state->sub_power_wake) sdf_event_router_unsubscribe(state->sub_power_wake);
+    if (state->sub_power_sleep) sdf_event_router_unsubscribe(state->sub_power_sleep);
+    if (state->event_queue) vQueueDelete(state->event_queue);
+    state->event_queue = NULL;
+}
 
 static void sdf_enroll_task_emit_complete(uint16_t user_id, uint8_t permission) {
     sdf_event_router_event_t evt = {
@@ -137,6 +147,10 @@ void sdf_services_run_enrollment_step(void) {
             if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
                 sdf_enrollment_sm_init(&s->enrollment);
                 fp_set_keep_power_on(false);
+                /* Newly enrolled user is now on the sensor; keep the cached
+                 * count in sync so the match cycle and the button admin-gate
+                 * (which treat count==0 as "no users yet") stay correct. */
+                s->enrolled_user_count++;
                 xSemaphoreGive(s->lock);
             }
             break;
@@ -184,6 +198,13 @@ void sdf_enroll_task(void *arg) {
     }
 
     while (true) {
+        {
+            SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+            if (guard.acquired == pdTRUE && s->stop_requested) {
+                break;
+            }
+        }
+
         sdf_event_router_event_t event;
         if (xQueueReceive(s_enroll_state.event_queue, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
             switch (event.type) {
@@ -228,4 +249,18 @@ void sdf_enroll_task(void *arg) {
 
         vTaskDelay(pdMS_TO_TICKS(SDF_ENROLL_POLL_INTERVAL_MS));
     }
+
+    /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
+     * cleanly instead of being killed from outside. */
+    sdf_enroll_task_deinit_subscriptions(&s_enroll_state);
+#ifndef CONFIG_IDF_TARGET_LINUX
+    esp_task_wdt_delete(NULL);
+#endif
+    {
+        SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
+        if (guard.acquired == pdTRUE) {
+            s->enroll_task = NULL;
+        }
+    }
+    vTaskDelete(NULL);
 }

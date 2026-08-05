@@ -41,6 +41,8 @@ typedef struct {
   bool keep_power_on;
   bool power_is_on;
   int uart_port;
+  int tx_pin;
+  int rx_pin;
   int power_en_pin;
   uint32_t response_timeout_ms;
   SemaphoreHandle_t lock;
@@ -51,6 +53,8 @@ static fp_state_t s_state = {
     .keep_power_on = false,
     .power_is_on = false,
     .uart_port = -1,
+    .tx_pin = -1,
+    .rx_pin = -1,
     .power_en_pin = -1,
     .response_timeout_ms = 0,
     .lock = NULL,
@@ -278,7 +282,8 @@ esp_err_t fp_probe(void) {
 
   ESP_LOGE(TAG, "Sensor probe FAILED after %u attempts – check wiring "
                 "(TX=%d, RX=%d, power_en=%d)",
-           (unsigned)max_attempts, -1, -1, s_state.power_en_pin);
+           (unsigned)max_attempts, s_state.tx_pin, s_state.rx_pin,
+           s_state.power_en_pin);
   s_state.response_timeout_ms = saved_timeout;
   xSemaphoreGive(s_state.lock);
   return err;
@@ -734,6 +739,8 @@ esp_err_t fp_init(const sdf_fingerprint_driver_config_t *config) {
   s_state.initialized = true;
   s_state.keep_power_on = false;
   s_state.uart_port = config->uart_port;
+  s_state.tx_pin = config->tx_pin;
+  s_state.rx_pin = config->rx_pin;
   s_state.response_timeout_ms = config->response_timeout_ms;
   fp_set_power(false);
   s_state.power_is_on = false;
@@ -772,6 +779,8 @@ void fp_deinit(void) {
   s_state.initialized = false;
   s_state.keep_power_on = false;
   s_state.uart_port = -1;
+  s_state.tx_pin = -1;
+  s_state.rx_pin = -1;
   s_state.power_en_pin = -1;
   s_state.response_timeout_ms = 0;
 
@@ -969,6 +978,25 @@ sdf_fingerprint_op_result_t fp_change_user_permission(uint16_t user_id,
   if (result == SDF_FINGERPRINT_OP_OK && current_permission != permission) {
     result = fp_delete_user_locked(user_id);
     if (result == SDF_FINGERPRINT_OP_OK) {
+      /* WARNING: no power-loss recovery path across this delete->save
+       * sequence. The eigenvalues we are about to re-save were already
+       * uploaded into `eigenvalues` above (RAM only, not persisted
+       * anywhere but this stack). If power is lost:
+       *  - before fp_delete_user_locked() returned: the old template is
+       *    still on the sensor with its old permission - no data loss,
+       *    the operation simply needs to be retried from scratch.
+       *  - after the delete succeeds but before fp_save_eigenvalues_locked()
+       *    below completes: the sensor no longer has ANY template for
+       *    user_id (old one deleted, new one not yet saved), and the only
+       *    copy of the eigenvalues lived in this function's RAM buffer,
+       *    which is now gone. The user's fingerprint template is
+       *    permanently lost with no recovery path - they must re-enroll.
+       * A full transactional/journaled rewrite (e.g. persisting the
+       * uploaded eigenvalues to flash before deleting, or reordering the
+       * sensor protocol to save-then-delete if the hardware supports
+       * having two entries momentarily) is out of scope here; this
+       * comment exists so the risk is documented rather than rediscovered
+       * via a bug report. */
       result = fp_save_eigenvalues_locked(user_id, permission, eigenvalues);
       if (result != SDF_FINGERPRINT_OP_OK) {
         sdf_fingerprint_op_result_t rollback_result =

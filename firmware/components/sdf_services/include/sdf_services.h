@@ -29,20 +29,6 @@ typedef enum {
 typedef void (*sdf_services_admin_action_cb)(
     void *ctx, sdf_services_admin_action_t action);
 
-typedef enum {
-  SDF_SERVICES_SECURITY_EVENT_MATCH_FAILED = 0,
-  SDF_SERVICES_SECURITY_EVENT_LOCKOUT_ENTERED = 1,
-  SDF_SERVICES_SECURITY_EVENT_LOCKOUT_CLEARED = 2,
-  SDF_SERVICES_SECURITY_EVENT_MATCH_SUCCEEDED = 3
-} sdf_services_security_event_type_t;
-
-typedef struct {
-  sdf_services_security_event_type_t type;
-  uint16_t user_id;
-  uint32_t failed_attempts;
-  uint32_t lockout_remaining_ms;
-} sdf_services_security_event_t;
-
 typedef struct {
   sdf_fingerprint_driver_config_t fingerprint;
   uint32_t match_poll_interval_ms;
