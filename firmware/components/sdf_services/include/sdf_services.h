@@ -14,6 +14,7 @@
 
 #include "fingerprint.h"
 #include "sdf_state_machines.h"
+#include "sdf_storage.h"
 
 typedef enum {
   SDF_SERVICES_ADMIN_ACTION_NONE = 0,
@@ -84,5 +85,36 @@ esp_err_t sdf_services_get_web_reg_auth(char *username, size_t username_max,
 esp_err_t sdf_services_get_web_reg_password_hash(uint8_t *password_hash,
                                                   size_t hash_len);
 void sdf_services_clear_web_reg_auth(void);
+
+/* Web Companion Auth decisions - pure functions, no I/O, no locks. See
+ * sdf_services_web_auth.c. */
+
+/* Login verification. Caller (sdf_ble_companion) already looked the user up
+ * via sdf_storage_web_user_find_by_name(); this just isolates the
+ * constant-time comparison so it's independently testable, including with
+ * crafted mismatched-length / all-zero inputs. */
+bool sdf_services_web_auth_verify_login(const sdf_storage_web_user_t *user,
+                                         const uint8_t *submitted_hash,
+                                         size_t hash_len);
+
+/* Registration outcome. Mirrors sdf_app_on_web_reg_auth_result's logic minus
+ * the actual sdf_storage_web_user_save() call and slot selection (still
+ * sdf_app's job). */
+typedef struct {
+  bool should_persist;              /* false on denial/timeout */
+  sdf_storage_web_user_t user;      /* populated only if should_persist */
+  bool reply_authorized;            /* value to pass to sdf_ble_companion_reply_auth() */
+} sdf_services_web_auth_registration_decision_t;
+
+sdf_services_web_auth_registration_decision_t sdf_services_web_auth_decide_registration(
+    const char *username, const uint8_t *password_hash, size_t hash_len,
+    uint8_t permission, bool admin_authorized);
+
+/* Timeout/reject unlatch guard. Trivial today (action == WEB_REG_AUTH &&
+ * result != ESP_OK), but made explicit and tested so a future admin-action
+ * type addition can't silently break the "always resolve the pending BLE
+ * client" guarantee sdf_app_on_admin_action_complete's comment warns about. */
+bool sdf_services_web_auth_should_resolve_on_action_complete(
+    sdf_services_admin_action_t action, esp_err_t result);
 
 #endif /* SDF_SERVICES_H */

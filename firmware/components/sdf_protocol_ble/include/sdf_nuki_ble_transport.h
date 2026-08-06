@@ -7,7 +7,20 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/timers.h"
+
+#ifndef CONFIG_IDF_TARGET_LINUX
 #include "host/ble_hs.h"
+#else
+/* NimBLE isn't available for IDF_TARGET_LINUX. sdf_nuki_ble_transport.c
+ * (the real implementation using this type) isn't built for linux either
+ * (see CMakeLists.txt); this stand-in only needs to keep the struct
+ * layout below and this header's other consumers (e.g. sdf_app.h,
+ * pulled in for declarations only) parseable on the host build. */
+typedef struct {
+  uint8_t type;
+  uint8_t val[6];
+} ble_addr_t;
+#endif
 
 #ifdef __cplusplus
 extern "C" {

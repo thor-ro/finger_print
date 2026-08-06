@@ -2,6 +2,8 @@
  * @file sdf_mock_linux_gpio.c
  * @brief Shared GPIO mock implementations for Linux host builds.
  */
+#include "sdkconfig.h"
+
 #ifdef CONFIG_IDF_TARGET_LINUX
 
 #include "sdf_mock_linux_gpio.h"
@@ -17,10 +19,19 @@ esp_err_t gpio_install_isr_service(int flags) {
   return ESP_OK;
 }
 
+esp_err_t gpio_uninstall_isr_service(void) {
+  return ESP_OK;
+}
+
 esp_err_t gpio_isr_handler_add(int gpio, gpio_isr_t isr, void *args) {
   (void)gpio;
   (void)isr;
   (void)args;
+  return ESP_OK;
+}
+
+esp_err_t gpio_isr_handler_remove(int gpio) {
+  (void)gpio;
   return ESP_OK;
 }
 

@@ -1,37 +1,15 @@
-CONFIG_IDF_TARGET="esp32c6"
-
-# BLE (NimBLE stack)
-CONFIG_BT_ENABLED=y
-CONFIG_BT_BLE_ENABLED=y
-CONFIG_BT_CONTROLLER_ENABLED=y
-CONFIG_BT_BLUEDROID_ENABLED=n
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
-CONFIG_BT_NIMBLE_GATT_CLIENT=y
-CONFIG_BT_NIMBLE_GATT_SERVER=n
-CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
-
-# Zigbee (option names may vary by ESP-IDF/esp-zigbee version).
-CONFIG_ZB_ENABLED=y
-CONFIG_ZB_ZED=y
-# CONFIG_ZB_ZCZR is not set
-
-# NVS
-CONFIG_NVS_ENCRYPTION=y
-CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0
+CONFIG_IDF_TARGET="linux"
 
 # MbedTLS crypto primitives needed for Nuki API
 CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
 CONFIG_MBEDTLS_ECP_C=y
 CONFIG_MBEDTLS_ECDH_C=y
-CONFIG_MBEDTLS_POLY1305_C=y
-
-# Use custom partition table with NVS keys partition
-CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partition_table.csv"
-CONFIG_PARTITION_TABLE_FILENAME="partition_table.csv"
+# mbedtls 4.x (tf-psa-crypto) only compiles poly1305.c (MBEDTLS_POLY1305_C)
+# as a side effect of enabling the ChaCha20-Poly1305 AEAD combo; there's no
+# standalone "just poly1305" Kconfig symbol. CONFIG_MBEDTLS_POLY1305_C
+# doesn't exist in this ESP-IDF version and setting it is a silent no-op.
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
 
 # SDF power management knobs
 CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS=15000
@@ -40,25 +18,39 @@ CONFIG_SDF_POWER_POST_WAKE_GUARD_MS=1500
 CONFIG_SDF_POWER_LOOP_INTERVAL_MS=250
 CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS=60000
 CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT=100
-CONFIG_SDF_POWER_FP_WAKE_GPIO=3
-CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP=y
-CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING=y
 
 # SDF security & hardening knobs
 CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW=8
 CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_THRESHOLD=5
 CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_WINDOW_MS=60000
 CONFIG_SDF_SECURITY_BIOMETRIC_LOCKOUT_MS=120000
+# sdf_storage.c uses this value directly (not via #ifdef), so it must
+# stay defined even though NVS_ENCRYPTION itself isn't available on
+# IDF_TARGET=linux; sdf_storage_init() isn't exercised by the wired-in
+# tests, so the resulting "encryption required but disabled" state is
+# never hit.
 CONFIG_SDF_SECURITY_REQUIRE_ENCRYPTED_NVS=y
 
-# Firmware size optimizations for OTA
-CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-CONFIG_COMPILER_OPTIMIZATION_ASSERTION_LEVEL=0
-CONFIG_ESP_WIFI_ENABLED=n
-CONFIG_NEWLIB_NANO_FORMAT=y
+# sdf_config.c reads this directly (not via #ifdef); must stay defined.
+CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND=y
+
+# sdf_config's setters (test_sdf_config.c) go through
+# sdf_config_get_mutable(), which returns NULL - making every setter
+# short-circuit to ESP_ERR_INVALID_STATE - unless this is enabled. It's off
+# by default in production Kconfig; override it here so the setters' actual
+# bounds-validation logic gets exercised instead of only the disabled-override
+# gate.
+CONFIG_SDF_CONFIG_ENABLE_RUNTIME_OVERRIDE=y
+
+# The real Zigbee stack (espressif__esp-zigbee-lib) isn't linked for
+# IDF_TARGET=linux (see test_runner/CMakeLists.txt); sdf_protocol_zigbee's
+# linux mock can only ever exercise the "disabled" code path
+# (sdf_protocol_zigbee_is_enabled() gates purely on this Kconfig symbol, not
+# real hardware/stack state), so override the y default here.
+CONFIG_SDF_ZIGBEE_ENABLE=n
+
+# Logging
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 CONFIG_LOG_DEFAULT_LEVEL=2
 CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
 CONFIG_BOOTLOADER_LOG_LEVEL=2
-CONFIG_SDF_POWER_FP_EN_GPIO=2
-CONFIG_SDF_WS2812_LED_GPIO=8

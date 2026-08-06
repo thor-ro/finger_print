@@ -10,6 +10,8 @@
 #ifndef SDF_MOCK_LINUX_GPIO_H
 #define SDF_MOCK_LINUX_GPIO_H
 
+#include "sdkconfig.h"
+
 #ifdef CONFIG_IDF_TARGET_LINUX
 
 #include "esp_err.h"
@@ -34,6 +36,7 @@ typedef void (*gpio_isr_t)(void *);
 #define GPIO_PULLUP_DISABLE 0
 #define GPIO_PULLUP_ENABLE 1
 #define GPIO_PULLDOWN_DISABLE 0
+#define GPIO_PULLDOWN_ENABLE 1
 #define GPIO_INTR_DISABLE 0
 #define GPIO_INTR_ANYEDGE 3
 
@@ -41,7 +44,9 @@ typedef void (*gpio_isr_t)(void *);
 
 esp_err_t gpio_config_mock(const gpio_config_t *config);
 esp_err_t gpio_install_isr_service(int flags);
+esp_err_t gpio_uninstall_isr_service(void);
 esp_err_t gpio_isr_handler_add(int gpio, gpio_isr_t isr, void *args);
+esp_err_t gpio_isr_handler_remove(int gpio);
 int gpio_get_level(int gpio);
 esp_err_t gpio_set_level(gpio_num_t gpio_num, uint32_t level);
 

@@ -18,3 +18,4 @@ dependencies:
   espressif/esp-zboss-lib: =*
   espressif/led_strip: =*
   espressif/button: =*
+  espressif/cjson: "^1.7.19"

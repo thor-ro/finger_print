@@ -82,7 +82,7 @@ void test_enrollment_sm_failure_handling(void) {
 void test_enrollment_sm_user_occupied(void) {
   sdf_enrollment_sm_t sm;
   sdf_enrollment_sm_init(&sm);
-  sdf_enrollment_sm_start(&sm, 20, 2);
+  sdf_enrollment_sm_start(&sm, 5, 2);
 
   sdf_enrollment_sm_apply_step_result(&sm, SDF_FINGERPRINT_OP_USER_OCCUPIED);
   TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_ERROR, sm.state);

@@ -2,16 +2,19 @@
 #include "esp_console.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_app_desc.h"
-#include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "fingerprint.h"
 #include "sdf_cli.h"
 #include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
 #include "sdf_storage.h"
-#include "sdf_ota.h"
 #ifndef CONFIG_IDF_TARGET_LINUX
+/* OTA (esp_app_desc.h/esp_ota_ops.h/sdf_ota.h) needs app_update, which isn't
+ * built for IDF_TARGET=linux; the "ota" CLI command itself is guarded out
+ * below. */
+#include "esp_app_desc.h"
+#include "esp_ota_ops.h"
+#include "sdf_ota.h"
 #include "esp_zigbee_core.h"
 #include "sdf_app.h"
 #include "sdf_nuki_ble_transport.h"
@@ -26,6 +29,10 @@
 // Forward declarations or includes to the actual subsystems would go here
 // For now, we will just print mocks or call generic hooks.
 // Assuming sdf_services.h or similar has what we need later or we decouple it.
+
+/* A real compile-time constant (unlike a local "const size_t"), so sizing
+ * user_ids[]/permissions[] with it below doesn't get flagged as a VLA. */
+#define SDF_CLI_MAX_USERS ((size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u)
 
 static bool check_auth(void) {
   if (!sdf_cli_is_authenticated()) {
@@ -90,9 +97,9 @@ static int cmd_user_list(int argc, char **argv) {
   if (!check_auth())
     return 0;
 
-  const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
-  uint16_t user_ids[max_users];
-  uint8_t permissions[max_users];
+  const size_t max_users = SDF_CLI_MAX_USERS;
+  uint16_t user_ids[SDF_CLI_MAX_USERS];
+  uint8_t permissions[SDF_CLI_MAX_USERS];
   size_t count = 0;
   esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, max_users);
   if (err != ESP_OK) {
@@ -281,9 +288,9 @@ static int cmd_user_add(int argc, char **argv) {
   }
 
   // Check if user_id is already occupied
-  const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
-  uint16_t user_ids[max_users];
-  uint8_t permissions[max_users];
+  const size_t max_users = SDF_CLI_MAX_USERS;
+  uint16_t user_ids[SDF_CLI_MAX_USERS];
+  uint8_t permissions[SDF_CLI_MAX_USERS];
   size_t count = 0;
   esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, max_users);
   if (err != ESP_OK) {

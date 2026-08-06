@@ -4,6 +4,8 @@
  *
  * GPIO mocks are provided by sdf_mock_linux_gpio.c in sdf_common.
  */
+#include "sdkconfig.h"
+
 #ifdef CONFIG_IDF_TARGET_LINUX
 
 #include "sdf_mock_linux_drivers.h"

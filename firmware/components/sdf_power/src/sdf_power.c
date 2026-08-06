@@ -63,6 +63,25 @@ static bool sdf_power_gpio_valid(gpio_num_t gpio) {
   return gpio >= 0 && gpio < GPIO_NUM_MAX;
 }
 
+/* Convert a raw ESP sleep wakeup cause into sdf_power's own wake-reason
+ * domain, via sdf_platform's classification. Not a plain enum cast: the two
+ * enums' values don't line up for every case (in particular
+ * SDF_PLATFORM_WAKE_REASON_OTHER == 4 has no matching SDF_POWER_WAKE_REASON_*
+ * value), so translate explicitly. */
+SDF_POWER_STATIC sdf_power_wake_reason_t
+sdf_power_map_wakeup_reason(esp_sleep_wakeup_cause_t cause) {
+  switch (sdf_platform_map_wakeup_reason(cause)) {
+  case SDF_PLATFORM_WAKE_REASON_TIMER:
+    return SDF_POWER_WAKE_REASON_TIMER;
+  case SDF_PLATFORM_WAKE_REASON_GPIO:
+    return SDF_POWER_WAKE_REASON_FINGERPRINT;
+  case SDF_PLATFORM_WAKE_REASON_USB:
+  case SDF_PLATFORM_WAKE_REASON_OTHER:
+  default:
+    return SDF_POWER_WAKE_REASON_OTHER;
+  }
+}
+
 static const char *
 sdf_power_wakeup_reason_name(sdf_power_wake_reason_t reason) {
   switch (reason) {
@@ -179,7 +198,7 @@ static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *c
 #endif
 
   sdf_power_wake_reason_t reason =
-      sdf_platform_map_wakeup_reason(esp_sleep_get_wakeup_cause());
+      sdf_power_map_wakeup_reason(esp_sleep_get_wakeup_cause());
   ESP_LOGI(TAG, "Woke from light sleep (%s)",
            sdf_power_wakeup_reason_name(reason));
   sdf_power_notify_wakeup(config, reason);

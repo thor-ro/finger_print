@@ -1,7 +1,4 @@
-set(config_reqs sdf_platform)
-if(NOT IDF_TARGET STREQUAL "linux")
-    list(APPEND config_reqs sdf_protocol_zigbee)
-endif()
+set(config_reqs sdf_platform sdf_protocol_zigbee)
 
 idf_component_register(SRCS "src/sdf_config.c"
                        INCLUDE_DIRS "include"

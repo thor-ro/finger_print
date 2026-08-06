@@ -1,14 +1,29 @@
 #include "unity.h"
 
+#include <string.h>
+
 #include "sdf_services.h"
 #include "sdf_services_internal.h"
 
+/* sdf_services_reset_state() operates on a mutex created by
+ * sdf_services_init(); on real hardware sdf_app brings services up during
+ * boot before anything can call reset_state(). Mirror that here so the
+ * test doesn't depend on some other suite happening to have initialized
+ * services first. Idempotent, so safe to call from both tests below. */
+static void ensure_services_initialized(void) {
+  sdf_services_config_t cfg;
+  sdf_services_get_default_config(&cfg);
+  sdf_services_init(&cfg);
+}
+
 void test_sdf_services_reset_state_returns_ok(void) {
+  ensure_services_initialized();
   esp_err_t err = sdf_services_reset_state();
   TEST_ASSERT_EQUAL(ESP_OK, err);
 }
 
 void test_sdf_services_reset_state_can_be_called_multiple_times(void) {
+  ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
@@ -106,4 +121,111 @@ void test_pack_user_list_empty(void) {
   TEST_ASSERT_EQUAL(0, perm_packed[1]);
   TEST_ASSERT_EQUAL(0, perm_packed[2]);
   TEST_ASSERT_EQUAL(0, perm_packed[3]);
+}
+
+/* Web auth: login verification */
+
+static sdf_storage_web_user_t make_web_user(const uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN]) {
+  sdf_storage_web_user_t user = {0};
+  strncpy(user.username, "alice", sizeof(user.username) - 1);
+  user.permission = 1;
+  user.valid = true;
+  memcpy(user.password_hash, hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+  return user;
+}
+
+void test_web_auth_verify_login_matching_hash_is_valid(void) {
+  uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash, 0xAB, sizeof(hash));
+  sdf_storage_web_user_t user = make_web_user(hash);
+
+  TEST_ASSERT_TRUE(sdf_services_web_auth_verify_login(&user, hash, sizeof(hash)));
+}
+
+void test_web_auth_verify_login_mismatched_hash_is_invalid(void) {
+  uint8_t stored_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(stored_hash, 0xAB, sizeof(stored_hash));
+  sdf_storage_web_user_t user = make_web_user(stored_hash);
+
+  uint8_t submitted_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(submitted_hash, 0xCD, sizeof(submitted_hash));
+
+  TEST_ASSERT_FALSE(sdf_services_web_auth_verify_login(&user, submitted_hash, sizeof(submitted_hash)));
+}
+
+void test_web_auth_verify_login_wrong_hash_len_is_invalid(void) {
+  uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash, 0xAB, sizeof(hash));
+  sdf_storage_web_user_t user = make_web_user(hash);
+
+  TEST_ASSERT_FALSE(sdf_services_web_auth_verify_login(&user, hash, sizeof(hash) - 1));
+}
+
+void test_web_auth_verify_login_all_zero_hash_is_invalid(void) {
+  uint8_t stored_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(stored_hash, 0xAB, sizeof(stored_hash));
+  sdf_storage_web_user_t user = make_web_user(stored_hash);
+
+  uint8_t zero_hash[SDF_STORAGE_WEB_USER_HASH_LEN] = {0};
+
+  TEST_ASSERT_FALSE(sdf_services_web_auth_verify_login(&user, zero_hash, sizeof(zero_hash)));
+}
+
+/* Web auth: registration decision */
+
+void test_web_auth_decide_registration_authorized_persists_user(void) {
+  uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash, 0x11, sizeof(hash));
+
+  sdf_services_web_auth_registration_decision_t decision =
+      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), 2, true);
+
+  TEST_ASSERT_TRUE(decision.should_persist);
+  TEST_ASSERT_TRUE(decision.reply_authorized);
+  TEST_ASSERT_EQUAL_STRING("bob", decision.user.username);
+  TEST_ASSERT_EQUAL(2, decision.user.permission);
+  TEST_ASSERT_TRUE(decision.user.valid);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(hash, decision.user.password_hash, sizeof(hash));
+}
+
+void test_web_auth_decide_registration_denied_does_not_persist(void) {
+  uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash, 0x11, sizeof(hash));
+
+  sdf_services_web_auth_registration_decision_t decision =
+      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), 2, false);
+
+  TEST_ASSERT_FALSE(decision.should_persist);
+  TEST_ASSERT_FALSE(decision.reply_authorized);
+}
+
+/* Web auth: pending-registration resolve guard */
+
+void test_web_auth_should_resolve_on_web_reg_auth_failure(void) {
+  TEST_ASSERT_TRUE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH, ESP_FAIL));
+  TEST_ASSERT_TRUE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH, ESP_ERR_TIMEOUT));
+}
+
+void test_web_auth_should_not_resolve_on_web_reg_auth_success(void) {
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH, ESP_OK));
+}
+
+void test_web_auth_should_not_resolve_for_other_actions(void) {
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NONE, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ZB_JOIN, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_FAIL));
 }

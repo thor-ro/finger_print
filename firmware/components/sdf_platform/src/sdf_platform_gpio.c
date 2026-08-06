@@ -4,10 +4,10 @@
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "driver/gpio.h"
-#include "esp_log.h"
 #else
 #include "sdf_mock_linux_gpio.h"
 #endif
+#include "esp_log.h"
 
 static const char *TAG = "sdf_platform_gpio";
 static bool s_isr_service_installed = false;

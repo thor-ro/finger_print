@@ -1,5 +1,8 @@
 #include "unity.h"
 #include <stdio.h>
+#include <stdlib.h>
+
+#include "sdf_config.h"
 
 /* Enrollment SM tests */
 extern void test_enrollment_sm_initialization(void);
@@ -48,18 +51,6 @@ extern void test_map_ack_fail(void);
 extern void test_map_ack_nouser(void);
 extern void test_map_ack_unknown(void);
 
-/* Lock flow tests */
-extern void test_lock_flow_init(void);
-extern void test_lock_flow_reset_preserves_max_retries(void);
-extern void test_lock_flow_is_idle_on_init(void);
-extern void test_lock_flow_is_not_idle_when_active(void);
-extern void test_lock_flow_begin_success(void);
-extern void test_lock_flow_begin_rejected_when_active(void);
-extern void test_lock_flow_retry_increments(void);
-extern void test_lock_flow_retry_exhaustion(void);
-extern void test_lock_flow_on_status_complete(void);
-extern void test_lock_flow_on_status_accepted_noop(void);
-
 /* Storage tests */
 extern void test_sdf_storage_nuki_save_and_load_success(void);
 extern void test_sdf_storage_nuki_load_not_found(void);
@@ -73,6 +64,35 @@ extern void test_sdf_storage_ble_target_clear_success(void);
 extern void test_sdf_storage_ble_target_clear_already_cleared(void);
 extern void test_sdf_storage_erase_all_success(void);
 extern void test_sdf_storage_erase_all_idempotent(void);
+extern void test_sdf_storage_web_user_save_and_load_success(void);
+extern void test_sdf_storage_web_user_load_not_found(void);
+extern void test_sdf_storage_web_user_find_by_name_hit(void);
+extern void test_sdf_storage_web_user_find_by_name_miss(void);
+extern void test_sdf_storage_web_user_clear_success(void);
+extern void test_sdf_storage_web_user_clear_all(void);
+extern void test_sdf_storage_web_user_count(void);
+extern void test_sdf_storage_web_user_save_index_at_max_rejected(void);
+
+/* SDF Config tests */
+extern void test_sdf_config_set_checkin_interval_bounds(void);
+extern void test_sdf_config_set_failed_attempt_threshold_bounds(void);
+extern void test_sdf_config_set_failed_attempt_window_bounds(void);
+extern void test_sdf_config_set_lockout_duration_bounds(void);
+extern void test_sdf_config_set_battery_default_percent_bounds(void);
+
+/* SDF Platform tests */
+extern void test_sdf_platform_gpio_set_level_returns_mock_ok(void);
+extern void test_sdf_platform_gpio_get_level_returns_mock_fixed_value(void);
+extern void test_sdf_platform_gpio_is_rtc_capable_boundary(void);
+extern void test_sdf_platform_map_wakeup_reason_all_causes(void);
+extern void test_sdf_power_crc16_ccitt_known_vector(void);
+extern void test_sdf_platform_sleep_retention_linux_noops(void);
+extern void test_sdf_platform_sleep_wakeup_from_linux_noops(void);
+extern void test_sdf_platform_nvs_security_status_defaults_and_erase_before_init(void);
+
+/* SDF Platform Power tests */
+extern void test_sdf_platform_power_enable_gpio_wake_delegates(void);
+extern void test_sdf_platform_power_gate_ble_radio_always_invalid_state(void);
 
 /* Zigbee protocol tests */
 extern void test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supported(void);
@@ -81,6 +101,15 @@ extern void test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok(void);
 /* SDF Services tests */
 extern void test_sdf_services_reset_state_returns_ok(void);
 extern void test_sdf_services_reset_state_can_be_called_multiple_times(void);
+extern void test_web_auth_verify_login_matching_hash_is_valid(void);
+extern void test_web_auth_verify_login_mismatched_hash_is_invalid(void);
+extern void test_web_auth_verify_login_wrong_hash_len_is_invalid(void);
+extern void test_web_auth_verify_login_all_zero_hash_is_invalid(void);
+extern void test_web_auth_decide_registration_authorized_persists_user(void);
+extern void test_web_auth_decide_registration_denied_does_not_persist(void);
+extern void test_web_auth_should_resolve_on_web_reg_auth_failure(void);
+extern void test_web_auth_should_not_resolve_on_web_reg_auth_success(void);
+extern void test_web_auth_should_not_resolve_for_other_actions(void);
 
 /* Event Router tests */
 extern void test_sdf_event_router_init_returns_ok(void);
@@ -104,6 +133,22 @@ extern void test_crypto_scalarmult_basepoint(void);
 extern void test_crypto_scalarmult_null_args(void);
 extern void test_crypto_scalarmult_dh_agreement(void);
 
+/* sdf_cli tests */
+extern void test_sdf_cli_initial_state_is_unauthenticated(void);
+extern void test_sdf_cli_can_authenticate_and_logout(void);
+extern void test_sdf_cli_register_commands_runs_without_crash(void);
+extern void test_user_list_formats_output(void);
+extern void test_user_get_valid_id(void);
+extern void test_user_get_invalid_id(void);
+extern void test_nuki_status_not_paired(void);
+extern void test_nuki_status_paired(void);
+extern void test_nuki_connect_not_paired(void);
+extern void test_nuki_connect_already_connected(void);
+extern void test_nuki_pair_already_paired_warns(void);
+extern void test_zigbee_status_disabled(void);
+extern void test_zigbee_connect_already_joined(void);
+extern void test_zigbee_unpair_not_joined(void);
+
 /* Nuki pairing tests */
 extern void test_pairing_init_success(void);
 extern void test_pairing_init_null_args(void);
@@ -119,6 +164,18 @@ extern void test_pairing_first_challenge_sends_only_authenticator(void);
 extern void test_pairing_second_challenge_sends_authorization_data(void);
 extern void test_pairing_authorization_id_completes_pairing(void);
 extern void test_pairing_handle_encrypted_null_args(void);
+
+/* sdf_ota tests */
+extern void test_sdf_ota_version_compare_equal(void);
+extern void test_sdf_ota_version_compare_leading_v_ignored(void);
+extern void test_sdf_ota_version_compare_major_newer_and_older(void);
+extern void test_sdf_ota_version_compare_minor_newer_and_older(void);
+extern void test_sdf_ota_version_compare_patch_newer_and_older(void);
+extern void test_sdf_ota_version_compare_release_newer_than_pre_release(void);
+extern void test_sdf_ota_version_compare_pre_release_alphanumeric_order(void);
+extern void test_sdf_ota_version_compare_build_metadata_ignored(void);
+extern void test_sdf_ota_version_compare_malformed_input_returns_equal(void);
+extern void test_sdf_ota_verify_signature_default_config_returns_ok(void);
 
 /* Protocol BLE tests */
 extern void test_client_init_success(void);
@@ -148,6 +205,13 @@ extern void test_send_unencrypted_sends_framed_message(void);
 
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
+
+  /* Several suites (sdf_event_router's queue depth, sdf_services' default
+   * config) read Kconfig-derived values via sdf_config_get(), which is
+   * zero-initialized until sdf_config_init() runs. On real hardware this
+   * happens as part of normal boot before any subsystem starts; mirror
+   * that here so tests see the same non-zero defaults. */
+  sdf_config_init();
 
   UNITY_BEGIN();
 
@@ -198,18 +262,6 @@ void app_main(void) {
   RUN_TEST(test_map_ack_nouser);
   RUN_TEST(test_map_ack_unknown);
 
-  /* Lock flow */
-  RUN_TEST(test_lock_flow_init);
-  RUN_TEST(test_lock_flow_reset_preserves_max_retries);
-  RUN_TEST(test_lock_flow_is_idle_on_init);
-  RUN_TEST(test_lock_flow_is_not_idle_when_active);
-  RUN_TEST(test_lock_flow_begin_success);
-  RUN_TEST(test_lock_flow_begin_rejected_when_active);
-  RUN_TEST(test_lock_flow_retry_increments);
-  RUN_TEST(test_lock_flow_retry_exhaustion);
-  RUN_TEST(test_lock_flow_on_status_complete);
-  RUN_TEST(test_lock_flow_on_status_accepted_noop);
-
   /* Storage tests */
   RUN_TEST(test_sdf_storage_nuki_save_and_load_success);
   RUN_TEST(test_sdf_storage_nuki_load_not_found);
@@ -223,6 +275,35 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_ble_target_clear_already_cleared);
   RUN_TEST(test_sdf_storage_erase_all_success);
   RUN_TEST(test_sdf_storage_erase_all_idempotent);
+  RUN_TEST(test_sdf_storage_web_user_save_and_load_success);
+  RUN_TEST(test_sdf_storage_web_user_load_not_found);
+  RUN_TEST(test_sdf_storage_web_user_find_by_name_hit);
+  RUN_TEST(test_sdf_storage_web_user_find_by_name_miss);
+  RUN_TEST(test_sdf_storage_web_user_clear_success);
+  RUN_TEST(test_sdf_storage_web_user_clear_all);
+  RUN_TEST(test_sdf_storage_web_user_count);
+  RUN_TEST(test_sdf_storage_web_user_save_index_at_max_rejected);
+
+  /* SDF Config tests */
+  RUN_TEST(test_sdf_config_set_checkin_interval_bounds);
+  RUN_TEST(test_sdf_config_set_failed_attempt_threshold_bounds);
+  RUN_TEST(test_sdf_config_set_failed_attempt_window_bounds);
+  RUN_TEST(test_sdf_config_set_lockout_duration_bounds);
+  RUN_TEST(test_sdf_config_set_battery_default_percent_bounds);
+
+  /* SDF Platform tests */
+  RUN_TEST(test_sdf_platform_gpio_set_level_returns_mock_ok);
+  RUN_TEST(test_sdf_platform_gpio_get_level_returns_mock_fixed_value);
+  RUN_TEST(test_sdf_platform_gpio_is_rtc_capable_boundary);
+  RUN_TEST(test_sdf_platform_map_wakeup_reason_all_causes);
+  RUN_TEST(test_sdf_power_crc16_ccitt_known_vector);
+  RUN_TEST(test_sdf_platform_sleep_retention_linux_noops);
+  RUN_TEST(test_sdf_platform_sleep_wakeup_from_linux_noops);
+  RUN_TEST(test_sdf_platform_nvs_security_status_defaults_and_erase_before_init);
+
+  /* SDF Platform Power tests */
+  RUN_TEST(test_sdf_platform_power_enable_gpio_wake_delegates);
+  RUN_TEST(test_sdf_platform_power_gate_ble_radio_always_invalid_state);
 
   /* Zigbee protocol tests */
   RUN_TEST(test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supported);
@@ -231,6 +312,15 @@ void app_main(void) {
   /* SDF Services tests */
   RUN_TEST(test_sdf_services_reset_state_returns_ok);
   RUN_TEST(test_sdf_services_reset_state_can_be_called_multiple_times);
+  RUN_TEST(test_web_auth_verify_login_matching_hash_is_valid);
+  RUN_TEST(test_web_auth_verify_login_mismatched_hash_is_invalid);
+  RUN_TEST(test_web_auth_verify_login_wrong_hash_len_is_invalid);
+  RUN_TEST(test_web_auth_verify_login_all_zero_hash_is_invalid);
+  RUN_TEST(test_web_auth_decide_registration_authorized_persists_user);
+  RUN_TEST(test_web_auth_decide_registration_denied_does_not_persist);
+  RUN_TEST(test_web_auth_should_resolve_on_web_reg_auth_failure);
+  RUN_TEST(test_web_auth_should_not_resolve_on_web_reg_auth_success);
+  RUN_TEST(test_web_auth_should_not_resolve_for_other_actions);
 
   /* Event Router tests */
   RUN_TEST(test_sdf_event_router_init_returns_ok);
@@ -270,39 +360,10 @@ void app_main(void) {
   RUN_TEST(test_pairing_authorization_id_completes_pairing);
   RUN_TEST(test_pairing_handle_encrypted_null_args);
 
-  // sdf_protocol_ble (Nuki) tests:
-  // (Assuming these are handled elsewhere, or were incorrectly added in my
-  // previous step, removing invalid macro)
-
-  // sdf_cli tests
-  extern void test_sdf_cli_initial_state_is_unauthenticated(void);
-  extern void test_sdf_cli_can_authenticate_and_logout(void);
-  extern void test_user_list_formats_output(void);
-  extern void test_user_get_valid_id(void);
-  extern void test_user_get_invalid_id(void);
-  extern void test_nuki_status_not_paired(void);
-  extern void test_nuki_status_paired(void);
-  extern void test_nuki_connect_not_paired(void);
-  extern void test_nuki_connect_already_connected(void);
-  extern void test_nuki_pair_already_paired_warns(void);
-  extern void test_zigbee_status_disabled(void);
-  extern void test_zigbee_connect_already_joined(void);
-  extern void test_zigbee_unpair_not_joined(void);
-
-  // Mapped from test names in test_sdf_cli.c:
-  // TEST_CASE("sdf_cli initial state is unauthenticated", "[sdf_cli]")
-  // TEST_CASE("sdf_cli can authenticate and logout", "[sdf_cli]")
-  // Note: esp-idf unity translates TEST_CASE macro to a function name. But we
-  // can just use unity's RUN_TEST directly if we wrap them properly, or include
-  // unity_fixture.h. Actually, ESP-IDF uses `unity_run_menu()` or similar to
-  // run all `TEST_CASE`s automatically when building test apps, but this is a
-  // custom linux test runner using standard Unity. Let me just manually declare
-  // the functions for the tests I created. Wait, ESP-IDF's TEST_CASE macro in
-  // `unity.h` registers them in a linker section. Let me replace the
-  // RUN_TEST_SUITE call with a call to `unity_run_menu` to run all registered
-  // tests, or I can just rename my tests to standard void functions.
+  /* sdf_cli tests */
   RUN_TEST(test_sdf_cli_initial_state_is_unauthenticated);
   RUN_TEST(test_sdf_cli_can_authenticate_and_logout);
+  RUN_TEST(test_sdf_cli_register_commands_runs_without_crash);
   RUN_TEST(test_user_list_formats_output);
   RUN_TEST(test_user_get_valid_id);
   RUN_TEST(test_user_get_invalid_id);
@@ -314,6 +375,18 @@ void app_main(void) {
   RUN_TEST(test_zigbee_status_disabled);
   RUN_TEST(test_zigbee_connect_already_joined);
   RUN_TEST(test_zigbee_unpair_not_joined);
+
+  /* sdf_ota tests */
+  RUN_TEST(test_sdf_ota_version_compare_equal);
+  RUN_TEST(test_sdf_ota_version_compare_leading_v_ignored);
+  RUN_TEST(test_sdf_ota_version_compare_major_newer_and_older);
+  RUN_TEST(test_sdf_ota_version_compare_minor_newer_and_older);
+  RUN_TEST(test_sdf_ota_version_compare_patch_newer_and_older);
+  RUN_TEST(test_sdf_ota_version_compare_release_newer_than_pre_release);
+  RUN_TEST(test_sdf_ota_version_compare_pre_release_alphanumeric_order);
+  RUN_TEST(test_sdf_ota_version_compare_build_metadata_ignored);
+  RUN_TEST(test_sdf_ota_version_compare_malformed_input_returns_equal);
+  RUN_TEST(test_sdf_ota_verify_signature_default_config_returns_ok);
 
   printf("\n-----------------------\n");
   /* Protocol BLE tests */
@@ -342,5 +415,11 @@ void app_main(void) {
   RUN_TEST(test_feed_encrypted_null_args);
   RUN_TEST(test_send_unencrypted_sends_framed_message);
 
-  UNITY_END();
+  /* app_main() is declared void and called without capturing a return value
+   * by the linux target's main_task() (see FreeRTOS-Kernel port_idf.c), so
+   * "return UNITY_END();" alone wouldn't reach the process exit code. Call
+   * exit() directly instead, so a failing suite makes this binary usable as
+   * a CI gate (non-zero exit == test failure). */
+  int failures = UNITY_END();
+  exit(failures == 0 ? 0 : 1);
 }

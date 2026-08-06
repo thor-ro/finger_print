@@ -2,14 +2,7 @@
 
 #include <string.h>
 
-#ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_log.h"
-#else
-#include "sdf_mock_linux_gpio.h"
-#include "sdf_mock_linux_sleep.h"
-#include "sdf_mock_linux_time.h"
-#include "sdf_mock_linux_nvs.h"
-#endif
 
 static const char *TAG = "sdf_platform";
 static bool s_initialized = false;

@@ -802,7 +802,19 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
            event->payload.web_reg_auth_result.authorized ? "AUTHORIZED" : "DENIED",
            event->payload.web_reg_auth_result.username);
 
-  if (event->payload.web_reg_auth_result.authorized) {
+  const char *username = event->payload.web_reg_auth_result.username;
+  bool admin_authorized = event->payload.web_reg_auth_result.authorized;
+
+  /* Default: no user decided yet, reply mirrors the admin decision. Only
+   * overwritten below once a password hash was successfully fetched, so a
+   * hash-fetch failure still replies with the original authorized flag
+   * (matching prior behavior) while never persisting a user. */
+  sdf_services_web_auth_registration_decision_t decision = {
+      .should_persist = false,
+      .reply_authorized = admin_authorized,
+  };
+
+  if (admin_authorized) {
     uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
     esp_err_t hash_err = sdf_services_get_web_reg_password_hash(
         password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
@@ -812,27 +824,24 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
       ESP_LOGE(TAG, "Failed to fetch web reg password hash: %s",
                esp_err_to_name(hash_err));
     } else {
-      sdf_storage_web_user_t user = {0};
-      strncpy(user.username, event->payload.web_reg_auth_result.username,
-              SDF_STORAGE_WEB_USER_NAME_MAX - 1);
-      user.username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
-      user.permission = event->payload.web_reg_auth_result.permission;
-      user.valid = true;
-      memcpy(user.password_hash, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+      decision = sdf_services_web_auth_decide_registration(
+          username, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN,
+          event->payload.web_reg_auth_result.permission, true);
+    }
+  }
 
-      for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
-        sdf_storage_web_user_t existing;
-        if (sdf_storage_web_user_load(i, &existing) == ESP_OK && !existing.valid) {
-          sdf_storage_web_user_save(i, &user);
-          ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
-          break;
-        }
+  if (decision.should_persist) {
+    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+      sdf_storage_web_user_t existing;
+      if (sdf_storage_web_user_load(i, &existing) == ESP_OK && !existing.valid) {
+        sdf_storage_web_user_save(i, &decision.user);
+        ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
+        break;
       }
     }
   }
 
-  sdf_ble_companion_reply_auth(event->payload.web_reg_auth_result.username,
-                               event->payload.web_reg_auth_result.authorized);
+  sdf_ble_companion_reply_auth(username, decision.reply_authorized);
 
   sdf_services_clear_web_reg_auth();
 }
@@ -853,8 +862,9 @@ static void sdf_app_on_admin_action_complete(void *ctx,
     return;
   }
 
-  if (event->payload.admin_action_complete.action != SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH ||
-      event->payload.admin_action_complete.result == ESP_OK) {
+  if (!sdf_services_web_auth_should_resolve_on_action_complete(
+          event->payload.admin_action_complete.action,
+          event->payload.admin_action_complete.result)) {
     return;
   }
 

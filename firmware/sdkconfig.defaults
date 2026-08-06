@@ -32,7 +32,14 @@ CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0
 CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
 CONFIG_MBEDTLS_ECP_C=y
 CONFIG_MBEDTLS_ECDH_C=y
-CONFIG_MBEDTLS_POLY1305_C=y
+# ESP-IDF v6.0 (Mbed TLS v4.0/TF-PSA-Crypto) only compiles poly1305.c when
+# PSA_WANT_ALG_CHACHA20_POLY1305 is requested, which requires CHACHAPOLY_C
+# (and its CHACHA20_C dependency); there is no longer a standalone
+# MBEDTLS_POLY1305_C Kconfig option. sdf_nuki_crypto.c only needs the
+# legacy mbedtls_poly1305_* functions, which are still compiled in as a
+# side effect of this.
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
 
 # Use custom partition table with NVS keys partition
 CONFIG_PARTITION_TABLE_CUSTOM=y

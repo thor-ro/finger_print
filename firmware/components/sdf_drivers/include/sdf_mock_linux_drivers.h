@@ -7,6 +7,8 @@
 #ifndef SDF_MOCK_LINUX_DRIVERS_H
 #define SDF_MOCK_LINUX_DRIVERS_H
 
+#include "sdkconfig.h"
+
 #include "esp_err.h"
 #include <stddef.h>
 #include <stdint.h>

@@ -1,13 +1,9 @@
 #include "sdf_platform_nvs.h"
 
-#ifndef CONFIG_IDF_TARGET_LINUX
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_partition.h"
 #include "esp_log.h"
-#else
-#include "sdf_mock_linux_nvs.h"
-#endif
 
 static const char *TAG = "sdf_platform_nvs";
 static bool s_nvs_initialized = false;

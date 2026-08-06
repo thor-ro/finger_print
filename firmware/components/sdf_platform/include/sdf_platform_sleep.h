@@ -6,11 +6,13 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_sleep.h"
+
+#ifndef CONFIG_IDF_TARGET_LINUX
 #include "driver/gpio.h"
 #else
-#include "sdf_mock_linux_sleep.h"
+#include "hal/gpio_types.h"
+#include "sdf_mock_linux_gpio.h"
 #endif
 
 #include "esp_err.h"
@@ -58,6 +60,16 @@ typedef enum {
  * @return Platform wake reason.
  */
 sdf_platform_wake_reason_t sdf_platform_map_wakeup_reason(esp_sleep_wakeup_cause_t cause);
+
+/**
+ * @brief Compute CRC-16/CCITT-FALSE over a buffer.
+ *
+ * @param data Buffer to checksum.
+ * @param len Length of the buffer in bytes.
+ * @param crc Out param for the computed CRC.
+ * @return ESP_OK on success.
+ */
+esp_err_t sdf_power_crc16_ccitt(const void *data, size_t len, uint16_t *crc);
 
 /**
  * @brief Enable timer wakeup.

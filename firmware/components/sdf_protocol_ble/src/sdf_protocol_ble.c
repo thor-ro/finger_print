@@ -6,6 +6,12 @@
 #if !defined(CONFIG_IDF_TARGET_LINUX) || defined(SDF_PROTOCOL_BLE_TESTING)
 
 #include "esp_random.h"
+/* mbedtls 4.x (tf-psa-crypto) hides the one-shot mbedtls_md_hmac() API
+ * behind MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS in favor of the PSA Crypto
+ * API. Defining it here follows mbedtls's own documented pattern for
+ * code that still needs the legacy API (see upstream programs/fuzz).
+ */
+#define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
 #include "mbedtls/md.h"
 #include "sdkconfig.h"
 

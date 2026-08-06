@@ -3,6 +3,7 @@
 #include "sdf_event_router.h"
 #include "sdf_nuki_ble_transport.h"
 #include "sdf_config.h"
+#include "sdf_services.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -17,7 +18,6 @@
 #include "host/ble_gap.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "mbedtls/constant_time.h"
 #include "cJSON.h"
 #include "esp_timer.h"
 
@@ -241,9 +241,9 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                     esp_err_t err = sdf_storage_web_user_find_by_name(
                         conn->username, &user, &index);
                     if (err != ESP_OK ||
-                        mbedtls_ct_memcmp(user.password_hash,
-                                          conn->password_hash,
-                                          SDF_STORAGE_WEB_USER_HASH_LEN) != 0) {
+                        !sdf_services_web_auth_verify_login(
+                            &user, conn->password_hash,
+                            SDF_STORAGE_WEB_USER_HASH_LEN)) {
                         conn->auth_state =
                             SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
                         conn->auth_pending = false;

@@ -3,6 +3,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <inttypes.h>
 
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -215,23 +216,23 @@ esp_err_t sdf_config_validate(const sdf_config_t *config) {
 
     /* Timing */
     if (config->match_poll_interval_ms < 100) {
-        ESP_LOGE(TAG, "match_poll_interval_ms too small: %lu", config->match_poll_interval_ms);
+        ESP_LOGE(TAG, "match_poll_interval_ms too small: %" PRIu32, config->match_poll_interval_ms);
         valid = false;
     }
     if (config->match_cooldown_ms < 100) {
-        ESP_LOGE(TAG, "match_cooldown_ms too small: %lu", config->match_cooldown_ms);
+        ESP_LOGE(TAG, "match_cooldown_ms too small: %" PRIu32, config->match_cooldown_ms);
         valid = false;
     }
     if (config->checkin_interval_ms < 1000) {
-        ESP_LOGE(TAG, "checkin_interval_ms too small: %lu", config->checkin_interval_ms);
+        ESP_LOGE(TAG, "checkin_interval_ms too small: %" PRIu32, config->checkin_interval_ms);
         valid = false;
     }
     if (config->idle_before_sleep_ms < 100) {
-        ESP_LOGE(TAG, "idle_before_sleep_ms too small: %lu", config->idle_before_sleep_ms);
+        ESP_LOGE(TAG, "idle_before_sleep_ms too small: %" PRIu32, config->idle_before_sleep_ms);
         valid = false;
     }
     if (config->battery_report_interval_ms < 1000) {
-        ESP_LOGE(TAG, "battery_report_interval_ms too small: %lu", config->battery_report_interval_ms);
+        ESP_LOGE(TAG, "battery_report_interval_ms too small: %" PRIu32, config->battery_report_interval_ms);
         valid = false;
     }
 
@@ -271,13 +272,13 @@ esp_err_t sdf_config_validate(const sdf_config_t *config) {
 
     /* WDT */
     if (config->wdt_timeout_ms < 5000 || config->wdt_timeout_ms > 60000) {
-        ESP_LOGE(TAG, "wdt_timeout_ms out of range: %lu", config->wdt_timeout_ms);
+        ESP_LOGE(TAG, "wdt_timeout_ms out of range: %" PRIu32, config->wdt_timeout_ms);
         valid = false;
     }
 
     /* Event Router */
     if (config->event_router_queue_depth < 8 || config->event_router_queue_depth > 64) {
-        ESP_LOGE(TAG, "event_router_queue_depth out of range: %lu", config->event_router_queue_depth);
+        ESP_LOGE(TAG, "event_router_queue_depth out of range: %" PRIu32, config->event_router_queue_depth);
         valid = false;
     }
 

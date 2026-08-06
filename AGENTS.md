@@ -1,12 +1,12 @@
 # AGENTS.md — Smart Door Finger (SDF) v2.0
 
 ## Project Overview
-ESP-IDF v5.5.3 firmware for ESP32-C6 biometrics bridge. Translates Zigbee commands and fingerprint matches to BLE lock actions via Nuki Smart Lock 3 Pro.
+ESP-IDF v6.0.2 firmware for ESP32-C6 biometrics bridge. Translates Zigbee commands and fingerprint matches to BLE lock actions via Nuki Smart Lock 3 Pro.
 
 ## Build & Flash
 ```bash
 # Source ESP-IDF environment (required)
-source /Users/thorstenropertz/.espressif/v5.5.3/esp-idf/export.sh
+source /Users/thorstenropertz/.espressif/v6.0.2/esp-idf/export.sh
 
 # From firmware/ directory
 idf.py build
@@ -20,17 +20,25 @@ idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.release.defaults" bui
 ```
 
 ## Testing
-Tests live alongside components in `firmware/components/<component>/test/`. The `firmware/test_runner/` project links all components and runs Unity tests on hardware.
+Tests live alongside components in `firmware/components/<component>/test/`. The `firmware/test_runner/` project links all components and runs Unity tests. It's pinned to `IDF_TARGET=linux` (see `firmware/test_runner/sdkconfig.defaults`), so most suites now run host-side without hardware — no flashing required for day-to-day test runs.
 
 ```bash
 # Source ESP-IDF environment (required)
-source /Users/thorstenropertz/.espressif/v5.5.3/esp-idf/export.sh
+source /Users/thorstenropertz/.espressif/v6.0.2/esp-idf/export.sh
 
-# Build test runner
+# Build and run on the host (linux target — no hardware needed)
 cd firmware/test_runner
 idf.py build
+./build/sdf_test_runner.elf
+# Runs all Unity suites sequentially and exits non-zero if any test fails,
+# so this doubles as a CI gate.
+```
 
-# Flash and run interactively
+`sdf_app` and the lock-flow suites remain hardware-only (they pull in `sdf_ble_companion`/BLE/WiFi/OTA stacks that don't build for `IDF_TARGET=linux`) and aren't wired into `test_runner` on the `linux` target — see `openspec/changes/fix-test-runner-build/design.md`'s Open Questions for the proposed follow-up (`add-linux-target-sdf-app-support`). To exercise those, flash the hardware target instead:
+
+```bash
+# From firmware/test_runner, targeting real ESP32-C6 hardware
+idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.hw.defaults" set-target esp32c6
 idf.py -p <PORT> flash monitor
 # Menu shows available tests; run individually or all
 ```
@@ -113,7 +121,7 @@ When making architectural changes, you **must** update the corresponding documen
 ## Gotchas
 - Fingerprint sensor `Control LED (0x3C)` payload bytes are module-variant specific; defaults in `sdf_services.c` may need tuning on real hardware.
 - Match task uses suspend flag + extended polling (10s) when idle instead of WDT delete/recreate + semaphore-block for deep sleep transitions. This keeps the WDT active and reduces context-switch overhead.
-- No CI workflows exist yet. Tests require hardware.
+- No CI workflows exist yet, but most unit tests now run host-side (`IDF_TARGET=linux`, see Testing above) — hardware is only needed for `sdf_app`/lock-flow suites.
 - `scripts/` and `tools/` directories are currently empty.
 
 ## Instructions

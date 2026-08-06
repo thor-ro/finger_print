@@ -1,4 +1,10 @@
-#define MBEDTLS_ALLOW_PRIVATE_ACCESS 1
+/* mbedtls/private/ecp.h includes mbedtls/private_access.h before it pulls
+ * in tf-psa-crypto/build_info.h (which is what applies ESP-IDF's mbedtls
+ * port config, mbedtls/esp_config.h, and would otherwise set this for us).
+ * Define it here first, with the same empty value esp_config.h uses, so
+ * private_access.h unlocks real struct member names instead of private_*
+ * ones without triggering a conflicting-value -Wmacro-redefined later. */
+#define MBEDTLS_ALLOW_PRIVATE_ACCESS
 #include "sdf_nuki_crypto.h"
 
 #include <stddef.h>
@@ -8,9 +14,15 @@
 #include "esp_random.h"
 #include "esp_task_wdt.h"
 
-#include "mbedtls/ecdh.h"
-#include "mbedtls/ecp.h"
-#include "mbedtls/poly1305.h"
+/* mbedtls 4.x (tf-psa-crypto) moved the low-level ECP/Poly1305 APIs out of
+ * their public headers into a "private" header directory, and additionally
+ * hides the legacy (non-PSA) function declarations in those headers behind
+ * MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS (see the same pattern used for
+ * mbedtls/md.h below). ecdh.h is gone entirely; only mbedtls_ecp_* is used
+ * here, so that include is dropped. */
+#define MBEDTLS_DECLARE_PRIVATE_IDENTIFIERS
+#include "mbedtls/private/ecp.h"
+#include "mbedtls/private/poly1305.h"
 
 #define SDF_SALSA20_ROUNDS 20
 
@@ -389,11 +401,16 @@ int crypto_scalarmult(
     mbedtls_ecp_point_init(&R);
     /* Curve25519 scalar multiplication is very CPU-intensive on ESP32-C6
        (single-core RISC-V) and can exceed the 5 s task watchdog timeout.
-       Feed the watchdog before and after to prevent a reset. */
+       Feed the watchdog before and after to prevent a reset. The task
+       watchdog isn't built for IDF_TARGET=linux, so skip it there. */
+#ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_reset();
+#endif
     /* ESP-IDF's mbedTLS requires an RNG callback for scalar blinding. */
     mbed_ret = mbedtls_ecp_mul(&grp, &R, &d, &Qp, sdf_mbedtls_random, NULL);
+#ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_reset();
+#endif
     if (mbed_ret != 0) {
         ESP_LOGE("NUKI_CRYPTO", "mbedtls_ecp_mul failed: %d", mbed_ret);
         mbedtls_ecp_point_free(&R);

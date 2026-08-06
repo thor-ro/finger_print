@@ -205,3 +205,149 @@ void test_sdf_storage_erase_all_idempotent(void) {
 
   nvs_teardown();
 }
+
+// -----------------------------------------------------------------------------
+// Web user storage
+// -----------------------------------------------------------------------------
+
+static sdf_storage_web_user_t make_web_user(const char *username, uint8_t permission) {
+  sdf_storage_web_user_t user = {0};
+  strncpy(user.username, username, sizeof(user.username) - 1);
+  memset(user.password_hash, 0xAB, sizeof(user.password_hash));
+  user.permission = permission;
+  user.valid = true;
+  return user;
+}
+
+void test_sdf_storage_web_user_save_and_load_success(void) {
+  nvs_setup();
+
+  sdf_storage_web_user_t saved = make_web_user("alice", 1);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved));
+
+  sdf_storage_web_user_t loaded = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(0, &loaded));
+  TEST_ASSERT_EQUAL_STRING("alice", loaded.username);
+  TEST_ASSERT_EQUAL_MEMORY(saved.password_hash, loaded.password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+  TEST_ASSERT_EQUAL(1, loaded.permission);
+  TEST_ASSERT_TRUE(loaded.valid);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_load_not_found(void) {
+  nvs_setup();
+
+  sdf_storage_web_user_t loaded = {0};
+  esp_err_t err = sdf_storage_web_user_load(0, &loaded);
+  TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, err);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_find_by_name_hit(void) {
+  nvs_setup();
+
+  sdf_storage_web_user_t saved = make_web_user("bob", 2);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved));
+
+  sdf_storage_web_user_t found = {0};
+  uint8_t index_out = 0xFF;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_find_by_name("bob", &found, &index_out));
+  TEST_ASSERT_EQUAL(1, index_out);
+  TEST_ASSERT_EQUAL_STRING("bob", found.username);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_find_by_name_miss(void) {
+  nvs_setup();
+
+  // find_by_name()'s "not found" translation to ESP_ERR_NOT_FOUND only
+  // happens once its scan loop actually runs, which requires
+  // nvs_open(..., NVS_READONLY, ...) to succeed first. On a namespace
+  // that's never been written to at all, that nvs_open() call itself fails
+  // with ESP_ERR_NVS_NOT_FOUND before the loop is ever reached - so save an
+  // (unrelated) entry first to create the namespace and exercise the real
+  // "present namespace, no matching user" miss path.
+  sdf_storage_web_user_t saved = make_web_user("someone", 1);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved));
+
+  sdf_storage_web_user_t found = {0};
+  uint8_t index_out = 0xFF;
+  esp_err_t err = sdf_storage_web_user_find_by_name("nobody", &found, &index_out);
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, err);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_clear_success(void) {
+  nvs_setup();
+
+  sdf_storage_web_user_t saved = make_web_user("carol", 1);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &saved));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear(2));
+
+  sdf_storage_web_user_t loaded = {0};
+  esp_err_t err = sdf_storage_web_user_load(2, &loaded);
+  TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, err);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_clear_all(void) {
+  nvs_setup();
+
+  for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+    sdf_storage_web_user_t saved = make_web_user("user", 1);
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(i, &saved));
+  }
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear_all());
+
+  size_t count = (size_t)-1;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
+  TEST_ASSERT_EQUAL(0, count);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_count(void) {
+  nvs_setup();
+
+  // Like find_by_name() above, count() opens the namespace NVS_READONLY and
+  // returns that nvs_open() error directly if the namespace has never been
+  // written to - so "count is 0" can only be observed once the namespace
+  // exists. Save-then-clear first to exercise that starting-from-zero case
+  // for real, rather than asserting on the very first open of a totally
+  // virgin partition.
+  sdf_storage_web_user_t saved1 = make_web_user("dave", 1);
+  sdf_storage_web_user_t saved2 = make_web_user("erin", 3);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved2));
+
+  size_t count = (size_t)-1;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
+  TEST_ASSERT_EQUAL(2, count);
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear(0));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear(1));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
+  TEST_ASSERT_EQUAL(0, count);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_save_index_at_max_rejected(void) {
+  nvs_setup();
+
+  // Index must be < SDF_STORAGE_WEB_USER_MAX - there's no auto-allocated
+  // slot, so the max index itself is out of range.
+  sdf_storage_web_user_t saved = make_web_user("overflow", 1);
+  esp_err_t err = sdf_storage_web_user_save(SDF_STORAGE_WEB_USER_MAX, &saved);
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+
+  nvs_teardown();
+}

@@ -2,13 +2,10 @@
 #include "sdf_config.h"
 
 #ifndef CONFIG_IDF_TARGET_LINUX
-#include "esp_sleep.h"
 #include "driver/rtc_io.h"
 #include "driver/gpio.h"
 #include "esp_timer.h"
 #include "esp_log.h"
-#else
-#include "sdf_mock_linux_sleep.h"
 #endif
 
 #ifndef CONFIG_IDF_TARGET_LINUX
@@ -96,7 +93,7 @@ esp_err_t sdf_platform_sleep_enable_gpio_wakeup_deep(gpio_num_t gpio_num, int le
         rtc_gpio_pulldown_en(gpio_num);
     }
 
-    return esp_deep_sleep_enable_gpio_wakeup(1ULL << gpio_num, level ? ESP_GPIO_WAKEUP_GPIO_HIGH : ESP_GPIO_WAKEUP_GPIO_LOW);
+    return esp_sleep_enable_gpio_wakeup_on_hp_periph_powerdown(1ULL << gpio_num, level ? ESP_GPIO_WAKEUP_GPIO_HIGH : ESP_GPIO_WAKEUP_GPIO_LOW);
 #else
     return ESP_OK;
 #endif

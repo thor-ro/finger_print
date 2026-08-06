@@ -1,6 +1,6 @@
 set(driver_reqs sdf_common esp_timer)
 if(NOT IDF_TARGET STREQUAL "linux")
-    list(APPEND driver_reqs driver esp_adc led_strip)
+    list(APPEND driver_reqs driver esp_driver_gpio esp_driver_uart esp_adc led_strip)
 endif()
 
 idf_component_register(

@@ -12,11 +12,9 @@
 #endif
 #include "esp_err.h"
 
-#ifndef CONFIG_IDF_TARGET_LINUX
+/* sdf_nuki_ble_transport.h itself stubs out its NimBLE dependency for
+ * CONFIG_IDF_TARGET_LINUX, so it's safe to include unconditionally here. */
 #include "sdf_nuki_ble_transport.h"
-#else
-typedef struct sdf_nuki_ble_transport_t sdf_nuki_ble_transport_t;
-#endif
 
 #include "sdf_platform_sleep.h"
 
