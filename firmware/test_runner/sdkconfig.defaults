@@ -49,6 +49,13 @@ CONFIG_SDF_CONFIG_ENABLE_RUNTIME_OVERRIDE=y
 # real hardware/stack state), so override the y default here.
 CONFIG_SDF_ZIGBEE_ENABLE=n
 
+# sdf_cli's real sdf_cli_authenticate()/sdf_cli_is_authenticated()/
+# sdf_cli_logout() logic only compiles in when this is set - off by default
+# in production Kconfig. test_sdf_cli.c exercises that logic directly, so
+# override it here; otherwise the no-op stub used in production builds with
+# the CLI disabled would silently make those tests meaningless.
+CONFIG_SDF_CLI_ENABLE=y
+
 # Logging
 CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 CONFIG_LOG_DEFAULT_LEVEL=2

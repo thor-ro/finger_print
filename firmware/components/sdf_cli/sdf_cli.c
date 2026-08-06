@@ -1,4 +1,7 @@
 #include "sdf_cli.h"
+
+#ifdef CONFIG_SDF_CLI_ENABLE
+
 #include "argtable3/argtable3.h"
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "driver/usb_serial_jtag.h"
@@ -160,3 +163,26 @@ esp_err_t sdf_cli_init(void) {
   ESP_LOGI(TAG, "CLI initialized via USB-Serial-JTAG");
   return ESP_OK;
 }
+
+#else // !CONFIG_SDF_CLI_ENABLE
+
+/*
+ * CONFIG_SDF_CLI_ENABLE is off (the default for release builds): the debug
+ * console is compiled out entirely. sdf_cli_commands.c (and with it,
+ * esp_console/argtable3/linenoise) is excluded from the build by
+ * sdf_cli/CMakeLists.txt, and this stub keeps sdf_cli's public API callable
+ * unconditionally so sdf_app doesn't need to know whether the console is
+ * built in.
+ */
+
+esp_err_t sdf_cli_init(void) { return ESP_OK; }
+
+void sdf_cli_register_commands(void) {}
+
+bool sdf_cli_is_authenticated(void) { return false; }
+
+void sdf_cli_authenticate(void) {}
+
+void sdf_cli_logout(void) {}
+
+#endif // CONFIG_SDF_CLI_ENABLE

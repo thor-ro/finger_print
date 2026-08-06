@@ -718,7 +718,8 @@ int sdf_nuki_compute_shared_key(
     return SDF_NUKI_RESULT_ERR_CRYPTO;
   }
 
-  static const unsigned char sigma[16] = "expand 32-byte k";
+  static const unsigned char sigma[16] __attribute__((nonstring)) =
+      "expand 32-byte k";
   static const unsigned char zeros[16] = {0};
 
   if (crypto_core_hsalsa20(shared_key_out, zeros, dh_key, sigma) != 0) {

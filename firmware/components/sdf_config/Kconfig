@@ -422,9 +422,20 @@ menu "Zigbee"
 
 menu "CLI"
 
+        config SDF_CLI_ENABLE
+            bool "Build the debug UART/USB-JTAG console"
+            default n
+            help
+                Compile in the sdf_cli debug console (esp_console + argtable3 +
+                linenoise) for interactive commands over UART/USB-JTAG.
+                Disabling this removes sdf_cli and its console dependencies
+                from the build entirely, reducing flash usage. Enabled by
+                default in the debug sdkconfig profile.
+
         config SDF_CLI_PASSWORD
             string "CLI Login Password"
             default "admin123"
+            depends on SDF_CLI_ENABLE
             help
                 The password required to access the USB-C Command Line Interface.
 

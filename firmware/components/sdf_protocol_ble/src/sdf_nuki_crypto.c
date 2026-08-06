@@ -211,7 +211,8 @@ static void sdf_xsalsa20_stream_xor(
     const uint8_t nonce[24],
     const uint8_t key[32])
 {
-    static const uint8_t sigma[16] = "expand 32-byte k";
+    static const uint8_t sigma[16] __attribute__((nonstring)) =
+        "expand 32-byte k";
     uint8_t subkey[32];
 
     crypto_core_hsalsa20(subkey, nonce, key, sigma);
