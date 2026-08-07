@@ -471,13 +471,18 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
             os_mbuf_copydata(om, 0, len, conn->ota_value);
             conn->ota_value_len = len;
-            void (*on_ota)(void *, const uint8_t *, size_t) = s_callbacks.on_ota_write;
+            sdf_ble_companion_ota_write_cb on_ota = s_callbacks.on_ota_write;
             void *cb_ctx = s_callbacks.ctx;
             uint8_t *tmp = s_gatt_scratch;
             memcpy(tmp, conn->ota_value, len);
             xSemaphoreGive(s_lock);
-            if (on_ota) {
-                on_ota(cb_ctx, tmp, len);
+            /* Unlike the other characteristics, a malformed/out-of-protocol
+             * OTA write must be rejected at the GATT layer (non-zero ATT
+             * error, no notify) rather than silently accepted - the failed
+             * write itself is the client's synchronous signal per the BLE
+             * OTA chunked-transfer wire format. */
+            if (on_ota && !on_ota(cb_ctx, conn_handle, tmp, len)) {
+                return BLE_ATT_ERR_UNLIKELY;
             }
             return 0;
         }

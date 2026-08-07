@@ -45,7 +45,7 @@ The Smart Door Finger (SDF) is a biometrics bridge that converts fingerprint tou
 
 | Constraint | Source | Impact |
 |---|---|---|
-| ESP-IDF v5.5.3, ESP32-C6 target | Hardware selection | Zigbee + BLE dual-stack on single SoC; FreeRTOS execution model |
+| ESP-IDF v6.0.2, ESP32-C6 target | Hardware selection | Zigbee + BLE dual-stack on single SoC; FreeRTOS execution model |
 | NimBLE stack (Central role) | sdkconfig.defaults | BLE API is NimBLE-specific, not Bluedroid |
 | Zigbee 3.0 ZHA profile | Home Assistant compatibility | Door Lock Cluster 0x0101 command/attribute set |
 | UART fingerprint sensor | Hardware | 19200 baud, proprietary command protocol, sensor-side template storage |
@@ -526,7 +526,7 @@ note right of BLE_ACTION : BLE radio enabled\nNuki connection active
 ```plantuml
 @startuml
 node "ESP32-C6 SoC" as mcu {
-  artifact "SDF Firmware\n(ESP-IDF v5.5.3)" as fw
+  artifact "SDF Firmware\n(ESP-IDF v6.0.2)" as fw
   database "NVS\n(encrypted)" as nvs
   database "Partition Table\n(OTA_0 + OTA_1)" as pt
 }
@@ -757,7 +757,7 @@ Dual OTA slots (ota_0, ota_1) + otadata for swap state; nvs_keys for encrypted N
 | **Security** | Replay protection | Nonce cache prevents reuse |
 | **Usability** | Enrollment guidance | LED provides clear feedback for each step |
 | **Maintainability** | Component boundaries | Each component independently compilable and testable |
-| **Portability** | ESP-IDF version lock | Pinned to v5.5.3; ESP-IDF API compatibility |
+| **Portability** | ESP-IDF version lock | Pinned to v6.0.2; ESP-IDF API compatibility |
 
 ## 10.2 Quality Scenarios
 

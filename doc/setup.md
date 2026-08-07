@@ -4,8 +4,8 @@ This document explains how to build, flash, and run the Smart Door Finger (SDF) 
 
 ## Prerequisites
 
-1. **ESP-IDF v5.5.3**: 
-   Ensure you have ESP-IDF v5.5.3 installed. If not, follow the official [ESP-IDF Get Started Guide](https://docs.espressif.com/projects/esp-idf/en/release-v5.5/esp32c6/get-started/index.html) to install it.
+1. **ESP-IDF v6.0.2**: 
+   Ensure you have ESP-IDF v6.0.2 installed. If not, follow the official [ESP-IDF Get Started Guide](https://docs.espressif.com/projects/esp-idf/en/v6.0/esp32c6/get-started/index.html) to install it.
    
 2. **Hardware**:
    - Waveshare ESP32-C6 mini module (or similar ESP32-C6 board)

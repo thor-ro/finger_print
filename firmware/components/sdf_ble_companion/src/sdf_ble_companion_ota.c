@@ -1,331 +1,294 @@
 #include "sdf_ble_companion.h"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
-#include "cJSON.h"
-#include "esp_crt_bundle.h"
-#include "esp_event.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/event_groups.h"
-#include "freertos/task.h"
-#include "mbedtls/platform_util.h"
+#include "freertos/semphr.h"
+#include "host/ble_hs.h" /* ble_att_mtu() */
+
+#include "sdf_ble_ota_protocol.h"
 #include "sdf_ota.h"
-
-#define SDF_BLE_OTA_SSID_MAX_LEN 32
-#define SDF_BLE_OTA_PASSWORD_MAX_LEN 63
-#define SDF_BLE_OTA_URL_MAX_LEN 256
-#define SDF_BLE_OTA_CONNECT_TIMEOUT_MS 20000
-#define SDF_BLE_OTA_DOWNLOAD_BUFFER_LEN 4096
-
-#define SDF_BLE_OTA_WIFI_CONNECTED BIT0
-#define SDF_BLE_OTA_WIFI_FAILED BIT1
-
-#define SDF_BLE_OTA_TASK_PRIORITY (tskIDLE_PRIORITY + 8)
 
 static const char *TAG = "sdf_ble_ota";
 
 typedef struct {
-    char ssid[SDF_BLE_OTA_SSID_MAX_LEN + 1];
-    char password[SDF_BLE_OTA_PASSWORD_MAX_LEN + 1];
-    char firmware_url[SDF_BLE_OTA_URL_MAX_LEN + 1];
-} sdf_ble_ota_request_t;
+    bool active;
+    sdf_ota_handle_t ota_handle;
+    uint16_t conn_handle;
+    uint32_t declared_size;
+} sdf_ble_ota_session_t;
 
-static EventGroupHandle_t s_wifi_events;
-static esp_netif_t *s_wifi_netif;
-static bool s_wifi_initialized;
-static bool s_ota_task_running;
+static sdf_ble_ota_session_t s_session;
+static SemaphoreHandle_t s_session_lock;
+static esp_timer_handle_t s_idle_timer;
 
-static void sdf_ble_ota_notify(const char *json_str) {
-    sdf_ble_companion_broadcast_ota((const uint8_t *)json_str, strlen(json_str));
+static void sdf_ble_ota_notify(uint16_t conn_handle, const char *json_str) {
+    esp_err_t err = sdf_ble_companion_notify_ota(conn_handle, (const uint8_t *)json_str,
+                                                  strlen(json_str));
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to notify OTA status: %s", esp_err_to_name(err));
+    }
 }
 
-static void sdf_ble_ota_event_handler(void *arg, esp_event_base_t event_base,
-                                      int32_t event_id, void *event_data) {
-    (void)arg;
-    (void)event_data;
+static void sdf_ble_ota_rearm_idle_timer(void) {
+    if (s_idle_timer == NULL) {
+        return;
+    }
+    esp_timer_stop(s_idle_timer); /* no-op if not currently running */
+    esp_timer_start_once(s_idle_timer, (uint64_t)SDF_BLE_OTA_IDLE_TIMEOUT_MS * 1000);
+}
 
-    if (s_wifi_events == NULL) {
+static void sdf_ble_ota_idle_timeout_cb(void *arg) {
+    (void)arg;
+
+    if (s_session_lock == NULL || xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
         return;
     }
 
-    if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        xEventGroupSetBits(s_wifi_events, SDF_BLE_OTA_WIFI_CONNECTED);
-    } else if (event_base == WIFI_EVENT &&
-               event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        xEventGroupSetBits(s_wifi_events, SDF_BLE_OTA_WIFI_FAILED);
+    bool was_active = s_session.active;
+    uint16_t conn_handle = s_session.conn_handle;
+    sdf_ota_handle_t handle = s_session.ota_handle;
+    if (was_active) {
+        memset(&s_session, 0, sizeof(s_session));
+    }
+    xSemaphoreGive(s_session_lock);
+
+    if (was_active) {
+        ESP_LOGW(TAG, "BLE OTA idle timeout, aborting session");
+        sdf_ota_abort(handle);
+        sdf_ble_ota_notify(conn_handle, "{\"status\":\"failed\",\"error\":\"idle_timeout\"}");
     }
 }
 
-static esp_err_t sdf_ble_ota_init_wifi(void) {
-    if (s_wifi_initialized) {
-        return ESP_OK;
-    }
-
-    esp_err_t err = esp_netif_init();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+static esp_err_t sdf_ble_ota_ensure_init(void) {
+    esp_err_t err = sdf_ota_init();
+    if (err != ESP_OK) {
         return err;
     }
 
-    err = esp_event_loop_create_default();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    if (s_wifi_events == NULL) {
-        s_wifi_events = xEventGroupCreate();
-        if (s_wifi_events == NULL) {
+    if (s_session_lock == NULL) {
+        s_session_lock = xSemaphoreCreateMutex();
+        if (s_session_lock == NULL) {
             return ESP_ERR_NO_MEM;
         }
     }
 
-    if (s_wifi_netif == NULL) {
-        s_wifi_netif = esp_netif_create_default_wifi_sta();
-        if (s_wifi_netif == NULL) {
-            return ESP_FAIL;
+    if (s_idle_timer == NULL) {
+        const esp_timer_create_args_t timer_args = {
+            .callback = sdf_ble_ota_idle_timeout_cb,
+            .arg = NULL,
+            .name = "sdf_ble_ota_idle",
+        };
+        err = esp_timer_create(&timer_args, &s_idle_timer);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to create idle timer: %s", esp_err_to_name(err));
+            return err;
         }
     }
 
-    wifi_init_config_t wifi_init_config = WIFI_INIT_CONFIG_DEFAULT();
-    err = esp_wifi_init(&wifi_init_config);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    err = esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED,
-                                     sdf_ble_ota_event_handler, NULL);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-    err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
-                                     sdf_ble_ota_event_handler, NULL);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    err = esp_wifi_set_mode(WIFI_MODE_STA);
-    if (err != ESP_OK) {
-        return err;
-    }
-    err = esp_wifi_start();
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        return err;
-    }
-
-    s_wifi_initialized = true;
     return ESP_OK;
 }
 
-static esp_err_t sdf_ble_ota_connect(const sdf_ble_ota_request_t *request) {
-    wifi_config_t wifi_config = {0};
-    memcpy(wifi_config.sta.ssid, request->ssid, strlen(request->ssid));
-    memcpy(wifi_config.sta.password, request->password,
-           strlen(request->password));
-
-    // Notify: WiFi connecting
-    sdf_ble_ota_notify("{\"status\":\"wifi_connecting\"}");
-
-    xEventGroupClearBits(s_wifi_events,
-                         SDF_BLE_OTA_WIFI_CONNECTED | SDF_BLE_OTA_WIFI_FAILED);
-    esp_err_t err = esp_wifi_disconnect();
-    if (err != ESP_OK && err != ESP_ERR_WIFI_NOT_CONNECT) {
-        return err;
+/* Reject malformed/zero-size BEGIN or a size-mismatched BEGIN while another
+ * session is open without disturbing that session (returns false -> caller
+ * rejects the GATT write with a non-zero ATT error, no notify). A BEGIN
+ * matching an already-open session's declared size is treated as a resume:
+ * no new sdf_ota_begin() call, the (possibly new) connection is adopted, and
+ * the current confirmed offset is reported. */
+static bool sdf_ble_ota_handle_begin(uint16_t conn_handle, const uint8_t *payload,
+                                      size_t payload_len) {
+    uint32_t image_size;
+    if (!sdf_ble_ota_protocol_parse_begin(payload, payload_len, &image_size)) {
+        ESP_LOGW(TAG, "BEGIN: malformed payload (len=%u)", (unsigned)payload_len);
+        return false;
     }
-    err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+
+    if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return false;
+    }
+
+    sdf_ble_ota_begin_decision_t decision =
+        sdf_ble_ota_protocol_decide_begin(s_session.active, s_session.declared_size, image_size);
+
+    if (decision == SDF_BLE_OTA_BEGIN_REJECT) {
+        xSemaphoreGive(s_session_lock);
+        ESP_LOGW(TAG, "BEGIN: size mismatch for resume (open=%" PRIu32 ", requested=%" PRIu32 ")",
+                 s_session.declared_size, image_size);
+        return false;
+    }
+
+    if (decision == SDF_BLE_OTA_BEGIN_RESUME) {
+        s_session.conn_handle = conn_handle;
+        sdf_ota_handle_t handle = s_session.ota_handle;
+        xSemaphoreGive(s_session_lock);
+
+        uint32_t bytes_written = 0;
+        sdf_ota_get_bytes_written(handle, &bytes_written);
+        sdf_ble_ota_rearm_idle_timer();
+
+        char notify_buf[64];
+        snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"ready\",\"offset\":%" PRIu32 "}",
+                 bytes_written);
+        sdf_ble_ota_notify(conn_handle, notify_buf);
+        return true;
+    }
+    xSemaphoreGive(s_session_lock);
+
+    /* SDF_BLE_OTA_BEGIN_START_NEW */
+    sdf_ota_handle_t handle = NULL;
+    esp_err_t err = sdf_ota_begin(SDF_OTA_SOURCE_BLE, image_size, &handle);
     if (err != ESP_OK) {
-        return err;
-    }
-    err = esp_wifi_connect();
-    if (err != ESP_OK) {
-        return err;
+        ESP_LOGW(TAG, "BEGIN: sdf_ota_begin failed: %s", esp_err_to_name(err));
+        return false;
     }
 
-    EventBits_t bits = xEventGroupWaitBits(
-        s_wifi_events, SDF_BLE_OTA_WIFI_CONNECTED | SDF_BLE_OTA_WIFI_FAILED,
-        pdFALSE, pdFALSE, pdMS_TO_TICKS(SDF_BLE_OTA_CONNECT_TIMEOUT_MS));
-    if ((bits & SDF_BLE_OTA_WIFI_CONNECTED) != 0) {
-        // Notify: WiFi connected
-        sdf_ble_ota_notify("{\"status\":\"wifi_connected\"}");
-        return ESP_OK;
+    if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        sdf_ota_abort(handle);
+        return false;
     }
-    return (bits & SDF_BLE_OTA_WIFI_FAILED) != 0 ? ESP_FAIL : ESP_ERR_TIMEOUT;
+    s_session.active = true;
+    s_session.ota_handle = handle;
+    s_session.conn_handle = conn_handle;
+    s_session.declared_size = image_size;
+    xSemaphoreGive(s_session_lock);
+
+    sdf_ble_ota_rearm_idle_timer();
+    sdf_ble_ota_notify(conn_handle, "{\"status\":\"ready\",\"offset\":0}");
+    return true;
 }
 
-static esp_err_t sdf_ble_ota_download(const char *firmware_url) {
-    esp_http_client_config_t config = {
-        .url = firmware_url,
-        .timeout_ms = SDF_BLE_OTA_CONNECT_TIMEOUT_MS,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .keep_alive_enable = true,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == NULL) {
-        return ESP_ERR_NO_MEM;
+/* Reject an empty/over-MTU chunk or one with no matching open session
+ * (returns false -> ATT error, no notify, no write to the OTA session). An
+ * accepted chunk that fails sdf_ota_write() aborts the session and reports
+ * failure via notify (not an ATT error), since the write itself was
+ * well-formed. */
+static bool sdf_ble_ota_handle_chunk(uint16_t conn_handle, const uint8_t *payload,
+                                      size_t payload_len) {
+    uint16_t mtu = ble_att_mtu(conn_handle);
+    if (!sdf_ble_ota_protocol_validate_chunk(mtu, payload_len)) {
+        ESP_LOGW(TAG, "CHUNK: invalid payload (len=%u, mtu=%u, max=%u)", (unsigned)payload_len,
+                 (unsigned)mtu, (unsigned)sdf_ble_ota_protocol_max_chunk_len(mtu));
+        return false;
     }
 
-    esp_err_t err = esp_http_client_open(client, 0);
+    if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return false;
+    }
+    if (!s_session.active || s_session.conn_handle != conn_handle) {
+        xSemaphoreGive(s_session_lock);
+        ESP_LOGW(TAG, "CHUNK: no matching open session");
+        return false;
+    }
+    sdf_ota_handle_t handle = s_session.ota_handle;
+    xSemaphoreGive(s_session_lock);
+
+    esp_err_t err = sdf_ota_write(handle, payload, (uint32_t)payload_len);
     if (err != ESP_OK) {
-        esp_http_client_cleanup(client);
-        return err;
-    }
-
-    const int64_t content_length = esp_http_client_fetch_headers(client);
-    const int status = esp_http_client_get_status_code(client);
-    if (status != 200 || content_length <= 0 || content_length > UINT32_MAX) {
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    // Notify: downloading started
-    char notify_buf[128];
-    snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"downloading\",\"progress\":0,\"total\":%lld}", (long long)content_length);
-    sdf_ble_ota_notify(notify_buf);
-
-    err = sdf_ota_init();
-    sdf_ota_handle_t ota_handle = NULL;
-    if (err == ESP_OK) {
-        err = sdf_ota_begin(SDF_OTA_SOURCE_BLE, (uint32_t)content_length,
-                            &ota_handle);
-    }
-
-    uint8_t *buffer = NULL;
-    if (err == ESP_OK) {
-        buffer = malloc(SDF_BLE_OTA_DOWNLOAD_BUFFER_LEN);
-        if (buffer == NULL) {
-            err = ESP_ERR_NO_MEM;
+        ESP_LOGE(TAG, "CHUNK: sdf_ota_write failed: %s", esp_err_to_name(err));
+        sdf_ota_abort(handle);
+        esp_timer_stop(s_idle_timer);
+        if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            memset(&s_session, 0, sizeof(s_session));
+            xSemaphoreGive(s_session_lock);
         }
+        char notify_buf[96];
+        snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"failed\",\"error\":\"%s\"}",
+                 esp_err_to_name(err));
+        sdf_ble_ota_notify(conn_handle, notify_buf);
+        return true;
     }
 
-    uint32_t bytes_downloaded = 0;
-    int last_reported_progress = 0;
+    uint32_t bytes_written = 0;
+    sdf_ota_get_bytes_written(handle, &bytes_written);
+    sdf_ble_ota_rearm_idle_timer();
 
-    while (err == ESP_OK) {
-        const int read_len = esp_http_client_read(
-            client, (char *)buffer, SDF_BLE_OTA_DOWNLOAD_BUFFER_LEN);
-        if (read_len < 0) {
-            err = ESP_FAIL;
-        } else if (read_len == 0) {
-            break;
-        } else {
-            err = sdf_ota_write(ota_handle, buffer, (uint32_t)read_len);
-            bytes_downloaded += read_len;
-
-            // Report progress at 25%, 50%, 75%, 100%
-            int progress = (int)((bytes_downloaded * 100LL) / content_length);
-            if (progress >= last_reported_progress + 25 || progress == 100) {
-                snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"downloading\",\"progress\":%d}", progress);
-                sdf_ble_ota_notify(notify_buf);
-                last_reported_progress = progress;
-            }
-        }
-    }
-
-    if (err == ESP_OK) {
-        // Notify: verifying
-        sdf_ble_ota_notify("{\"status\":\"verifying\"}");
-        err = sdf_ota_verify_integrity(ota_handle);
-    }
-    if (err == ESP_OK) {
-        err = sdf_ota_verify_and_commit(ota_handle);
-    }
-    if (err != ESP_OK && ota_handle != NULL) {
-        (void)sdf_ota_abort(ota_handle);
-    }
-
-    if (buffer != NULL) {
-        mbedtls_platform_zeroize(buffer, SDF_BLE_OTA_DOWNLOAD_BUFFER_LEN);
-        free(buffer);
-    }
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    return err;
+    char notify_buf[64];
+    snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"chunk_ack\",\"offset\":%" PRIu32 "}",
+             bytes_written);
+    sdf_ble_ota_notify(conn_handle, notify_buf);
+    return true;
 }
 
-static void sdf_ble_ota_task(void *arg) {
-    sdf_ble_ota_request_t *request = arg;
-    esp_err_t err = sdf_ble_ota_init_wifi();
-    if (err == ESP_OK) {
-        err = sdf_ble_ota_connect(request);
+/* Reject an END with a payload or with no matching open session (returns
+ * false -> ATT error, no notify). A matching END always consumes the
+ * session (success or failure) and reports pass/fail via notify - on
+ * success sdf_ota_verify_and_commit() reboots the device and never returns,
+ * so the success notify below is unreachable in practice; this mirrors the
+ * pre-existing behavior of every other sdf_ota_verify_and_commit() caller
+ * (Zigbee, CLI) and is not a regression introduced by this change. */
+static bool sdf_ble_ota_handle_end(uint16_t conn_handle, size_t payload_len) {
+    if (!sdf_ble_ota_protocol_validate_end(payload_len)) {
+        ESP_LOGW(TAG, "END: unexpected payload (%u bytes)", (unsigned)payload_len);
+        return false;
     }
-    if (err == ESP_OK) {
-        err = sdf_ble_ota_download(request->firmware_url);
+
+    if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return false;
     }
+    if (!s_session.active || s_session.conn_handle != conn_handle) {
+        xSemaphoreGive(s_session_lock);
+        ESP_LOGW(TAG, "END: no matching open session");
+        return false;
+    }
+    sdf_ota_handle_t handle = s_session.ota_handle;
+    xSemaphoreGive(s_session_lock);
+
+    esp_timer_stop(s_idle_timer);
+
+    esp_err_t err = sdf_ota_verify_integrity(handle);
+    if (err == ESP_OK) {
+        err = sdf_ota_verify_and_commit(handle);
+    }
+
+    if (xSemaphoreTake(s_session_lock, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        memset(&s_session, 0, sizeof(s_session));
+        xSemaphoreGive(s_session_lock);
+    }
+
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "BLE OTA failed: %s", esp_err_to_name(err));
-        char notify_buf[128];
-        snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"failed\",\"error\":\"%s\"}", esp_err_to_name(err));
-        sdf_ble_ota_notify(notify_buf);
-    } else {
-        // Notify: success
-        sdf_ble_ota_notify("{\"status\":\"success\"}");
+        ESP_LOGE(TAG, "END: verification/commit failed: %s", esp_err_to_name(err));
+        sdf_ota_abort(handle);
+        char notify_buf[96];
+        snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"failed\",\"error\":\"%s\"}",
+                 esp_err_to_name(err));
+        sdf_ble_ota_notify(conn_handle, notify_buf);
+        return true;
     }
 
-    mbedtls_platform_zeroize(request, sizeof(*request));
-    free(request);
-    s_ota_task_running = false;
-    vTaskDelete(NULL);
+    sdf_ble_ota_notify(conn_handle, "{\"status\":\"success\"}");
+    return true;
 }
 
-esp_err_t sdf_ble_companion_start_ota_request(const uint8_t *data, size_t len) {
-    if (data == NULL || len == 0 || len >= 512 || s_ota_task_running) {
-        return ESP_ERR_INVALID_ARG;
+bool sdf_ble_companion_handle_ota_write(void *ctx, uint16_t conn_handle, const uint8_t *data,
+                                         size_t len) {
+    (void)ctx;
+
+    if (data == NULL || len == 0) {
+        return false;
+    }
+    if (sdf_ble_ota_ensure_init() != ESP_OK) {
+        return false;
     }
 
-    const char *parse_end = NULL;
-    cJSON *root = cJSON_ParseWithLengthOpts((const char *)data, len,
-                                             &parse_end, false);
-    if (root == NULL || parse_end != (const char *)data + len) {
-        cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
-    }
+    uint8_t opcode = data[0];
+    const uint8_t *payload = data + 1;
+    size_t payload_len = len - 1;
 
-    const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(root, "ssid");
-    const cJSON *password = cJSON_GetObjectItemCaseSensitive(root, "password");
-    const cJSON *firmware_url =
-        cJSON_GetObjectItemCaseSensitive(root, "firmwareUrl");
-    if (!cJSON_IsString(ssid) || !cJSON_IsString(password) ||
-        !cJSON_IsString(firmware_url) || ssid->valuestring == NULL ||
-        password->valuestring == NULL || firmware_url->valuestring == NULL) {
-        cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
+    switch (opcode) {
+    case SDF_BLE_OTA_OPCODE_BEGIN:
+        return sdf_ble_ota_handle_begin(conn_handle, payload, payload_len);
+    case SDF_BLE_OTA_OPCODE_CHUNK:
+        return sdf_ble_ota_handle_chunk(conn_handle, payload, payload_len);
+    case SDF_BLE_OTA_OPCODE_END:
+        return sdf_ble_ota_handle_end(conn_handle, payload_len);
+    default:
+        ESP_LOGW(TAG, "Unknown OTA opcode 0x%02x", opcode);
+        return false;
     }
-
-    const size_t ssid_len = strlen(ssid->valuestring);
-    const size_t password_len = strlen(password->valuestring);
-    const size_t url_len = strlen(firmware_url->valuestring);
-    if (ssid_len == 0 || ssid_len > SDF_BLE_OTA_SSID_MAX_LEN ||
-        password_len > SDF_BLE_OTA_PASSWORD_MAX_LEN ||
-        url_len <= strlen("https://") || url_len > SDF_BLE_OTA_URL_MAX_LEN ||
-        strncmp(firmware_url->valuestring, "https://", strlen("https://")) !=
-            0) {
-        cJSON_Delete(root);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    sdf_ble_ota_request_t *request = calloc(1, sizeof(*request));
-    if (request == NULL) {
-        cJSON_Delete(root);
-        return ESP_ERR_NO_MEM;
-    }
-    memcpy(request->ssid, ssid->valuestring, ssid_len + 1);
-    memcpy(request->password, password->valuestring, password_len + 1);
-    memcpy(request->firmware_url, firmware_url->valuestring, url_len + 1);
-    cJSON_Delete(root);
-
-    s_ota_task_running = true;
-    if (xTaskCreate(sdf_ble_ota_task, "sdf_ble_ota", 8192, request,
-                    SDF_BLE_OTA_TASK_PRIORITY, NULL) != pdPASS) {
-        s_ota_task_running = false;
-        mbedtls_platform_zeroize(request, sizeof(*request));
-        free(request);
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
 }

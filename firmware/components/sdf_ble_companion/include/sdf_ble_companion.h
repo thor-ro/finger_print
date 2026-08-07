@@ -48,7 +48,16 @@ typedef void (*sdf_ble_companion_enroll_write_cb)(void *ctx,
                                                    const uint8_t *data,
                                                    size_t len);
 
-typedef void (*sdf_ble_companion_ota_write_cb)(void *ctx,
+/**
+ * Returns true if the write was well-formed and accepted per the BLE OTA
+ * chunked-transfer wire format (regardless of whether the underlying OTA
+ * operation ultimately succeeds - such failures are reported asynchronously
+ * via sdf_ble_companion_notify_ota()), or false if the write was malformed
+ * or out-of-protocol and must be rejected by the GATT layer (non-zero ATT
+ * error, no notify) without opening, resuming, or corrupting any session.
+ */
+typedef bool (*sdf_ble_companion_ota_write_cb)(void *ctx,
+                                                uint16_t conn_handle,
                                                 const uint8_t *data,
                                                 size_t len);
 
@@ -79,10 +88,23 @@ esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data
 esp_err_t sdf_ble_companion_broadcast_ota(const uint8_t *data, size_t len);
 
 /**
- * Validate and start an HTTPS OTA request encoded as UTF-8 JSON:
- * {"ssid":"...","password":"...","firmwareUrl":"https://..."}.
+ * Handle a write to the OTA characteristic implementing the chunked binary
+ * firmware transfer protocol over the existing authenticated BLE GATT
+ * connection: opcode-prefixed control/data messages, `[opcode:1][payload...]`
+ *   - 0x01 BEGIN: 4-byte little-endian uint32 declared image size (5 bytes
+ *     total). Opens a new OTA session, or - if a session with a matching
+ *     declared size is already open - resumes it by reporting the current
+ *     byte offset.
+ *   - 0x02 CHUNK: raw firmware bytes (1..max_chunk_len, where
+ *     max_chunk_len = ble_att_mtu(conn_handle) - 4).
+ *   - 0x03 END: no payload (1 byte total). Triggers integrity/signature
+ *     verification and commit.
+ * Per-chunk and completion status are reported back via
+ * sdf_ble_companion_notify_ota(). Intended to be wired up as the
+ * `on_ota_write` callback in sdf_ble_companion_callbacks_t.
  */
-esp_err_t sdf_ble_companion_start_ota_request(const uint8_t *data, size_t len);
+bool sdf_ble_companion_handle_ota_write(void *ctx, uint16_t conn_handle,
+                                         const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

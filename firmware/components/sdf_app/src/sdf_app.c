@@ -638,17 +638,6 @@ static void sdf_ble_companion_on_enroll_write(void *ctx,
     cJSON_Delete(root);
 }
 
-static void sdf_ble_companion_on_ota_write(void *ctx,
-                                            const uint8_t *data,
-                                            size_t len) {
-    (void)ctx;
-    esp_err_t err = sdf_ble_companion_start_ota_request(data, len);
-    if (err != ESP_OK) {
-      ESP_LOGW(TAG, "BLE Companion OTA request rejected: %s",
-               esp_err_to_name(err));
-    }
-}
-
 static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
   (void)ctx;
   if (event == NULL) {
@@ -1702,7 +1691,7 @@ sub_done:
       .on_auth_request = sdf_ble_companion_on_auth_request,
       .on_config_write = sdf_ble_companion_on_config_write,
       .on_enroll_write = sdf_ble_companion_on_enroll_write,
-      .on_ota_write = sdf_ble_companion_on_ota_write,
+      .on_ota_write = sdf_ble_companion_handle_ota_write,
   };
   err = sdf_ble_companion_init(&ble_companion_cbs);
   if (err != ESP_OK) {

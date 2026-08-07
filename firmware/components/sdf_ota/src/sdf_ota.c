@@ -396,6 +396,26 @@ sdf_ota_state_t sdf_ota_get_state(void)
     return s_session.state;
 }
 
+esp_err_t sdf_ota_get_bytes_written(sdf_ota_handle_t handle, uint32_t *bytes_written_out)
+{
+    if (handle == NULL || bytes_written_out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (xSemaphoreTake(s_session_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (!s_session.active || handle != &s_session) {
+        xSemaphoreGive(s_session_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    *bytes_written_out = s_session.bytes_written;
+    xSemaphoreGive(s_session_mutex);
+    return ESP_OK;
+}
+
 sdf_ota_version_cmp_t sdf_ota_version_compare(const char *current, const char *incoming)
 {
     if (current == NULL || incoming == NULL) {

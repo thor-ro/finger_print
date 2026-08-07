@@ -1,7 +1,7 @@
 # FreeRTOS Task Architecture — SDF v2.0
 
 **Target:** ESP32-C6 (Single Core, SMP=1)  
-**RTOS:** FreeRTOS (ESP-IDF v5.5.3)  
+**RTOS:** FreeRTOS (ESP-IDF v6.0.2)  
 **Canonical Reference:** This document is the single source of truth for all task definitions, priorities, stacks, and communication contracts.
 
 ---

@@ -42,6 +42,13 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle);
 esp_err_t sdf_ota_rollback(void);
 const char *sdf_ota_get_version(void);
 sdf_ota_state_t sdf_ota_get_state(void);
+
+/* Read back the number of bytes accepted so far by sdf_ota_write() for the
+ * active session identified by handle. Used by transports (e.g. BLE) that
+ * need to report/resume from a confirmed offset. Returns ESP_ERR_INVALID_ARG
+ * for a NULL handle_out, ESP_ERR_INVALID_STATE if handle does not match the
+ * currently active session. */
+esp_err_t sdf_ota_get_bytes_written(sdf_ota_handle_t handle, uint32_t *bytes_written_out);
 sdf_ota_version_cmp_t sdf_ota_version_compare(const char *current, const char *incoming);
 
 /* Verify the Ed25519 signature footer appended after the first image_size

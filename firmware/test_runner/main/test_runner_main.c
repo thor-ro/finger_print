@@ -203,6 +203,22 @@ extern void test_feed_encrypted_partial_data(void);
 extern void test_feed_encrypted_null_args(void);
 extern void test_send_unencrypted_sends_framed_message(void);
 
+extern void test_ble_ota_protocol_parse_begin_valid(void);
+extern void test_ble_ota_protocol_parse_begin_wrong_length(void);
+extern void test_ble_ota_protocol_parse_begin_zero_size(void);
+extern void test_ble_ota_protocol_parse_begin_null_args(void);
+extern void test_ble_ota_protocol_validate_end_empty_accepted(void);
+extern void test_ble_ota_protocol_validate_end_nonempty_rejected(void);
+extern void test_ble_ota_protocol_max_chunk_len_typical_mtu(void);
+extern void test_ble_ota_protocol_max_chunk_len_too_small_mtu(void);
+extern void test_ble_ota_protocol_validate_chunk_at_max_accepted(void);
+extern void test_ble_ota_protocol_validate_chunk_over_max_rejected(void);
+extern void test_ble_ota_protocol_validate_chunk_empty_rejected(void);
+extern void test_ble_ota_protocol_validate_chunk_mtu_too_small_rejected(void);
+extern void test_ble_ota_protocol_decide_begin_no_session_starts_new(void);
+extern void test_ble_ota_protocol_decide_begin_matching_size_resumes(void);
+extern void test_ble_ota_protocol_decide_begin_mismatched_size_rejected(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -414,6 +430,23 @@ void app_main(void) {
   RUN_TEST(test_feed_encrypted_partial_data);
   RUN_TEST(test_feed_encrypted_null_args);
   RUN_TEST(test_send_unencrypted_sends_framed_message);
+
+  /* BLE OTA wire-format protocol tests */
+  RUN_TEST(test_ble_ota_protocol_parse_begin_valid);
+  RUN_TEST(test_ble_ota_protocol_parse_begin_wrong_length);
+  RUN_TEST(test_ble_ota_protocol_parse_begin_zero_size);
+  RUN_TEST(test_ble_ota_protocol_parse_begin_null_args);
+  RUN_TEST(test_ble_ota_protocol_validate_end_empty_accepted);
+  RUN_TEST(test_ble_ota_protocol_validate_end_nonempty_rejected);
+  RUN_TEST(test_ble_ota_protocol_max_chunk_len_typical_mtu);
+  RUN_TEST(test_ble_ota_protocol_max_chunk_len_too_small_mtu);
+  RUN_TEST(test_ble_ota_protocol_validate_chunk_at_max_accepted);
+  RUN_TEST(test_ble_ota_protocol_validate_chunk_over_max_rejected);
+  RUN_TEST(test_ble_ota_protocol_validate_chunk_empty_rejected);
+  RUN_TEST(test_ble_ota_protocol_validate_chunk_mtu_too_small_rejected);
+  RUN_TEST(test_ble_ota_protocol_decide_begin_no_session_starts_new);
+  RUN_TEST(test_ble_ota_protocol_decide_begin_matching_size_resumes);
+  RUN_TEST(test_ble_ota_protocol_decide_begin_mismatched_size_rejected);
 
   /* app_main() is declared void and called without capturing a return value
    * by the linux target's main_task() (see FreeRTOS-Kernel port_idf.c), so

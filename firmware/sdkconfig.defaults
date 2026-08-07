@@ -82,9 +82,12 @@ CONFIG_SDF_SECURITY_REQUIRE_ENCRYPTED_NVS=y
 # Firmware size optimizations for OTA
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 CONFIG_COMPILER_OPTIMIZATION_ASSERTION_LEVEL=0
-CONFIG_ESP_WIFI_ENABLED=y
-CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
-CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# WiFi/TLS stack removed with BLE-based OTA transfer (replace-wifi-ota-with-ble-transfer).
+# ESP_WIFI_ENABLED and MBEDTLS_CERTIFICATE_BUNDLE both default to "y" on esp32c6
+# (SOC_WIFI_SUPPORTED), so they must be explicitly disabled here rather than merely
+# omitted, otherwise the WiFi/TLS stack stays linked despite no component requiring it.
+CONFIG_ESP_WIFI_ENABLED=n
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
 CONFIG_NEWLIB_NANO_FORMAT=y
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
 CONFIG_LOG_DEFAULT_LEVEL=3
