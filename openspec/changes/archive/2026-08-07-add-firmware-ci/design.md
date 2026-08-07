@@ -1,6 +1,6 @@
 ## Context
 
-`.github/workflows/deploy-web-companion.yml` is the only workflow in the repo, and it's a static Pages deploy triggered on `web-companion/**` changes — it never touches `firmware/`. There is no signal on push or PR that the firmware still compiles or that its unit tests still pass. `AGENTS.md` pins the toolchain to ESP-IDF v5.5.3 and documents `idf.py build` (from `firmware/`) and a separate `test_runner` build for tests. This change assumes `fix-test-runner-build` has already landed, so `test_runner` builds and links cleanly for `IDF_TARGET=linux` and its host binary exits non-zero on test failure.
+`.github/workflows/deploy-web-companion.yml` is the only workflow in the repo, and it's a static Pages deploy triggered on `web-companion/**` changes — it never touches `firmware/`. There is no signal on push or PR that the firmware still compiles or that its unit tests still pass. `AGENTS.md` pins the toolchain to ESP-IDF v6.0.2 and documents `idf.py build` (from `firmware/`) and a separate `test_runner` build for tests. This change assumes `fix-test-runner-build` has already landed, so `test_runner` builds and links cleanly for `IDF_TARGET=linux` and its host binary exits non-zero on test failure.
 
 GitHub-hosted runners have no ESP32-C6 hardware attached, so on-device flashing/HIL testing (`tests/hil/`) is out of reach for this workflow regardless of design choices here.
 
@@ -8,7 +8,7 @@ GitHub-hosted runners have no ESP32-C6 hardware attached, so on-device flashing/
 
 **Goals:**
 - Every push/PR touching `firmware/**` gets an automatic compile check against the real target (`esp32c6`) and an automatic host-side unit test run (`linux` target via `test_runner`).
-- Both checks use the pinned ESP-IDF v5.5.3 toolchain `AGENTS.md` already documents, so CI behavior matches what a contributor would see locally.
+- Both checks use the pinned ESP-IDF v6.0.2 toolchain `AGENTS.md` already documents, so CI behavior matches what a contributor would see locally.
 - Failures are visible as a failed GitHub check on the commit/PR, fast enough to be useful in a normal review loop.
 
 **Non-Goals:**
@@ -18,8 +18,8 @@ GitHub-hosted runners have no ESP32-C6 hardware attached, so on-device flashing/
 
 ## Decisions
 
-**Use the official `espressif/idf` Docker image, pinned to `v5.5.3`, for both jobs.**
-This matches `AGENTS.md`'s documented `source /Users/thorstenropertz/.espressif/v5.5.3/esp-idf/export.sh` toolchain exactly, avoids a slow `install.sh` step on every run, and is the standard approach ESP-IDF projects use in CI. Alternative considered: `espressif/esp-idf-ci-action` — adds an abstraction layer over what's fundamentally just "run idf.py build in the right container"; going with the raw Docker image keeps the workflow legible and easy to reproduce locally (`docker run --rm -v $PWD:/project -w /project/firmware espressif/idf:v5.5.3 idf.py build`).
+**Use the official `espressif/idf` Docker image, pinned to `v6.0.2`, for both jobs.**
+This matches `AGENTS.md`'s documented `source /Users/thorstenropertz/.espressif/v6.0.2/esp-idf/export.sh` toolchain exactly, avoids a slow `install.sh` step on every run, and is the standard approach ESP-IDF projects use in CI. Alternative considered: `espressif/esp-idf-ci-action` — adds an abstraction layer over what's fundamentally just "run idf.py build in the right container"; going with the raw Docker image keeps the workflow legible and easy to reproduce locally (`docker run --rm -v $PWD:/project -w /project/firmware espressif/idf:v6.0.2 idf.py build`).
 
 **Two independent jobs, not one.**
 A `build-firmware` job (`idf.py build` for `esp32c6` from `firmware/`) and a `test-firmware` job (`idf.py set-target linux && idf.py build && ./build/sdf_test_runner.elf` — exact binary name confirmed during implementation — from `firmware/test_runner/`) run in parallel. Keeps failures attributable (compile break vs. test regression) and keeps either job's runtime from blocking the other.

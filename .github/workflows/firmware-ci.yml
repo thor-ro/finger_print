@@ -1,0 +1,50 @@
+name: Firmware CI
+
+on:
+  push:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware-ci.yml'
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware-ci.yml'
+
+jobs:
+  build-firmware:
+    name: build-firmware (esp32c6)
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.0.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark repository safe
+        run: git config --global --add safe.directory '*'
+
+      - name: idf.py build
+        working-directory: firmware
+        run: idf.py build
+
+  test-firmware:
+    name: test-firmware (linux target — partial coverage, see AGENTS.md)
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.0.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark repository safe
+        run: git config --global --add safe.directory '*'
+
+      - name: idf.py set-target linux && idf.py build
+        working-directory: firmware/test_runner
+        run: |
+          idf.py set-target linux
+          idf.py build
+
+      - name: Run Unity test suite
+        working-directory: firmware/test_runner
+        run: ./build/sdf_test_runner.elf

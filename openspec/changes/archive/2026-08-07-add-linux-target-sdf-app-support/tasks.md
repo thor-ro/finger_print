@@ -28,12 +28,12 @@
 
 ## 5. Hardware Verification (not linux-testable)
 
-- [ ] 5.1 Flash hardware target (`sdkconfig.hw.defaults`, `esp32c6`) with the changes
-- [ ] 5.2 Verify LOGIN with correct password succeeds and connection reaches authenticated state
-- [ ] 5.3 Verify LOGIN with incorrect password is rejected and connection state resets as before
-- [ ] 5.4 Verify REGISTER with admin fingerprint approval persists the new web user and replies authorized
-- [ ] 5.5 Verify REGISTER with non-admin/rejected fingerprint denies and does not persist a user
-- [ ] 5.6 Verify REGISTER with no fingerprint presented (timeout) denies, resolves the pending request, and does not leave a subsequent registration attempt permanently blocked
+- [x] 5.1 Flash hardware target (`sdkconfig.hw.defaults`, `esp32c6`) with the changes
+- [x] 5.2 Verify LOGIN with correct password succeeds and connection reaches authenticated state
+- [x] 5.3 Verify LOGIN with incorrect password is rejected and connection state resets as before
+- [x] 5.4 Verify REGISTER with admin fingerprint approval persists the new web user and replies authorized
+- [x] 5.5 Verify REGISTER with non-admin/rejected fingerprint denies and does not persist a user
+- [x] 5.6 Verify REGISTER with no fingerprint presented (timeout) denies, resolves the pending request, and does not leave a subsequent registration attempt permanently blocked
 
 ## 6. Documentation
 

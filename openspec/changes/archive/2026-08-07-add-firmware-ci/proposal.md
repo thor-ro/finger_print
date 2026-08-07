@@ -5,7 +5,7 @@
 ## What Changes
 
 - Add `.github/workflows/firmware-ci.yml`, triggered on push/PR touching `firmware/**` (mirroring the path-scoping pattern already used by `deploy-web-companion.yml`).
-- **Build job**: compiles the main firmware for `esp32c6` (`idf.py build` from `firmware/`) using a pinned ESP-IDF v5.5.3 Docker image (`espressif/idf:v5.5.3`), matching `AGENTS.md`'s documented toolchain version. Fails the check on any compile error.
+- **Build job**: compiles the main firmware for `esp32c6` (`idf.py build` from `firmware/`) using a pinned ESP-IDF v6.0.2 Docker image (`espressif/idf:v6.0.2`), matching `AGENTS.md`'s documented toolchain version. Fails the check on any compile error.
 - **Unit test job**: builds `firmware/test_runner` for `IDF_TARGET=linux` and executes the resulting host binary, treating any Unity test failure (or non-zero exit) as a CI failure.
 - Both jobs run in parallel, gate PRs to `main` (branch protection / required status checks configured separately, outside this change's scope), and complete in CI-reasonable time (no hardware flashing, no self-hosted runner).
 - Update `AGENTS.md` Gotchas to remove "No CI workflows exist yet" once the workflow lands.

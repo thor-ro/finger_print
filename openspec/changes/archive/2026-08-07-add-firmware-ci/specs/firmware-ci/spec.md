@@ -12,11 +12,11 @@ The firmware CI workflow SHALL run on `push` and `pull_request` events that touc
 - **THEN** the firmware CI workflow does not run
 
 ### Requirement: Pinned Toolchain
-The firmware CI workflow SHALL build using ESP-IDF v5.5.3, matching the version documented in `AGENTS.md`.
+The firmware CI workflow SHALL build using ESP-IDF v6.0.2, matching the version documented in `AGENTS.md`.
 
 #### Scenario: Build environment version
 - **WHEN** any CI job in the workflow runs `idf.py`
-- **THEN** it runs inside an environment providing ESP-IDF v5.5.3
+- **THEN** it runs inside an environment providing ESP-IDF v6.0.2
 
 ### Requirement: Firmware Build Check
 The workflow SHALL build the main firmware for the `esp32c6` target and fail the check on any compile error.

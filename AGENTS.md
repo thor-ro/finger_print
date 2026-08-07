@@ -121,7 +121,7 @@ When making architectural changes, you **must** update the corresponding documen
 ## Gotchas
 - Fingerprint sensor `Control LED (0x3C)` payload bytes are module-variant specific; defaults in `sdf_services.c` may need tuning on real hardware.
 - Match task uses suspend flag + extended polling (10s) when idle instead of WDT delete/recreate + semaphore-block for deep sleep transitions. This keeps the WDT active and reduces context-switch overhead.
-- No CI workflows exist yet, but most unit tests now run host-side (`IDF_TARGET=linux`, see Testing above) — hardware is only needed for `sdf_app`/lock-flow suites.
+- `.github/workflows/firmware-ci.yml` gates `firmware/**` pushes/PRs with two jobs: `build-firmware` (`idf.py build` for `esp32c6`) and `test-firmware` (host-side Unity via `test_runner`'s `linux` target). The unit test job only covers what `test_runner` links on `linux` — `sdf_app`/lock-flow suites stay hardware-only (see Testing above), so a green `test-firmware` check is not full regression coverage.
 - `scripts/` and `tools/` directories are currently empty.
 
 ## Instructions
