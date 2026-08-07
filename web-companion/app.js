@@ -154,6 +154,7 @@ function handleAuthNotification(event) {
         setTimeout(() => {
             switchView('dashboard-view');
             document.getElementById('status-cards').style.display = 'flex';
+            resumeOtaTransferIfPending();
         }, 500);
     } else if (status === 0x02) {
         authStatus.textContent = 'Pending admin authorization on device...';
@@ -337,69 +338,278 @@ function handleEnrollNotification(event) {
     }
 }
 
-// OTA
+// OTA (BLE chunked firmware transfer: BEGIN 0x01 / CHUNK 0x02 / END 0x03)
 const otaStatus = document.getElementById('ota-status');
+const otaProgress = document.getElementById('ota-progress');
+const otaFileInput = document.getElementById('firmware-file');
 
-document.getElementById('ota-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    
-    const ssid = document.getElementById('wifi-ssid').value;
-    const password = document.getElementById('wifi-password').value;
-    const firmwareUrl = document.getElementById('firmware-url').value;
-    
-    if (!firmwareUrl.startsWith('https://')) {
-        otaStatus.textContent = 'Error: Firmware URL must use HTTPS.';
-        return;
-    }
-    
-    try {
-        otaStatus.textContent = 'Requesting OTA...';
-        document.getElementById('ota-progress').style.display = 'block';
-        document.getElementById('ota-progress').value = 0;
-        
-        const payloadObj = { ssid, password, firmwareUrl };
-        const jsonStr = JSON.stringify(payloadObj);
-        const payload = new TextEncoder().encode(jsonStr);
-        
-        await otaChar.writeValue(payload);
-        
-        otaStatus.textContent = 'OTA triggered successfully. Waiting for progress...';
-    } catch (err) {
-        otaStatus.textContent = `Error: ${err.message}`;
-        document.getElementById('ota-progress').style.display = 'none';
-    }
-});
+const SDF_OTA_OPCODE_BEGIN = 0x01;
+const SDF_OTA_OPCODE_CHUNK = 0x02;
+const SDF_OTA_OPCODE_END = 0x03;
+
+// Web Bluetooth does not expose the connection's negotiated ATT MTU, so the
+// app uses a conservative fixed chunk payload size safely below the
+// smallest commonly-negotiated MTU (~185 bytes), halving it on an
+// over-MTU write rejection down to OTA_MIN_CHUNK_SIZE.
+const OTA_INITIAL_CHUNK_SIZE = 180;
+const OTA_MIN_CHUNK_SIZE = 20;
+
+// How long to wait for a `ready` / `chunk_ack` notification after a write.
+const OTA_RESPONSE_TIMEOUT_MS = 10000;
+// Grace period after END during which a `failed` notify or a disconnect
+// (the expected successful-commit path) is awaited before the outcome is
+// declared ambiguous.
+const OTA_COMPLETION_GRACE_MS = 5000;
+
+let otaChunkSize = OTA_INITIAL_CHUNK_SIZE;
+let otaPendingNotification = null; // { resolve, reject } for the next OTA notify
+let otaResumeState = null; // { file, imageSize } while a transfer is open device-side
+
+function waitForOtaNotification(timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            otaPendingNotification = null;
+            reject(new Error('Timed out waiting for device response.'));
+        }, timeoutMs);
+
+        otaPendingNotification = {
+            resolve(data) {
+                clearTimeout(timer);
+                otaPendingNotification = null;
+                resolve(data);
+            },
+            reject(err) {
+                clearTimeout(timer);
+                otaPendingNotification = null;
+                reject(err);
+            }
+        };
+    });
+}
 
 function handleOtaNotification(event) {
     const value = new Uint8Array(event.target.value.buffer);
     const decoder = new TextDecoder();
     const jsonStr = decoder.decode(value);
-    
+
+    let data;
     try {
-        const data = JSON.parse(jsonStr);
-        const progressEl = document.getElementById('ota-progress');
-        
-        if (data.status === 'wifi_connecting') {
-            otaStatus.textContent = 'Connecting to Wi-Fi...';
-            progressEl.value = 0;
-        } else if (data.status === 'wifi_connected') {
-            otaStatus.textContent = 'Wi-Fi connected. Starting download...';
-            progressEl.value = 5;
-        } else if (data.status === 'downloading') {
-            const progress = data.progress || 0;
-            otaStatus.textContent = `Downloading... ${progress}%`;
-            progressEl.value = 5 + Math.round(progress * 0.8);
-        } else if (data.status === 'verifying') {
-            otaStatus.textContent = 'Verifying firmware...';
-            progressEl.value = 90;
-        } else if (data.status === 'success') {
-            otaStatus.textContent = 'OTA update successful! Device will reboot.';
-            progressEl.value = 100;
-        } else if (data.status === 'failed') {
-            otaStatus.textContent = `OTA failed: ${data.error || 'unknown error'}`;
-            progressEl.style.display = 'none';
-        }
+        data = JSON.parse(jsonStr);
     } catch (e) {
         console.warn('OTA notification not valid JSON:', jsonStr);
+        return;
+    }
+
+    if (otaPendingNotification) {
+        otaPendingNotification.resolve(data);
+    } else {
+        console.warn('Unsolicited OTA notification:', data);
     }
 }
+
+// Writes an OTA opcode and resolves with the next OTA notification. Guards
+// against the write itself being rejected at the GATT layer -- malformed,
+// oversized, or out-of-session writes never produce a notify at all (per
+// sdf_ble_companion_ota.c), so a rejected writeValue() must reject the
+// pending notification wait rather than leave it hanging.
+async function writeOtaOpcodeAndAwaitNotification(payload, timeoutMs) {
+    const notificationPromise = waitForOtaNotification(timeoutMs);
+    try {
+        await otaChar.writeValue(payload);
+    } catch (err) {
+        if (otaPendingNotification) {
+            otaPendingNotification.reject(err);
+        }
+        throw err;
+    }
+    return notificationPromise;
+}
+
+function isBluetoothConnected() {
+    return !!(bluetoothDevice && bluetoothDevice.gatt && bluetoothDevice.gatt.connected && otaChar);
+}
+
+async function beginOtaTransfer(imageSize) {
+    const payload = new Uint8Array(5);
+    payload[0] = SDF_OTA_OPCODE_BEGIN;
+    new DataView(payload.buffer).setUint32(1, imageSize, true); // little-endian
+
+    const data = await writeOtaOpcodeAndAwaitNotification(payload, OTA_RESPONSE_TIMEOUT_MS);
+    if (data.status !== 'ready' || typeof data.offset !== 'number') {
+        throw new Error(`Unexpected response to OTA begin: ${JSON.stringify(data)}`);
+    }
+    return data.offset;
+}
+
+async function sendOtaChunks(file, imageSize, startOffset) {
+    let offset = startOffset;
+
+    while (offset < imageSize) {
+        const end = Math.min(offset + otaChunkSize, imageSize);
+        const chunkBytes = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+        const payload = new Uint8Array(1 + chunkBytes.length);
+        payload[0] = SDF_OTA_OPCODE_CHUNK;
+        payload.set(chunkBytes, 1);
+
+        let ack;
+        try {
+            ack = await writeOtaOpcodeAndAwaitNotification(payload, OTA_RESPONSE_TIMEOUT_MS);
+        } catch (err) {
+            if (isBluetoothConnected() && otaChunkSize > OTA_MIN_CHUNK_SIZE) {
+                // Rejected as over-MTU: halve the chunk size and retry from
+                // the same (last confirmed) offset -- do not advance offset.
+                otaChunkSize = Math.max(OTA_MIN_CHUNK_SIZE, Math.floor(otaChunkSize / 2));
+                console.warn(`OTA chunk write rejected; retrying with a smaller chunk size (${otaChunkSize} bytes).`, err);
+                continue;
+            }
+            throw err;
+        }
+
+        if (ack.status === 'failed') {
+            throw new Error(ack.error || 'Device reported an OTA chunk write failure.');
+        }
+        if (ack.status !== 'chunk_ack' || typeof ack.offset !== 'number') {
+            throw new Error(`Unexpected response to OTA chunk write: ${JSON.stringify(ack)}`);
+        }
+
+        offset = ack.offset;
+        const percent = Math.round((offset / imageSize) * 100);
+        otaProgress.value = percent;
+        otaStatus.textContent = `Uploading firmware... ${percent}%`;
+    }
+}
+
+// After END, races a `failed` notify against a disconnect within a bounded
+// grace window. The device's successful-commit path reboots immediately
+// after committing (sdf_ota_verify_and_commit() never returns), so it never
+// gets to send a `success` notify -- a clean disconnect with no `failed`
+// notify in the window IS the expected success signal, not an error. See
+// sdf_ble_companion_ota.c's sdf_ble_ota_handle_end.
+function endOtaTransferAndAwaitOutcome() {
+    const deviceRef = bluetoothDevice;
+    const payload = new Uint8Array([SDF_OTA_OPCODE_END]);
+
+    otaStatus.textContent = 'Verifying and installing — the device will restart...';
+
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        let graceTimer = null;
+
+        function onOtaDisconnect() {
+            const connStatus = document.getElementById('connection-status');
+            if (connStatus) {
+                connStatus.textContent = 'Device disconnected after OTA end-transfer — this is expected on success. Reconnect to confirm the new firmware version.';
+            }
+            finish(resolve, { outcome: 'presumed-success' });
+        }
+
+        function finish(fn, arg) {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            clearTimeout(graceTimer);
+            if (deviceRef) {
+                deviceRef.removeEventListener('gattserverdisconnected', onOtaDisconnect);
+            }
+            otaPendingNotification = null;
+            fn(arg);
+        }
+
+        otaPendingNotification = {
+            resolve(data) {
+                if (data.status === 'failed') {
+                    finish(resolve, { outcome: 'failed', error: data.error });
+                } else {
+                    // Unreachable in practice -- the device reboots before a
+                    // `success` notify can be sent -- but honor it if seen.
+                    finish(resolve, { outcome: 'success' });
+                }
+            },
+            reject() {
+                /* no-op: the writeValue().catch() below handles write errors */
+            }
+        };
+
+        if (deviceRef) {
+            deviceRef.addEventListener('gattserverdisconnected', onOtaDisconnect);
+        }
+
+        graceTimer = setTimeout(() => {
+            finish(resolve, { outcome: 'ambiguous' });
+        }, OTA_COMPLETION_GRACE_MS);
+
+        otaChar.writeValue(payload).catch((err) => finish(reject, err));
+    });
+}
+
+async function performOtaTransfer(file, imageSize) {
+    otaResumeState = { file, imageSize };
+    otaChunkSize = OTA_INITIAL_CHUNK_SIZE;
+
+    try {
+        otaStatus.textContent = 'Starting OTA transfer...';
+        otaProgress.style.display = 'block';
+        otaProgress.value = 0;
+
+        const startOffset = await beginOtaTransfer(imageSize);
+        await sendOtaChunks(file, imageSize, startOffset);
+        const result = await endOtaTransferAndAwaitOutcome();
+        otaResumeState = null;
+
+        if (result.outcome === 'failed') {
+            otaStatus.textContent = `OTA failed: ${result.error || 'unknown error'}`;
+            otaProgress.style.display = 'none';
+        } else if (result.outcome === 'ambiguous') {
+            otaStatus.textContent = 'OTA outcome unknown — no confirmation received before the timeout. Check the device.';
+        } else {
+            // 'success' or 'presumed-success'
+            otaProgress.value = 100;
+            otaStatus.textContent = 'OTA transfer complete. Reconnect once the device restarts to confirm the new firmware version.';
+        }
+    } catch (err) {
+        if (isBluetoothConnected()) {
+            // A real, non-disconnect failure: no point auto-resuming.
+            otaResumeState = null;
+            otaStatus.textContent = `Error: ${err.message}`;
+            otaProgress.style.display = 'none';
+        } else {
+            // Connection lost mid-transfer: keep resume state so the
+            // transfer continues once the user reconnects and re-authenticates.
+            otaStatus.textContent = 'Connection lost during firmware transfer. Reconnect and log in again to resume.';
+        }
+    }
+}
+
+async function resumeOtaTransferIfPending() {
+    if (!otaResumeState) {
+        return;
+    }
+    const { file, imageSize } = otaResumeState;
+    otaStatus.textContent = 'Resuming firmware transfer...';
+    await performOtaTransfer(file, imageSize);
+}
+
+document.getElementById('ota-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    if (otaResumeState) {
+        otaStatus.textContent = 'A firmware transfer is already in progress.';
+        return;
+    }
+
+    const file = otaFileInput.files[0];
+    if (!file) {
+        otaStatus.textContent = 'Select a firmware (.bin) file first.';
+        return;
+    }
+
+    const confirmed = window.confirm(
+        'Ensure your battery is above 20%. OTA transfer over Bluetooth draws significant power and firmware is large — keep the app open and the device nearby until it completes.\n\nStart the firmware update now?'
+    );
+    if (!confirmed) {
+        return;
+    }
+
+    await performOtaTransfer(file, file.size);
+});

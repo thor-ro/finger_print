@@ -101,20 +101,12 @@
                 <div class="dashboard-section">
                     <h3>Firmware Update (OTA)</h3>
                     <div class="alert warning">
-                        <strong>Warning:</strong> Ensure your battery is above 20%. OTA uses Wi-Fi and draws significant power.
+                        <strong>Warning:</strong> Ensure your battery is above 20%. OTA transfer over Bluetooth draws significant power and firmware is large — keep the app open and the device nearby until it completes.
                     </div>
                     <form id="ota-form">
                         <div class="input-group">
-                            <label for="wifi-ssid">Wi-Fi SSID</label>
-                            <input type="text" id="wifi-ssid" required placeholder="MyNetwork">
-                        </div>
-                        <div class="input-group">
-                            <label for="wifi-password">Wi-Fi Password</label>
-                            <input type="password" id="wifi-password" required placeholder="••••••••">
-                        </div>
-                        <div class="input-group">
-                            <label for="firmware-url">Firmware HTTPS URL</label>
-                            <input type="url" id="firmware-url" required pattern="https://.*" placeholder="https://example.com/firmware.bin">
+                            <label for="firmware-file">Firmware Image (.bin)</label>
+                            <input type="file" id="firmware-file" accept=".bin" required>
                         </div>
                         <button type="submit" id="btn-ota" class="primary-btn danger-btn">Start OTA Update</button>
                     </form>
