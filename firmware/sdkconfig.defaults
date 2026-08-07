@@ -18,6 +18,12 @@ CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
 # re-pair after every reboot (the encrypted GATT characteristics in
 # sdf_ble_companion require an established bond).
 CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# sdf_ble_companion registers 4 NOTIFY-capable characteristics (auth,
+# config, enroll, ota) and CONFIG_BT_NIMBLE_MAX_BONDS allows up to 3
+# bonded peers, so worst-case persisted-CCCD (notification subscription)
+# demand is 4 x 3 = 12. Raise the default (8) to 16 to cover that with
+# headroom for one additional NOTIFY characteristic.
+CONFIG_BT_NIMBLE_MAX_CCCDS=16
 
 # Zigbee (option names may vary by ESP-IDF/esp-zigbee version).
 CONFIG_ZB_ENABLED=y
