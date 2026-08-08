@@ -1,6 +1,7 @@
 #include "unity.h"
 
 #include "sdf_config.h"
+#include "sdf_protocol_zigbee.h"
 
 // -----------------------------------------------------------------------------
 // Test Setup & Teardown
@@ -94,6 +95,39 @@ void test_sdf_config_set_battery_default_percent_bounds(void) {
   // Just outside the max - rejected, prior value untouched
   TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_config_set_battery_default_percent(101));
   TEST_ASSERT_EQUAL(100u, sdf_config_get()->battery_default_percent);
+
+  reset_config_to_defaults();
+}
+
+void test_sdf_config_wdt_timeout_ms_populated_after_init(void) {
+  /* test_runner's app_main() calls sdf_config_init() once before any
+   * RUN_TEST(), so sdf_config_get() already reflects Kconfig-derived
+   * defaults here. Assert wdt_timeout_ms was populated from
+   * CONFIG_SDF_PLATFORM_WDT_TIMEOUT_MS (not left zero-initialized) and
+   * falls within the range sdf_config_validate() enforces (5000-60000ms). */
+  uint32_t wdt_timeout_ms = sdf_config_get()->wdt_timeout_ms;
+  TEST_ASSERT_GREATER_OR_EQUAL_UINT32(5000, wdt_timeout_ms);
+  TEST_ASSERT_LESS_OR_EQUAL_UINT32(60000, wdt_timeout_ms);
+}
+
+void test_sdf_config_deep_sleep_fallback_follows_kconfig(void) {
+  /* enable_deep_sleep_fallback is the sole deep-sleep gate in
+   * sdf_power_policy and is now sourced from
+   * CONFIG_SDF_POWER_ENABLE_DEEP_SLEEP rather than a hardcoded true.
+   * The test_runner build leaves that symbol at its default (y). */
+  TEST_ASSERT_TRUE(sdf_config_get()->enable_deep_sleep_fallback);
+}
+
+void test_sdf_config_zigbee_enabled_drives_protocol_is_enabled(void) {
+  /* sdf_protocol_zigbee_is_enabled() reads the config field rather than a
+   * compile-time macro, which is what makes sdf_config_set_zigbee_enabled()
+   * a working runtime kill switch. Both directions are asserted so a
+   * reversion to a constant fails here regardless of which constant. */
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_config_set_zigbee_enabled(true));
+  TEST_ASSERT_TRUE(sdf_protocol_zigbee_is_enabled());
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_config_set_zigbee_enabled(false));
+  TEST_ASSERT_FALSE(sdf_protocol_zigbee_is_enabled());
 
   reset_config_to_defaults();
 }

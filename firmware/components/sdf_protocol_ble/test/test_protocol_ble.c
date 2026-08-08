@@ -3,6 +3,7 @@
  * @brief Unit tests for sdf_protocol_ble client and message parsing.
  */
 #include "sdf_protocol_ble.h"
+#include "sdf_config.h"
 #include "unity.h"
 #include <string.h>
 
@@ -420,6 +421,169 @@ void test_nonce_replay_detection(void) {
   /* Second feed with same data: should detect nonce replay */
   res = sdf_nuki_client_feed_encrypted(&receiver, saved_data, saved_len);
   TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_ERR_NONCE_REUSE, res);
+}
+
+/* ---------- nonce_replay_window (runtime config) ---------- */
+
+/* Sends `count` distinct encrypted STATUS messages from `sender` and stores
+ * the wire bytes of each in out_data/out_len, indexed 0..count-1 in send
+ * order. Each send uses a fresh nonce (sdf_nuki_next_nonce() increments the
+ * client's tx counter per call), so the messages are distinct even though
+ * their plaintext payload is identical. */
+static void send_n_distinct_messages(sdf_nuki_client_t *sender,
+                                     uint32_t auth_id,
+                                     const uint8_t shared_key[32],
+                                     uint8_t out_data[][2048],
+                                     size_t *out_len, int count) {
+  for (int i = 0; i < count; ++i) {
+    reset_mocks();
+    int res = sdf_nuki_client_send_encrypted_custom(
+        sender, auth_id, shared_key, SDF_NUKI_CMD_STATUS,
+        (const uint8_t *)"\x01", 1);
+    TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_OK, res);
+    out_len[i] = s_sent_len;
+    memcpy(out_data[i], s_sent_data, s_sent_len);
+  }
+}
+
+void test_nonce_replay_window_honors_configured_value(void) {
+  sdf_config_t *cfg = sdf_config_get_mutable();
+  TEST_ASSERT_NOT_NULL(cfg);
+  uint8_t saved_window = cfg->nonce_replay_window;
+  cfg->nonce_replay_window = 3;
+
+  sdf_nuki_client_t sender, receiver;
+  uint32_t auth_id = 7001;
+  uint8_t shared_key[32];
+  memset(shared_key, 0x11, sizeof(shared_key));
+
+  sdf_nuki_credentials_t creds;
+  memset(&creds, 0, sizeof(creds));
+  creds.authorization_id = auth_id;
+  memcpy(creds.shared_key, shared_key, 32);
+
+  sdf_nuki_client_init(&sender, &creds, mock_send_encrypted, NULL,
+                       mock_send_unencrypted, NULL, NULL, NULL);
+  sdf_nuki_client_init(&receiver, &creds, mock_send_encrypted, NULL,
+                       mock_send_unencrypted, NULL, mock_message_cb, NULL);
+
+  uint8_t data[5][2048];
+  size_t len[5];
+  send_n_distinct_messages(&sender, auth_id, shared_key, data, len, 5);
+
+  for (int i = 0; i < 5; ++i) {
+    int res = sdf_nuki_client_feed_encrypted(&receiver, data[i], len[i]);
+    TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_OK, res);
+  }
+
+  /* Window of 3: exactly the 3 most recently accepted nonces are retained. */
+  TEST_ASSERT_EQUAL_UINT8(3, receiver.rx_nonce_cache_count);
+
+  /* Message 0's nonce fell out of the window - no longer matched, so
+   * feeding it again decrypts successfully rather than being rejected. */
+  int res = sdf_nuki_client_feed_encrypted(&receiver, data[0], len[0]);
+  TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_OK, res);
+
+  /* Message 4's nonce is still inside the window - replaying it is
+   * rejected. */
+  res = sdf_nuki_client_feed_encrypted(&receiver, data[4], len[4]);
+  TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_ERR_NONCE_REUSE, res);
+
+  cfg->nonce_replay_window = saved_window;
+}
+
+void test_nonce_replay_window_oversized_clamps_without_oob(void) {
+  sdf_config_t *cfg = sdf_config_get_mutable();
+  TEST_ASSERT_NOT_NULL(cfg);
+  uint8_t saved_window = cfg->nonce_replay_window;
+  /* Larger than SDF_NUKI_NONCE_CACHE_MAX (16); rx_nonce_cache is statically
+   * sized at 16 entries, so this must clamp rather than index out of
+   * bounds. */
+  cfg->nonce_replay_window = 200;
+
+  sdf_nuki_client_t sender, receiver;
+  uint32_t auth_id = 7002;
+  uint8_t shared_key[32];
+  memset(shared_key, 0x22, sizeof(shared_key));
+
+  sdf_nuki_credentials_t creds;
+  memset(&creds, 0, sizeof(creds));
+  creds.authorization_id = auth_id;
+  memcpy(creds.shared_key, shared_key, 32);
+
+  sdf_nuki_client_init(&sender, &creds, mock_send_encrypted, NULL,
+                       mock_send_unencrypted, NULL, NULL, NULL);
+  sdf_nuki_client_init(&receiver, &creds, mock_send_encrypted, NULL,
+                       mock_send_unencrypted, NULL, mock_message_cb, NULL);
+
+  enum { SEND_COUNT = SDF_NUKI_NONCE_CACHE_MAX + 5 };
+  uint8_t data[SEND_COUNT][2048];
+  size_t len[SEND_COUNT];
+  send_n_distinct_messages(&sender, auth_id, shared_key, data, len,
+                           SEND_COUNT);
+
+  for (int i = 0; i < SEND_COUNT; ++i) {
+    /* No crash / out-of-bounds access is the primary assertion here. */
+    int res = sdf_nuki_client_feed_encrypted(&receiver, data[i], len[i]);
+    TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_OK, res);
+  }
+
+  /* The effective window clamped to SDF_NUKI_NONCE_CACHE_MAX, not the
+   * configured 200. */
+  TEST_ASSERT_EQUAL_UINT8(SDF_NUKI_NONCE_CACHE_MAX,
+                          receiver.rx_nonce_cache_count);
+
+  /* The oldest message (evicted once more than CACHE_MAX were accepted) is
+   * no longer matched. */
+  int res = sdf_nuki_client_feed_encrypted(&receiver, data[0], len[0]);
+  TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_OK, res);
+
+  /* The most recent message is still within the clamped window. */
+  res = sdf_nuki_client_feed_encrypted(&receiver, data[SEND_COUNT - 1],
+                                       len[SEND_COUNT - 1]);
+  TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_ERR_NONCE_REUSE, res);
+
+  cfg->nonce_replay_window = saved_window;
+}
+
+void test_nonce_replay_window_zero_disables_tracking_without_fault(void) {
+  sdf_config_t *cfg = sdf_config_get_mutable();
+  TEST_ASSERT_NOT_NULL(cfg);
+  uint8_t saved_window = cfg->nonce_replay_window;
+  cfg->nonce_replay_window = 0;
+
+  sdf_nuki_client_t sender, receiver;
+  uint32_t auth_id = 7003;
+  uint8_t shared_key[32];
+  memset(shared_key, 0x33, sizeof(shared_key));
+
+  sdf_nuki_credentials_t creds;
+  memset(&creds, 0, sizeof(creds));
+  creds.authorization_id = auth_id;
+  memcpy(creds.shared_key, shared_key, 32);
+
+  sdf_nuki_client_init(&sender, &creds, mock_send_encrypted, NULL,
+                       mock_send_unencrypted, NULL, NULL, NULL);
+  sdf_nuki_client_init(&receiver, &creds, mock_send_encrypted, NULL,
+                       mock_send_unencrypted, NULL, mock_message_cb, NULL);
+
+  uint8_t data[1][2048];
+  size_t len[1];
+  send_n_distinct_messages(&sender, auth_id, shared_key, data, len, 1);
+
+  /* First feed decrypts fine (no memory-safety fault from a `% 0`) but
+   * records nothing, since a zero window disables replay tracking. */
+  int res = sdf_nuki_client_feed_encrypted(&receiver, data[0], len[0]);
+  TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_OK, res);
+  TEST_ASSERT_EQUAL_UINT8(0, receiver.rx_nonce_cache_count);
+
+  /* Nothing was recorded, so replaying the exact same message is not
+   * detected as a replay either. */
+  res = sdf_nuki_client_feed_encrypted(&receiver, data[0], len[0]);
+  TEST_ASSERT_EQUAL(SDF_NUKI_RESULT_OK, res);
+  TEST_ASSERT_EQUAL_UINT8(0, receiver.rx_nonce_cache_count);
+
+  cfg->nonce_replay_window = saved_window;
 }
 
 void test_feed_encrypted_partial_data(void) {

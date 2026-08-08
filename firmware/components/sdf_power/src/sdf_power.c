@@ -154,11 +154,18 @@ static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *c
     return ESP_OK;
   }
 
+  /* Light sleep is the primary sleep path (deep sleep is the fallback), so it
+   * must track adaptive_checkin like the deep-sleep/retention/Zigbee sites do -
+   * otherwise normal check-ins would ignore battery level while only the
+   * fallback path scaled. Read once so the emitted event and the armed timer
+   * cannot disagree. */
+  uint32_t checkin_interval_ms = sdf_power_calculate_checkin_interval();
+
   sdf_event_router_event_t sleep_evt = {
       .type = SDF_EVENT_ROUTER_POWER_SLEEP,
       .priority = SDF_EVENT_ROUTER_PRIO_LOW,
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-      .payload.power.remaining_ms = config->checkin_interval_ms,
+      .payload.power.remaining_ms = checkin_interval_ms,
   };
   sdf_event_router_emit(&sleep_evt);
 
@@ -166,7 +173,7 @@ static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *c
   /* sdf_platform_sleep_enable_timer_wakeup() takes milliseconds and does its
    * own ms->us conversion internally - passing pre-multiplied microseconds
    * here made every light-sleep check-in ~1000x longer than configured. */
-  sdf_platform_sleep_enable_timer_wakeup(config->checkin_interval_ms);
+  sdf_platform_sleep_enable_timer_wakeup(checkin_interval_ms);
 
   if (sdf_power_gpio_valid(config->fingerprint_wake_gpio)) {
     esp_err_t wake_err =
@@ -314,13 +321,13 @@ static void sdf_power_task(void *arg) {
         sdf_platform_sleep_enable_gpio_wakeup_deep(config_snapshot.fingerprint_wake_gpio, 1);
       }
       if (enabled_sources_snapshot & SDF_WAKE_SRC_TIMER) {
-        sdf_platform_sleep_enable_timer_wakeup(config_snapshot.checkin_interval_ms);
+        sdf_platform_sleep_enable_timer_wakeup(sdf_power_calculate_checkin_interval());
       }
 
       sdf_power_retention_t retention = {0};
       retention.last_activity_us = esp_timer_get_time();
       retention.next_checkin_us = retention.last_activity_us +
-          ((int64_t)config_snapshot.checkin_interval_ms * 1000LL);
+          ((int64_t)sdf_power_calculate_checkin_interval() * 1000LL);
       sdf_power_save_retention(&retention);
 
       sdf_platform_power_enter_deep();
@@ -422,7 +429,7 @@ sdf_power_init_power_manager(const sdf_power_manager_config_t *config) {
   xSemaphoreGive(s_state.lock);
 
   esp_err_t zigbee_cfg_err =
-      sdf_protocol_zigbee_set_checkin_interval_ms(config->checkin_interval_ms);
+      sdf_protocol_zigbee_set_checkin_interval_ms(sdf_power_calculate_checkin_interval());
   if (zigbee_cfg_err != ESP_OK && zigbee_cfg_err != ESP_ERR_INVALID_STATE) {
     return zigbee_cfg_err;
   }
@@ -648,7 +655,7 @@ esp_err_t sdf_power_prepare_deep_sleep(sdf_power_retention_t *state) {
   // Populate retention state
   state->magic = 0x5FDEC3A1;
   state->last_activity_us = s_state.last_activity_us;
-  state->next_checkin_us = esp_timer_get_time() + ((int64_t)s_state.config.checkin_interval_ms * 1000LL);
+  state->next_checkin_us = esp_timer_get_time() + ((int64_t)sdf_power_calculate_checkin_interval() * 1000LL);
   state->ble_transport_state = (s_state.config.ble_transport != NULL && sdf_nuki_ble_is_enabled(s_state.config.ble_transport)) ? 1 : 0;
   state->zigbee_join_state = sdf_protocol_zigbee_is_ready() ? 1 : 0;
   state->sensor_power_state = 0;
@@ -689,11 +696,35 @@ esp_err_t sdf_power_resume_from_deep_sleep(sdf_wake_source_t *src) {
 }
 
 uint32_t sdf_power_calculate_checkin_interval(void) {
-  uint8_t battery = sdf_power_get_battery_percent();
   uint32_t base = s_state.config.checkin_interval_ms;
+
+  if (!sdf_config_get()->adaptive_checkin) {
+    return base;
+  }
+
+  uint8_t battery = sdf_power_get_battery_percent();
 
   if (battery < 20) return base * 4;      // 60s - critical
   if (battery < 40) return base * 2;      // 30s - low
   if (battery < 60) return (base * 3) / 2; // 22s - medium
   return base;                             // 15s - normal
 }
+
+#ifdef SDF_POWER_TESTING
+/* Test-only accessor: sets the internal base check-in interval consulted by
+ * sdf_power_calculate_checkin_interval(), without requiring a full
+ * sdf_power_init_power_manager() call (which creates a FreeRTOS task and
+ * other runtime state not appropriate to start inside a unit test). */
+void test_sdf_power_set_base_checkin_interval_ms(uint32_t interval_ms) {
+  s_state.config.checkin_interval_ms = interval_ms;
+}
+
+/* Test-only accessor: sets s_state.battery_percent directly.
+ * sdf_power_set_battery_percent() only writes this field when s_state.lock
+ * has been created (i.e. after sdf_power_init_power_manager() has run), so
+ * it is a no-op for internal state in a unit test that never starts the
+ * full power manager. */
+void test_sdf_power_set_battery_percent_raw(uint8_t battery_percent) {
+  s_state.battery_percent = battery_percent;
+}
+#endif

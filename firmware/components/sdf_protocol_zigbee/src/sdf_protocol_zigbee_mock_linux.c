@@ -6,18 +6,15 @@
 
 #ifdef CONFIG_IDF_TARGET_LINUX
 
+#include "sdf_config.h"
 #include "sdf_protocol_zigbee.h"
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(CONFIG_SDF_ZIGBEE_ENABLE)
-#define SDF_ZIGBEE_ENABLED 1
-#else
-#define SDF_ZIGBEE_ENABLED 0
-#endif
-
+/* Mirrors the target implementation so the enable semantics are identical on
+ * both targets and the host suite can exercise the runtime kill switch. */
 bool sdf_protocol_zigbee_is_enabled(void) {
-  return SDF_ZIGBEE_ENABLED != 0;
+  return sdf_config_get()->zigbee_enabled;
 }
 
 esp_err_t sdf_protocol_zigbee_init(void) {

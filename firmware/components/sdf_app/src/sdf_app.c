@@ -43,8 +43,6 @@
 #define SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT 0x0004u
 #define SDF_APP_ZB_ALARM_SECURITY_PROTOCOL 0x0008u
 
-#define SDF_APP_TWDT_TIMEOUT_MS 15000u
-
 static const char *TAG = "sdf_app";
 
 static sdf_nuki_ble_transport_t s_ble;
@@ -1497,7 +1495,7 @@ esp_err_t sdf_app_init(void) {
 
 #ifndef CONFIG_IDF_TARGET_LINUX
   esp_task_wdt_config_t twdt_config = {
-      .timeout_ms = SDF_APP_TWDT_TIMEOUT_MS,
+      .timeout_ms = sdf_config_get()->wdt_timeout_ms,
       .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
       .trigger_panic = true,
   };

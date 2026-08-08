@@ -70,11 +70,13 @@ Implement tasks from an OpenSpec change.
 
 6. **Implement tasks (loop until done or blocked)**
 
+   First, copy the pending tasks from the change's tasks file into your Task Artifact (`<appDataDir>/brain/<conversation-id>/task.md`). Use this artifact to track your progress during the session.
+
    For each pending task:
    - Show which task is being worked on
    - Make the code changes required
    - Keep changes minimal and focused
-   - Mark task complete in the tasks file: `- [ ]` → `- [x]`
+   - Mark task complete in the Task Artifact: `[/]` → `[x]`
    - Continue to next task
 
    **Pause if:**
@@ -83,7 +85,9 @@ Implement tasks from an OpenSpec change.
    - Error or blocker encountered → report and wait for guidance
    - User interrupts
 
-7. **On completion or pause, show status**
+7. **On completion or pause, show status and sync tasks**
+
+   **CRITICAL**: Write the final task states back to the change's actual tasks file in the workspace (e.g., `tasks.md`). Do not update the workspace tasks file during the loop to save token usage; only do it here at the end.
 
    Display:
    - Tasks completed this session
@@ -148,7 +152,7 @@ What would you like to do?
 - If task is ambiguous, pause and ask before implementing
 - If implementation reveals issues, pause and suggest artifact updates
 - Keep code changes minimal and scoped to each task
-- Update task checkbox immediately after completing each task
+- Track task progress in the Task Artifact during the loop. Update the change's workspace tasks file only once at the end of the apply session.
 - Pause on errors, blockers, or unclear requirements - don't guess
 - Use contextFiles from CLI output, don't assume specific file names
 

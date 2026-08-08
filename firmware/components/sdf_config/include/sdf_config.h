@@ -23,7 +23,6 @@ typedef struct {
     int fp_uart_port;
     int fp_tx_pin;
     int fp_rx_pin;
-    int fp_power_en_pin;
     uint32_t fp_baud_rate;
     uint32_t fp_response_timeout_ms;
     uint16_t fp_rx_buffer_size;
@@ -55,11 +54,9 @@ typedef struct {
     int fp_en_gpio;
     bool enable_light_sleep;
     bool enable_ble_radio_gating;
-    bool enable_deep_sleep_fallback;
-    bool enable_deep_sleep;
+    bool enable_deep_sleep_fallback; /**< Sole deep-sleep gate; from CONFIG_SDF_POWER_ENABLE_DEEP_SLEEP */
     uint32_t retention_size;
     bool adaptive_checkin;
-    bool staged_wake;
 
     /* Zigbee */
     bool zigbee_enabled;
@@ -69,11 +66,11 @@ typedef struct {
     uint8_t nuki_target_addr_type;
     uint8_t nuki_target_addr[6];
     bool ble_connect_on_demand;
-    uint32_t nuki_state_poll_interval_ms;
 
-    /* Security */
+    /* Security.
+     * The encrypted-NVS policy deliberately lives in sdf_storage, not here:
+     * sdf_storage_init() consumes it before sdf_config_init() can run. */
     uint8_t nonce_replay_window;
-    bool require_encrypted_nvs;
 
     /* Event Router */
     uint32_t event_router_queue_depth;
@@ -187,13 +184,6 @@ esp_err_t sdf_config_set_idle_before_sleep(uint32_t interval_ms);
  */
 esp_err_t sdf_config_set_post_wake_guard(uint32_t interval_ms);
 
-/**
- * @brief Set Nuki state poll interval.
- *
- * @param interval_ms New interval in milliseconds.
- * @return ESP_OK on success, ESP_ERR_INVALID_ARG if out of range.
- */
-esp_err_t sdf_config_set_nuki_state_poll_interval(uint32_t interval_ms);
 
 /**
  * @brief Set default battery percentage reported before a real reading exists.

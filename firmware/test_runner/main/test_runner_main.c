@@ -79,6 +79,9 @@ extern void test_sdf_config_set_failed_attempt_threshold_bounds(void);
 extern void test_sdf_config_set_failed_attempt_window_bounds(void);
 extern void test_sdf_config_set_lockout_duration_bounds(void);
 extern void test_sdf_config_set_battery_default_percent_bounds(void);
+extern void test_sdf_config_wdt_timeout_ms_populated_after_init(void);
+extern void test_sdf_config_deep_sleep_fallback_follows_kconfig(void);
+extern void test_sdf_config_zigbee_enabled_drives_protocol_is_enabled(void);
 
 /* SDF Platform tests */
 extern void test_sdf_platform_gpio_set_level_returns_mock_ok(void);
@@ -115,12 +118,15 @@ extern void test_web_auth_should_not_resolve_for_other_actions(void);
 extern void test_sdf_event_router_init_returns_ok(void);
 extern void test_sdf_event_router_init_idempotent(void);
 extern void test_sdf_event_router_subscribe_and_emit(void);
+extern void test_sdf_event_router_subscribe_rejects_invalid_type(void);
 extern void test_sdf_event_router_unsubscribe(void);
 
 /* Tasks tests */
 extern void test_sdf_power_wakeup_reason_mapping(void);
 extern void test_sdf_power_checkin_clamping(void);
 extern void test_sdf_power_battery_bounds(void);
+extern void test_sdf_power_calculate_checkin_interval_disabled_returns_base(void);
+extern void test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery(void);
 
 /* Nuki crypto tests */
 extern void test_crypto_secretbox_round_trip(void);
@@ -199,6 +205,9 @@ extern void test_compute_authenticator_different_data(void);
 extern void test_compute_shared_key_null_args(void);
 extern void test_encrypt_decrypt_round_trip(void);
 extern void test_nonce_replay_detection(void);
+extern void test_nonce_replay_window_honors_configured_value(void);
+extern void test_nonce_replay_window_oversized_clamps_without_oob(void);
+extern void test_nonce_replay_window_zero_disables_tracking_without_fault(void);
 extern void test_feed_encrypted_partial_data(void);
 extern void test_feed_encrypted_null_args(void);
 extern void test_send_unencrypted_sends_framed_message(void);
@@ -306,6 +315,9 @@ void app_main(void) {
   RUN_TEST(test_sdf_config_set_failed_attempt_window_bounds);
   RUN_TEST(test_sdf_config_set_lockout_duration_bounds);
   RUN_TEST(test_sdf_config_set_battery_default_percent_bounds);
+  RUN_TEST(test_sdf_config_wdt_timeout_ms_populated_after_init);
+  RUN_TEST(test_sdf_config_deep_sleep_fallback_follows_kconfig);
+  RUN_TEST(test_sdf_config_zigbee_enabled_drives_protocol_is_enabled);
 
   /* SDF Platform tests */
   RUN_TEST(test_sdf_platform_gpio_set_level_returns_mock_ok);
@@ -342,12 +354,15 @@ void app_main(void) {
   RUN_TEST(test_sdf_event_router_init_returns_ok);
   RUN_TEST(test_sdf_event_router_init_idempotent);
   RUN_TEST(test_sdf_event_router_subscribe_and_emit);
+  RUN_TEST(test_sdf_event_router_subscribe_rejects_invalid_type);
   RUN_TEST(test_sdf_event_router_unsubscribe);
 
   /* Tasks tests */
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);
   RUN_TEST(test_sdf_power_checkin_clamping);
   RUN_TEST(test_sdf_power_battery_bounds);
+  RUN_TEST(test_sdf_power_calculate_checkin_interval_disabled_returns_base);
+  RUN_TEST(test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery);
 
   /* Nuki crypto tests */
   RUN_TEST(test_crypto_secretbox_round_trip);
@@ -427,6 +442,9 @@ void app_main(void) {
   RUN_TEST(test_compute_shared_key_null_args);
   RUN_TEST(test_encrypt_decrypt_round_trip);
   RUN_TEST(test_nonce_replay_detection);
+  RUN_TEST(test_nonce_replay_window_honors_configured_value);
+  RUN_TEST(test_nonce_replay_window_oversized_clamps_without_oob);
+  RUN_TEST(test_nonce_replay_window_zero_disables_tracking_without_fault);
   RUN_TEST(test_feed_encrypted_partial_data);
   RUN_TEST(test_feed_encrypted_null_args);
   RUN_TEST(test_send_unencrypted_sends_framed_message);

@@ -1,0 +1,177 @@
+Review: smart_door (ESP32-C6 / ESP-IDF 5.5.3)
+
+Scope: all 17 firmware components (~18.9k LOC non-test), web-companion/, build config, CI. Findings are ordered by severity with file:line references.
+
+A. Potential errors
+
+A1 — Critical: web-companion users are stored with an all-zero password hash → auth bypass
+
+firmware/components/sdf_app/src/sdf_app.c:770
+
+uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+if (sdf_services_get_web_reg_auth(NULL, 0, NULL) == ESP_OK) {   /* never true */
+    sdf_services_get_web_reg_password_hash(password_hash, ...);
+    memcpy(user.password_hash, password_hash, ...);
+}
+
+sdf_services_get_web_reg_auth(char*, size_t, uint8_t*) returns ESP_ERR_INVALID_ARG when username == NULL || permission == NULL, so the body never runs and user.password_hash stays as initialised byer = {0}. Login (sdf_ble_companion.c, mbedtls_ct_memcmp of stored vs supplied hash) then succeeds for anyone who sends 32 zero bytes with a known username.
+
+A2 — Critical: companion GATT link is unauthenticated and unencrypted
+
+- Characteristics are declared BLE_GATT_CHR_F_READ | WRITE | NOTIFY only — no _ENC / _AUTHEN, and no bonding is required
+(sdf_ble_companion.c).
+- The credential on the wire is crypto.subtle.digest('SHA-256', password) — unsalted, single-iteration (web-companion/app.js:114). It is the
+password-equivalent secret, so it is directly replayable
+- Advertising uses BLE_OWN_ADDR_PUBLIC (no RPA/privacy), so the device is persistently trackable.
+
+Combined with A1, an attacker in radio range can enrol/configure the device.
+
+A3 — Critical: OTA signature verification is off by default and non-functional when on
+
+- firmware/sdkconfig.defaults:104: CONFIG_SDF_OTA_SIGNATURE_VERIFY=n → sdf_ota_verify_signature() is the stub at sdf_ota_signature.c:141
+returning ESP_OK. AGENTS.md:63 states "OTA signature veriry)" — doc and build disagree.
+- With it enabled the implementation still can't succeed for real images (sdf_ota_signature.c:33-121):
+  - the footer is read at partition->size - 68, i.e. the the end of the written image, so the magic check readserased flash;
+  - the signed range is partition->size - 68, again partige-sized;
+  - image_size > 64 * 1024 returns ESP_ERR_NOT_SUPPORTED — an ESP32-C6 app image is ~1 MB, so verification always fails.
+- CONFIG_SDF_OTA_ALLOW_DOWNGRADE=y (sdkconfig.defaults:10ated security posture.
+- Minor: the 4 KB buffer malloc'd at sdf_ota_signature.c:69 is never used; PRIu32 is used without <inttypes.h>.
+
+A4 — Critical: the anti-rollback comparison is inverted
+
+sdf_ota.c:309
+
+sdf_ota_version_cmp_t cmp = sdf_ota_version_compare(running_desc.version, target_desc.version);
+if (cmp == SDF_OTA_VERSION_NEWER) {
+    ESP_LOGW(TAG, "Downgrade detected: ...");
+
+sdf_ota_version_compare(current, incoming) returns SDF_OTA_VERSION_NEWER when incoming is newer (sdf_ota.c:413-415). So genuine upgrades are
+labelled downgrades and genuine downgrades fall into the d as SDF_AUDIT_OTA_VERSION_UPGRADE. TodayALLOW_DOWNGRADE=y compiles out the rejection so only the audit trail is wrong; flip that Kconfig to harden the device and it will reject
+every real update and accept every rollback.
+
+A5 — Critical: enrolled_user_count is capped at 1 and nev
+
+sdf_services_match.c:269-280 performs the boot query withx_count = 1, so count saturates at 1 regardless of howmany users exist. Nothing ever increments it afterwards (grep: assignments only at match.c:280, services.c:875, :951 --, :971/:1186 = 0).
+Three consequences:
+
+1. sdf_services_delete_user decrements it (services.c:951ers drives it to 0.
+2. sdf_match_task_run_match_cycle returns early on enrolled_user_count == 0 (match.c:100) → fingerprint matching stops working until reboot,
+both after that delete and after the first-ever enrolment
+3. sdf_button_cb uses the same counter as the "no admin exists yet" gate (sdf_services_button.c:122) and, when it reads 0, executes the
+requested admin action immediately with no admin fingerprSET and NUKI_PAIR. This is a privilege-escalation path,not just a functional bug.
+
+A6 — High: use-after-free in the event router
+
+sdf_event_router.c:34-46 walks s_state.subscribers_by_type[event->type] with no lock, while sdf_event_router_unsubscribe() (:130-159) free()s
+nodes under s_state.lock. Dispatch runs both on the routeCAL, directly in the emitter's context — so a concurrentunsubscribe can free the node the dispatcher is about to dereference. There is also no bounds check on event->type before indexing the array.
+
+A7 — High: power sleep/wake events are never delivered
+
+sdf_power.c:144 emits POWER_SLEEP at PRIO_LOW (3) and :117-122 emits POWER_WAKE at PRIO_NORMAL (2). The match, enroll and button tasks all
+subscribe with min_prio = SDF_EVENT_ROUTER_PRIO_CRITICAL oll.c:52-58, sdf_services_button.c:65-71). The filter issub->min_prio >= event->priority → 0 >= 2 is false. No task ever sees a sleep or wake event, so every state->suspended flag is permanently
+false and all the suspend-on-sleep logic is dead.
+
+A8 — High: light-sleep wake timer is 1000× too long
+
+sdf_platform_sleep_enable_timer_wakeup(uint32_t interval_lly (sdf_platform_sleep.c:55-57). The light-sleep sitepasses microseconds:
+
+sdf_power.c:147:  sdf_platform_sleep_enable_timer_wakeup((uint64_t)config->checkin_interval_ms * 1000ULL);
+sdf_power.c:290:  sdf_platform_sleep_enable_timer_wakeup(terval_ms);   /* correct */
+
+A 30 s check-in becomes 30,000,000 ms ≈ 8.3 h. The value 2_t, so any checkin_interval_ms > 4294 ms additionallywraps.
+
+A9 — High: sdf_match_task can trip the task watchdog
+
+The task calls esp_task_wdt_add(NULL) and then blocks on xQueueReceive(..., portMAX_DELAY) (sdf_services_match.c). With the 15 s TWDT
+configured in sdf_app_init, an idle period with no eventsoll_task and sdf_button_task avoid this by using a 100 mstimeout — the match task should do the same.
+
+A10 — High: s_state.lock held across 12 s of blocking UART I/O
+
+sdf_services_delete_user, sdf_services_clear_all_users and sdf_services_query_users hold s_state.lock while calling fp_*, which can block for
+the full 12 s sensor response timeout. Every other taker T_MS (250 ms) and therefore fails — includingsdf_services_is_ready(), which the enroll task spins on at boot.
+
+A11 — Medium: duplicate queue creation leaks the first queue
+
+s->match_task_queue is created in sdf_services_init() (sdf_services.c:842) and again in sdf_services_start_tasks() (:743), overwriting the
+handle. The first queue (10 × sizeof(sdf_event_router_eve
+
+A12 — Medium: sdf_services_stop_tasks() tears down unsafe
+
+Raw vTaskDelete() with no unsubscribe from the event routeleted task holds s_state.lock. The router keeps danglingsubscriber nodes whose callbacks push to a queue that :820-822 then deletes; a task killed inside the critical section deadlocks everything
+else permanently.
+
+A13 — Medium: BLE companion concurrency and lifetime issu
+
+- sdf_ble_companion_enrollment_complete_handler / _failedions[] without taking s_lock, while the GATT callbacksmutate the same array.
+- notify_config/enroll/ota, is_authenticated, set_authentast_ota all take s_lock with portMAX_DELAY; several run on the event-router task, so one stuck holder stalls all event dispatch.
+- sdf_ble_companion_deinit() deletes s_lock and the adverT services remain registered — a late callback uses afreed mutex.
+- The fast-advertising timer is not stopped on connect; id calls start_advertising_slow().
+
+A14 — Medium: 512-byte stack buffers inside NimBLE host c
+
+uint8_t buf[512] / tmp[512] in auth_access, config_accesss (SDF_BLE_COMPANION_ATTR_MAX_LEN 512). These run on theNimBLE host task stack; four such frames plus the host's own usage is a realistic overflow.
+
+A15 — Medium: hardcoded user-ID bounds and packing bugs
+
+- sdf_storage_save_user_name / load_user_name / delete_user_name reject user_id > 10 literally instead of using SDF_FINGERPRINT_USER_ID_MAX.
+- sdf_services_clear_all_users loops for (uint16_t i = 1;
+- sdf_services_pack_user_list uses for (i = 0; i < count && user_ids[i] <= SDF_SERVICES_MAX_USERS; i++) — it stops at the first out-of-range
+ID rather than skipping it, silently truncating the list.er_ids[i] == 0, and the bitmap macros do 1u << ((id) - 1)→ shift by -1 (UB) for ID 0.
+- SDF_SERVICES_PERM_PACKED_SIZE 4 is commented "16 users ES_MAX_USERS is 10 (harmless, but the two constants havedrifted).
+
+A16 — Medium: sdf_app_init() reports success after subsystem failures
+
+sdf_services_init(), sdf_ble_companion_init(), Zigbee init, power-manager init and CLI init all only log a warning; sdf_app_init() returns
+ESP_OK regardless, and app_main ignores the return anyway with a dead fingerprint sensor or no BLE boots into asilently degraded state. Subscriptions made earlier in the subs[9] goto-chain are also never unsubscribed when a later step fails.
+
+A17 — Medium: unvalidated, non-persisted runtime config over BLE
+
+sdf_ble_companion_on_config_write() applies JSON values with no range checks — failed_attempt_threshold, lockout_duration_ms,
+power_loop_interval_ms etc. can be set to 0, disabling thpower loop. The changes are also lost on reboot (nothingwrites them to NVS).
+
+A18 — Medium: biometric match ignores the user's permission level
+
+A successful match dispatches an unconditional SDF_LOCK_ACTION_UNLATCH in sdf_app.c, regardless of the 2-bit permission stored for that user.
+(The uncommitted diff correctly removes the admin grant-os_admin.c; the unlatch path still has the same shape.)
+
+A19 — Low
+
+- fp_probe()'s error log prints TX=%d, RX=%d with hardcodt kept in state (fingerprint.c).
+- fp_change_user_permission() does upload-eigenvalues → delete → save; a power loss mid-sequence permanently loses the template with no
+recovery path.
+- sdf_storage_web_user_count() swallows per-key errors and always returns ESP_OK.
+- sdf_services_execute_admin_action (WEB_REG_AUTH path) euthorized=false and an empty username when the lock taketimes out — indistinguishable from a real denial.
+- sdf_services_run_admin_auth_cycle reads s_state.pendinglock.
+- sdf_power_policy_mark_activity() is called unconditionally every loop iteration (sdf_power.c:235) but sdf_power_policy_evaluate() uses the last_activity_us parameter, so the call is a no-op that mssor meaningless.
+- Deep-sleep path reads s_state.enabled_sources unlocked (sdf_power.c:286, 289) while everything around it uses config_snapshot.
+
+
+B. Missing implementations
+
+1. No firmware CI. .github/workflows/ contains only deploy-web-companion.yml. Nothing builds the firmware or runs the unit tests on push, which is why A4/A7 have survived.
+2. Empty test directories: sdf_ota/test/, sdf_config/test/, sdf_platform/test/, sdf_platform_power/test/. There are no tests at all for sdf_ble_companion (the component with the auth logic) or for the web-user storage path.
+3. Event router: no deinit, no event->type bounds check, and sdf_event_router_emit() / emit_async() are byte-for-byte equivalent — the "async" name promises something the implementation doesn't provide.
+4. config->nonce_replay_window is dead. It's populated (sdf_config.c:88), validated (:193) and logged (:240), but the protocol uses the compile-time SDF_NUKI_NONCE_REPLAY_WINDOW only. Same pattern for several other runtime config fields that are never re-read after init.
+5. Nuki 5th-gen / Ultra pairing is unimplemented — SDF_NUKI_CMD_AUTHORIZATION_INFO logs "only 1st-4th gen pairing is implemented" and returns an error (sdf_nuki_pairing.c:361).
+*next:6. Ed25519 streaming verification for images >64 KB (see A3); today there is no working signature path at all.
+7. No credential hardening on the BLE auth path: no salt/KDF on the password hash, no attempt counter or lockout (the biometric path has 5-in-60s → 120 s; the BLE login has nothing), no bonding/pairing.
+8. No persistence of runtime configuration written over BLE.
+9. Dead / unreachable code that should be deleted or wired up: sdf_services_run_match_cycle() (sdf_services.c:444, ~140 lines) and sdf_services_run_admin_auth_cycle() (:666) have no callers and have drifted from the live copies in sdf_services_match.c; the WEB_REG_AUTH_REQUEST / _RESULT cases in sdf_app_on_event() are unreachable (those types have dedicated callbacks); the legacy TaskHandle_t task field in sdf_services_state_t.
+
+C. Proposed optimizations
+
+Correctness-preserving refactors that also buy performance:
+
+1. Serialize fingerprint I/O behind a single owner task. Replace "take s_state.lock → call blocking fp_*" with a request/response queue owned by one fingerprint task. This removes A10 outright, removes the 250 ms-vs-12 s mismatch, and lets FP_MUTEX_WAIT_MS disappear.
+2. Make enrolled_user_count authoritative. Query with max_count = SDF_FINGERPRINT_USER_ID_MAX, keep a cached bitmap in sdf_services_state_t, and maintain it on enroll/delete/clear instead of re-querying the sensor (each query is a multi-second UART round trip). Fixes A5 and removes the boot-time query from the critical path.
+3. Shrink the event payload union. sdf_event_router_event_t carries username[32] + password_hash[32], so every event costs ~80+ bytes and is copied into five per-task queues plus the router queue. Two wins: (a) move the credential payload out of the queue entirely — pass a handle/index and keep the hash in one owned buffer, which also stops password-equivalent material from sitting in five FreeRTOS queues; (b) the remaining events shrink to ~16 bytes.
+4. Replace the 100 ms poll loops. sdf_enroll_task and sdf_button_task wake 10×/s forever, and sdf_power_task polls too. On a battery device these three tasks alone prevent meaningful light-sleep residency. Use blocking waits with real timeouts (plus a short WDT-safe cap) or esp_timer one-shots driven by state transitions. This pairs with fixing A7 so the tasks actually quiesce on sleep.
+5. Dispatch under a lock, or make the list immutable during dispatch. Simplest correct fix for A6: take s_state.lock around the walk and copy the callback+ctx pairs into a small stack array before invoking, so callbacks don't run with the lock held. Longer term, a fixed-size static subscriber pool (subscriber count is known and small) removes both the malloc/free churn and the lifetime problem.
+6. Collapse the per-task boilerplate. The subscribe + xQueueCreate + esp_task_wdt_add + event-copy-callback pattern is duplicated verbatim in sdf_services_match.c, sdf_services_enroll.c, sdf_services_button.c and sdf_services_admin.c. One helper (sdf_task_bus_attach(...)) would have made A7 a one-line fix instead of a four-site one.
+7. Move the 512-byte GATT buffers off the stack into per-connection storage that already exists (s_connections[]), eliminating A14 and the repeated zeroing.
+8. Merge emit/emit_async into one function with an explicit bool sync (or drop the sync path and let CRITICAL events use a high-priority queue), so callbacks stop running on arbitrary emitter stacks.
+9. OTA signature: stream it. Hash the actual image length with mbedtls_sha512 incrementally over 4 KB chunks and verify the Ed25519 signature over the digest, or adopt IDF's own secure-boot/signed-app verification and delete the custom footer scheme. Either removes the 64 KB ceiling and the partition-size confusion.
+10. Drop sscanf from sdf_ota_version_compare. Two sscanf("%d.%d.%d") calls pull the full formatted-scan machinery into the image for parsing three integers.
+11. Zigbee: the esp_zb_lock_acquire(pdMS_TO_TICKS(1000)) calls on the app path (sdf_protocol_zigbee.c:187, 212, 237, 1160) can stall a caller for a second; consider a short timeout plus deferral via esp_zb_scheduler_alarm (the pattern the new trigger_ota_query already uses).
+12. Flip the defaults to match the documented posture once A3/A4 are fixed: CONFIG_SDF_OTA_SIGNATURE_VERIFY=y, CONFIG_SDF_OTA_ALLOW_DOWNGRADE=n, and add _ENC | _AUTHEN flags plus bonding to the companion GATT characteristics. Then update AGENTS.md:60-63 — or, if the current defaults are intentional for development, mark them as such in the doc so the "Documentation Sync Rule" isn't quietly violated.
+

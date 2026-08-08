@@ -87,13 +87,6 @@ menu "Power"
             help
                 Interval for periodic battery attribute updates.
 
-        config SDF_POWER_NUKI_STATE_POLL_INTERVAL_MS
-            int "Nuki state poll interval (ms)"
-            range 1000 86400000
-            default 15000
-            help
-                Interval for periodic Nuki keyturner state polling. Defaults to same as check-in interval.
-
         config SDF_POWER_BATTERY_DEFAULT_PERCENT
             int "Default battery percent"
             range 0 100
@@ -168,15 +161,9 @@ menu "Power"
 
             config SDF_POWER_ADAPTIVE_CHECKIN
                 bool "Adaptive check-in interval based on battery"
-                default y
+                default n
                 help
                     Adjust check-in interval based on battery level.
-
-            config SDF_POWER_STAGED_WAKE
-                bool "Enable staged wake sequence"
-                default y
-                help
-                    Enable staged wake: critical -> fast path (BLE) -> full path (Zigbee).
 
         endmenu
 

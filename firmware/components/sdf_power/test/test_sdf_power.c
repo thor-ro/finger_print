@@ -3,6 +3,7 @@
 
 #include "esp_err.h"
 #include "esp_sleep.h"
+#include "sdf_config.h"
 #include "sdf_power.h"
 
 // -----------------------------------------------------------------------------
@@ -10,6 +11,8 @@
 // -----------------------------------------------------------------------------
 extern sdf_power_wake_reason_t
 sdf_power_map_wakeup_reason(esp_sleep_wakeup_cause_t cause);
+extern void test_sdf_power_set_base_checkin_interval_ms(uint32_t interval_ms);
+extern void test_sdf_power_set_battery_percent_raw(uint8_t battery_percent);
 
 // -----------------------------------------------------------------------------
 // Unit Tests
@@ -84,4 +87,51 @@ void test_sdf_power_battery_bounds(void) {
 
   err = sdf_power_set_battery_percent(255);
   TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+}
+
+void test_sdf_power_calculate_checkin_interval_disabled_returns_base(void) {
+  sdf_config_t *cfg = sdf_config_get_mutable();
+  TEST_ASSERT_NOT_NULL(cfg);
+  bool saved_adaptive = cfg->adaptive_checkin;
+  cfg->adaptive_checkin = false;
+
+  test_sdf_power_set_base_checkin_interval_ms(10000);
+
+  /* With adaptive_checkin disabled, the base interval is returned
+   * regardless of battery tier. */
+  const uint8_t tiers[] = {5, 19, 20, 39, 40, 59, 60, 90};
+  for (size_t i = 0; i < sizeof(tiers) / sizeof(tiers[0]); ++i) {
+    test_sdf_power_set_battery_percent_raw(tiers[i]);
+    TEST_ASSERT_EQUAL_UINT32(10000, sdf_power_calculate_checkin_interval());
+  }
+
+  cfg->adaptive_checkin = saved_adaptive;
+}
+
+void test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery(
+    void) {
+  sdf_config_t *cfg = sdf_config_get_mutable();
+  TEST_ASSERT_NOT_NULL(cfg);
+  bool saved_adaptive = cfg->adaptive_checkin;
+  cfg->adaptive_checkin = true;
+
+  test_sdf_power_set_base_checkin_interval_ms(10000);
+
+  /* >= 60%: unscaled base. */
+  test_sdf_power_set_battery_percent_raw(80);
+  TEST_ASSERT_EQUAL_UINT32(10000, sdf_power_calculate_checkin_interval());
+
+  /* 40-59%: base * 1.5. */
+  test_sdf_power_set_battery_percent_raw(50);
+  TEST_ASSERT_EQUAL_UINT32(15000, sdf_power_calculate_checkin_interval());
+
+  /* 20-39%: base * 2. */
+  test_sdf_power_set_battery_percent_raw(30);
+  TEST_ASSERT_EQUAL_UINT32(20000, sdf_power_calculate_checkin_interval());
+
+  /* < 20%: base * 4 - a larger value than the unscaled base. */
+  test_sdf_power_set_battery_percent_raw(10);
+  TEST_ASSERT_EQUAL_UINT32(40000, sdf_power_calculate_checkin_interval());
+
+  cfg->adaptive_checkin = saved_adaptive;
 }

@@ -51,6 +51,16 @@ void test_sdf_event_router_subscribe_and_emit(void) {
     TEST_ASSERT_EQUAL(42, s_last_event.payload.biometric.user_id);
 }
 
+void test_sdf_event_router_subscribe_rejects_invalid_type(void) {
+    sdf_event_router_subscriber_t *handle = NULL;
+
+    esp_err_t err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_TYPE_COUNT,
+                                               SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                               test_event_handler, NULL, &handle);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+    TEST_ASSERT_NULL(handle);
+}
+
 void test_sdf_event_router_unsubscribe(void) {
     if (s_test_handle == NULL) {
         TEST_FAIL_MESSAGE("Previous test must run first to set handle");

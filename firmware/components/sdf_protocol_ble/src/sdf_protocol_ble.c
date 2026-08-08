@@ -17,16 +17,26 @@
 
 #include "sdf_nuki_crypto.h"
 #include "sdf_event_router.h"
+#include "sdf_config.h"
 
 #define SDF_NUKI_ADATA_LEN 30
 #define SDF_NUKI_PDATA_HEADER_LEN 6
 #define SDF_NUKI_SECRETBOX_OVERHEAD 16
 
-#if CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW > SDF_NUKI_NONCE_CACHE_MAX
-#define SDF_NUKI_NONCE_REPLAY_WINDOW SDF_NUKI_NONCE_CACHE_MAX
-#else
-#define SDF_NUKI_NONCE_REPLAY_WINDOW CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW
-#endif
+/* Returns the effective replay window: the runtime-configured
+ * nonce_replay_window, clamped to SDF_NUKI_NONCE_CACHE_MAX so it can never
+ * exceed the statically sized rx_nonce_cache. The clamp lives here (the
+ * consumer) rather than in sdf_config_validate() - SDF_NUKI_NONCE_CACHE_MAX
+ * is owned by this component, and defending at the point of use survives
+ * any path that mutates nonce_replay_window after validation (a persisted
+ * blob, sdf_config_get_mutable(), a future setter). */
+static uint8_t sdf_nuki_effective_replay_window(void) {
+  uint8_t window = sdf_config_get()->nonce_replay_window;
+  if (window > SDF_NUKI_NONCE_CACHE_MAX) {
+    window = SDF_NUKI_NONCE_CACHE_MAX;
+  }
+  return window;
+}
 
 static uint16_t sdf_nuki_le16_read(const uint8_t *src) {
   return (uint16_t)src[0] | ((uint16_t)src[1] << 8);
@@ -236,20 +246,25 @@ static bool sdf_nuki_nonce_seen(const sdf_nuki_client_t *client,
 static void sdf_nuki_nonce_remember(sdf_nuki_client_t *client,
                                     uint32_t authorization_id,
                                     const uint8_t nonce[SDF_NUKI_NONCE_LEN]) {
-  if (client == NULL || nonce == NULL || SDF_NUKI_NONCE_REPLAY_WINDOW == 0) {
+  /* Read the effective (clamped) window once, up front. The zero-window
+   * check must run before any indexing or modulo below - a runtime value
+   * of 0 reaching `% window` would fault, unlike the old compile-time
+   * macro where a 0 folded away harmlessly. */
+  uint8_t window = sdf_nuki_effective_replay_window();
+
+  if (client == NULL || nonce == NULL || window == 0) {
     return;
   }
 
   size_t idx = client->rx_nonce_cache_write_idx;
-  if (idx >= SDF_NUKI_NONCE_REPLAY_WINDOW) {
+  if (idx >= window) {
     idx = 0;
   }
 
   memcpy(client->rx_nonce_cache[idx], nonce, SDF_NUKI_NONCE_LEN);
   client->rx_nonce_auth_cache[idx] = authorization_id;
-  client->rx_nonce_cache_write_idx =
-      (uint8_t)((idx + 1) % SDF_NUKI_NONCE_REPLAY_WINDOW);
-  if (client->rx_nonce_cache_count < SDF_NUKI_NONCE_REPLAY_WINDOW) {
+  client->rx_nonce_cache_write_idx = (uint8_t)((idx + 1) % window);
+  if (client->rx_nonce_cache_count < window) {
     client->rx_nonce_cache_count++;
   }
 }

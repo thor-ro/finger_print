@@ -41,7 +41,6 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     config->fp_uart_port = CONFIG_SDF_FP_UART_PORT;
     config->fp_tx_pin = CONFIG_SDF_FP_TX_PIN;
     config->fp_rx_pin = CONFIG_SDF_FP_RX_PIN;
-    config->fp_power_en_pin = CONFIG_SDF_POWER_FP_EN_GPIO;
     config->fp_baud_rate = CONFIG_SDF_FP_BAUD_RATE;
     config->fp_response_timeout_ms = CONFIG_SDF_FP_RESPONSE_TIMEOUT_MS;
     config->fp_rx_buffer_size = CONFIG_SDF_FP_RX_BUFFER_SIZE;
@@ -71,13 +70,33 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     config->battery_default_percent = CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT;
     config->fp_wake_gpio = CONFIG_SDF_POWER_FP_WAKE_GPIO;
     config->fp_en_gpio = CONFIG_SDF_POWER_FP_EN_GPIO;
+#if defined(CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP)
     config->enable_light_sleep = CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP;
+#else
+    config->enable_light_sleep = false;
+#endif
+#if defined(CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING)
     config->enable_ble_radio_gating = CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING;
-    config->enable_deep_sleep_fallback = true;
-    config->enable_deep_sleep = CONFIG_SDF_POWER_ENABLE_DEEP_SLEEP;
+#else
+    config->enable_ble_radio_gating = false;
+#endif
+    /* The fallback is the only deep-sleep entry in sdf_power_policy, so this is
+     * the field CONFIG_SDF_POWER_ENABLE_DEEP_SLEEP was always meant to drive. */
+#if defined(CONFIG_SDF_POWER_ENABLE_DEEP_SLEEP)
+    config->enable_deep_sleep_fallback = CONFIG_SDF_POWER_ENABLE_DEEP_SLEEP;
+#else
+    config->enable_deep_sleep_fallback = false;
+#endif
     config->retention_size = CONFIG_SDF_POWER_RETENTION_SIZE;
+    /* Kconfig omits the macro entirely for a bool that is off, rather than
+     * defining it to 0, so this must be defined()-guarded now that
+     * SDF_POWER_ADAPTIVE_CHECKIN defaults to n. Same idiom as the Zigbee
+     * options below. */
+#if defined(CONFIG_SDF_POWER_ADAPTIVE_CHECKIN)
     config->adaptive_checkin = CONFIG_SDF_POWER_ADAPTIVE_CHECKIN;
-    config->staged_wake = CONFIG_SDF_POWER_STAGED_WAKE;
+#else
+    config->adaptive_checkin = false;
+#endif
 
     /* Zigbee */
 #if defined(CONFIG_SDF_ZIGBEE_ENABLE)
@@ -94,12 +113,14 @@ void sdf_config_get_defaults(sdf_config_t *config) {
     /* Nuki BLE */
     config->nuki_target_addr_type = 1; // BLE_ADDR_RANDOM
     memset(config->nuki_target_addr, 0, 6);
+#if defined(CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND)
     config->ble_connect_on_demand = CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND;
-    config->nuki_state_poll_interval_ms = CONFIG_SDF_POWER_NUKI_STATE_POLL_INTERVAL_MS;
+#else
+    config->ble_connect_on_demand = false;
+#endif
 
     /* Security */
     config->nonce_replay_window = CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW;
-    config->require_encrypted_nvs = CONFIG_SDF_SECURITY_REQUIRE_ENCRYPTED_NVS;
 
     /* System */
     config->wdt_timeout_ms = CONFIG_SDF_PLATFORM_WDT_TIMEOUT_MS;
@@ -293,13 +314,14 @@ void sdf_config_dump(const sdf_config_t *config, const char *tag) {
     ESP_LOGI(tag, "=== SDF Configuration ===");
     ESP_LOGI(tag, "Fingerprint: UART%d TX=%d RX=%d EN=%d @ %u baud",
              config->fp_uart_port, config->fp_tx_pin, config->fp_rx_pin,
-             config->fp_power_en_pin, config->fp_baud_rate);
+             config->fp_en_gpio, config->fp_baud_rate);
     ESP_LOGI(tag, "Match: poll=%ums cooldown=%ums",
              config->match_poll_interval_ms, config->match_cooldown_ms);
-    ESP_LOGI(tag, "Security: threshold=%u window=%ums lockout=%ums nonce_window=%u encrypted_nvs=%d",
+    /* encrypted_nvs is deliberately absent: sdf_storage owns that policy and
+     * consumes it before sdf_config_init() runs. See sdf_storage_get_security_status(). */
+    ESP_LOGI(tag, "Security: threshold=%u window=%ums lockout=%ums nonce_window=%u",
              config->failed_attempt_threshold, config->failed_attempt_window_ms,
-             config->lockout_duration_ms, config->nonce_replay_window,
-             config->require_encrypted_nvs);
+             config->lockout_duration_ms, config->nonce_replay_window);
     ESP_LOGI(tag, "LED: GPIO=%d", config->ws2812_led_gpio);
     ESP_LOGI(tag, "Power: checkin=%ums idle=%ums wake_guard=%ums loop=%ums batt_report=%ums",
              config->checkin_interval_ms, config->idle_before_sleep_ms,
@@ -392,18 +414,6 @@ esp_err_t sdf_config_set_post_wake_guard(uint32_t interval_ms) {
         return ESP_ERR_INVALID_STATE;
     }
     cfg->post_wake_guard_ms = interval_ms;
-    return ESP_OK;
-}
-
-esp_err_t sdf_config_set_nuki_state_poll_interval(uint32_t interval_ms) {
-    if (interval_ms < 1000 || interval_ms > 86400000) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    sdf_config_t *cfg = sdf_config_get_mutable();
-    if (!cfg) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    cfg->nuki_state_poll_interval_ms = interval_ms;
     return ESP_OK;
 }
 

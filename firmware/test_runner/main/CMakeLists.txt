@@ -35,8 +35,7 @@ idf_component_register(
 
 target_compile_definitions(${COMPONENT_LIB} PRIVATE
     SDF_DRIVERS_TESTING SDF_POWER_TESTING SDF_PROTOCOL_BLE_TESTING
-    CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW=8
 )
 target_compile_definitions(__idf_sdf_drivers PRIVATE SDF_DRIVERS_TESTING)
 target_compile_definitions(__idf_sdf_power PRIVATE SDF_POWER_TESTING)
-target_compile_definitions(__idf_sdf_protocol_ble PRIVATE SDF_PROTOCOL_BLE_TESTING CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW=8)
+target_compile_definitions(__idf_sdf_protocol_ble PRIVATE SDF_PROTOCOL_BLE_TESTING)

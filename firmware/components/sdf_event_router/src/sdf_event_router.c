@@ -135,7 +135,7 @@ esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type,
                                      void *ctx,
                                      sdf_event_router_subscriber_t **handle)
 {
-    if (cb == NULL || handle == NULL) {
+    if (cb == NULL || handle == NULL || type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -208,26 +208,6 @@ esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event)
             ESP_LOGW(TAG, "Event queue full, dropping event");
             return ESP_ERR_NO_MEM;
         }
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t sdf_event_router_emit_async(const sdf_event_router_event_t *event)
-{
-    if (event == NULL || !s_state.initialized) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (event->priority == SDF_EVENT_ROUTER_PRIO_CRITICAL) {
-        sdf_event_router_dispatch_sync(event);
-        return ESP_OK;
-    }
-
-    BaseType_t ok = xQueueSend(s_state.queue, event, pdMS_TO_TICKS(100));
-    if (ok != pdTRUE) {
-        ESP_LOGW(TAG, "Async queue full, dropping event");
-        return ESP_ERR_NO_MEM;
     }
 
     return ESP_OK;

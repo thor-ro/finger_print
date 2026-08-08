@@ -180,6 +180,5 @@ esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type, sdf_event_rou
                                      sdf_event_router_cb cb, void *ctx, sdf_event_router_subscriber_t **handle);
 esp_err_t sdf_event_router_unsubscribe(sdf_event_router_subscriber_t *handle);
 esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event);
-esp_err_t sdf_event_router_emit_async(const sdf_event_router_event_t *event);
 
 #endif /* SDF_EVENT_ROUTER_H */

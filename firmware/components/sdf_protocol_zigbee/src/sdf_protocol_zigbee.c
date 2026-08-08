@@ -48,16 +48,15 @@
 #define CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS 20
 #endif
 
-#if defined(CONFIG_SDF_ZIGBEE_ENABLE)
-#define SDF_ZIGBEE_ENABLED 1
-#else
-#define SDF_ZIGBEE_ENABLED 0
-#endif
-
 static const char *TAG = "sdf_protocol_zigbee";
 
+/* Reads the live config rather than CONFIG_SDF_ZIGBEE_ENABLE directly, so
+ * sdf_config_set_zigbee_enabled() acts as a runtime kill switch. The field is
+ * populated from the same Kconfig symbol, so build-time behavior is unchanged.
+ * Before sdf_config_init() this reports false; every call site runs after it
+ * (sdf_app.c:1489, with sdf_protocol_zigbee_init() at :1723). */
 bool sdf_protocol_zigbee_is_enabled(void) {
-  return SDF_ZIGBEE_ENABLED != 0;
+  return sdf_config_get()->zigbee_enabled;
 }
 
 typedef struct {
@@ -906,10 +905,14 @@ fail:
 }
 
 esp_err_t sdf_protocol_zigbee_init(void) {
-#if !SDF_ZIGBEE_ENABLED
-  ESP_LOGI(TAG, "Zigbee disabled by SDF configuration");
-  return ESP_ERR_NOT_SUPPORTED;
-#elif !defined(CONFIG_ZB_ENABLED) || (CONFIG_ZB_ENABLED == 0)
+  /* Runtime rather than #if: the SDF-level enable is now a config field, so it
+   * can be flipped without a rebuild. The CONFIG_ZB_ENABLED check below stays
+   * compile-time because the Zigbee SDK is not linked when it is off. */
+  if (!sdf_protocol_zigbee_is_enabled()) {
+    ESP_LOGI(TAG, "Zigbee disabled by SDF configuration");
+    return ESP_ERR_NOT_SUPPORTED;
+  }
+#if !defined(CONFIG_ZB_ENABLED) || (CONFIG_ZB_ENABLED == 0)
   ESP_LOGW(TAG, "Zigbee disabled in sdkconfig");
   return ESP_ERR_NOT_SUPPORTED;
 #else
