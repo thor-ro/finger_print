@@ -1,4 +1,5 @@
 #include "sdf_ota.h"
+#include "sdf_ota_digest.h"
 #include "sdf_common.h"
 
 #include <string.h>
@@ -26,6 +27,14 @@ typedef struct {
     const esp_partition_t *target_partition;
     uint32_t expected_size;
     uint32_t bytes_written;
+    /* SHA-256 over the signed range, accumulated as bytes arrive rather than
+     * by reading the partition back at commit time. esp_ota_write() defers the
+     * trailing (size % 16) bytes into an internal buffer and only flushes them
+     * in esp_ota_end() when flash encryption is enabled, so a read-back would
+     * silently hash 0xFF for the last <=15 bytes the day encryption is turned
+     * on. Hashing on the way in is immune to that and saves a full read pass
+     * over a ~1.9MB partition. */
+    sdf_ota_digest_t digest;
     sdf_ota_state_t state;
     bool active;
 } sdf_ota_session_t;
@@ -37,6 +46,14 @@ static SemaphoreHandle_t s_session_mutex = NULL;
 extern const char sdf_ota_version_string[];
 
 
+
+/* Idempotent, so it is safe on every path that ends a session - including
+ * paths that may run twice - without leaking or double-freeing the mbedTLS
+ * context. Callers must hold s_session_mutex. */
+static void sdf_ota_session_digest_release(void)
+{
+    sdf_ota_digest_release(&s_session.digest);
+}
 
 static esp_err_t sdf_ota_emit_audit(sdf_audit_event_type_t type, int32_t status, uint16_t detail)
 {
@@ -140,6 +157,15 @@ esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_ha
         return ESP_ERR_NOT_FOUND;
     }
 
+    /* A signed image is at minimum a footer, so anything smaller cannot carry
+     * one. Reject here rather than underflowing signed_len below. */
+    if (image_size <= SDF_OTA_FOOTER_SIZE) {
+        xSemaphoreGive(s_session_mutex);
+        ESP_LOGE(TAG, "Image size %" PRIu32 " is not larger than the %u-byte signature footer",
+                 image_size, (unsigned)SDF_OTA_FOOTER_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
     if (image_size > partition->size) {
         xSemaphoreGive(s_session_mutex);
         ESP_LOGE(TAG, "Image size %" PRIu32 " exceeds partition size %" PRIu32,
@@ -165,8 +191,17 @@ esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_ha
     s_session.bytes_written = 0;
     s_session.active = true;
 
+    err = sdf_ota_digest_begin(&s_session.digest, image_size - SDF_OTA_FOOTER_SIZE);
+    if (err != ESP_OK) {
+        esp_ota_abort(ota_handle);
+        s_session.active = false;
+        xSemaphoreGive(s_session_mutex);
+        return err;
+    }
+
     err = sdf_ota_state_transition(SDF_OTA_STATE_DOWNLOADING);
     if (err != ESP_OK) {
+        sdf_ota_session_digest_release();
         esp_ota_abort(ota_handle);
         s_session.active = false;
         xSemaphoreGive(s_session_mutex);
@@ -200,6 +235,20 @@ esp_err_t sdf_ota_write(sdf_ota_handle_t handle, const void *data, uint32_t len)
     esp_err_t err = esp_ota_write(s_session.ota_handle, data, len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
+        sdf_ota_session_digest_release();
+        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        xSemaphoreGive(s_session_mutex);
+        return err;
+    }
+
+    /* Writes are a pure sequential append - there is no offset addressing here
+     * and transports resume from the device's own bytes_written - so every
+     * byte reaches the digest exactly once, in order. The accumulator clamps
+     * at the signed range itself, so the 68-byte footer the client streams
+     * along with the image is excluded without splitting chunks here. */
+    err = sdf_ota_digest_update(&s_session.digest, data, len);
+    if (err != ESP_OK) {
+        sdf_ota_session_digest_release();
         sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
         xSemaphoreGive(s_session_mutex);
         return err;
@@ -227,6 +276,7 @@ esp_err_t sdf_ota_abort(sdf_ota_handle_t handle)
     }
 
     esp_err_t err = esp_ota_abort(s_session.ota_handle);
+    sdf_ota_session_digest_release();
     s_session.active = false;
     (void)sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
     xSemaphoreGive(s_session_mutex);
@@ -251,6 +301,7 @@ esp_err_t sdf_ota_verify_integrity(sdf_ota_handle_t handle)
     if (s_session.bytes_written != s_session.expected_size) {
         ESP_LOGE(TAG, "Size mismatch: wrote %" PRIu32 ", expected %" PRIu32,
                  s_session.bytes_written, s_session.expected_size);
+        sdf_ota_session_digest_release();
         sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
         xSemaphoreGive(s_session_mutex);
         return ESP_FAIL;
@@ -278,6 +329,7 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
 
     esp_err_t err = sdf_ota_state_transition(SDF_OTA_STATE_COMMITTING);
     if (err != ESP_OK) {
+        sdf_ota_session_digest_release();
         xSemaphoreGive(s_session_mutex);
         return err;
     }
@@ -288,6 +340,7 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
     err = esp_ota_get_partition_description(running, &running_desc);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get running partition description: %s", esp_err_to_name(err));
+        sdf_ota_session_digest_release();
         sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
         xSemaphoreGive(s_session_mutex);
         return err;
@@ -297,6 +350,7 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
     err = esp_ota_get_partition_description(s_session.target_partition, &target_desc);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get target partition description: %s", esp_err_to_name(err));
+        sdf_ota_session_digest_release();
         sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
         xSemaphoreGive(s_session_mutex);
         return err;
@@ -316,6 +370,7 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
         sdf_ota_emit_audit(SDF_AUDIT_OTA_VERSION_DOWNGRADE, 0, 0);
 #if !CONFIG_SDF_OTA_ALLOW_DOWNGRADE
         ESP_LOGE(TAG, "Downgrades not allowed (CONFIG_SDF_OTA_ALLOW_DOWNGRADE=n)");
+        sdf_ota_session_digest_release();
         sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
         xSemaphoreGive(s_session_mutex);
         return ESP_ERR_INVALID_VERSION;
@@ -327,9 +382,22 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
         sdf_ota_emit_audit(SDF_AUDIT_OTA_VERSION_UPGRADE, 0, 0);
     }
 
+    /* Finalize the streaming digest before anything can consume it. Done
+     * unconditionally so the context is released on exactly one path whether
+     * or not verification is compiled in. */
+    uint8_t digest[SDF_OTA_DIGEST_SIZE] = {0};
+    err = sdf_ota_digest_finish(&s_session.digest, digest);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to finalize image digest: %s", esp_err_to_name(err));
+        sdf_ota_session_digest_release();
+        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        xSemaphoreGive(s_session_mutex);
+        return err;
+    }
+
     /* Verify signature if enabled */
 #if CONFIG_SDF_OTA_SIGNATURE_VERIFY
-    err = sdf_ota_verify_signature(s_session.target_partition, s_session.expected_size);
+    err = sdf_ota_verify_signature(s_session.target_partition, s_session.expected_size, digest);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Signature verification failed: %s", esp_err_to_name(err));
         sdf_ota_emit_audit(SDF_AUDIT_OTA_SIGNATURE_INVALID, err, 0);

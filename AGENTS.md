@@ -68,7 +68,7 @@ Configured in `firmware/sdkconfig.defaults`:
 - Nonce replay window: 8 entries
 - Biometric fail threshold: 5 attempts in 60s → 120s lockout
 - Encrypted NVS required at boot
-- OTA signature verification: Ed25519 (mandatory)
+- OTA signature verification: ECDSA P-256 over a raw `r‖s` footer, enabled (`CONFIG_SDF_OTA_SIGNATURE_VERIFY=y`)
 - OTA downgrade: allowed with warning
 - Bootloader rollback: enabled (WDT 90s)
 

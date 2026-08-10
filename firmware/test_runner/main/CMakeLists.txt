@@ -25,6 +25,7 @@ idf_component_register(
          "../../components/sdf_cli/test/test_sdf_cli.c"
          "../../components/sdf_ota/test/test_sdf_ota_version.c"
          "../../components/sdf_ota/test/test_sdf_ota_signature.c"
+         "../../components/sdf_ota/test/test_sdf_ota_digest.c"
          "../../components/sdf_ble_companion/src/sdf_ble_ota_protocol.c"
          "../../components/sdf_ble_companion/test/test_sdf_ble_ota_protocol.c"
     INCLUDE_DIRS "."

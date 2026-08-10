@@ -181,7 +181,15 @@ extern void test_sdf_ota_version_compare_release_newer_than_pre_release(void);
 extern void test_sdf_ota_version_compare_pre_release_alphanumeric_order(void);
 extern void test_sdf_ota_version_compare_build_metadata_ignored(void);
 extern void test_sdf_ota_version_compare_malformed_input_returns_equal(void);
-extern void test_sdf_ota_verify_signature_default_config_returns_ok(void);
+extern void test_sdf_ota_verify_digest_known_answer_vectors_pass(void);
+extern void test_sdf_ota_verify_digest_tampered_signature_fails(void);
+extern void test_sdf_ota_verify_digest_tampered_digest_fails(void);
+extern void test_sdf_ota_verify_digest_malformed_public_key_rejected(void);
+extern void test_sdf_ota_verify_digest_null_arguments_rejected(void);
+extern void test_sdf_ota_digest_chunked_equals_contiguous(void);
+extern void test_sdf_ota_digest_excludes_footer(void);
+extern void test_sdf_ota_digest_rejects_use_after_finish(void);
+extern void test_sdf_ota_digest_null_arguments_rejected(void);
 
 /* Protocol BLE tests */
 extern void test_client_init_success(void);
@@ -417,7 +425,15 @@ void app_main(void) {
   RUN_TEST(test_sdf_ota_version_compare_pre_release_alphanumeric_order);
   RUN_TEST(test_sdf_ota_version_compare_build_metadata_ignored);
   RUN_TEST(test_sdf_ota_version_compare_malformed_input_returns_equal);
-  RUN_TEST(test_sdf_ota_verify_signature_default_config_returns_ok);
+  RUN_TEST(test_sdf_ota_verify_digest_known_answer_vectors_pass);
+  RUN_TEST(test_sdf_ota_verify_digest_tampered_signature_fails);
+  RUN_TEST(test_sdf_ota_verify_digest_tampered_digest_fails);
+  RUN_TEST(test_sdf_ota_verify_digest_malformed_public_key_rejected);
+  RUN_TEST(test_sdf_ota_verify_digest_null_arguments_rejected);
+  RUN_TEST(test_sdf_ota_digest_chunked_equals_contiguous);
+  RUN_TEST(test_sdf_ota_digest_excludes_footer);
+  RUN_TEST(test_sdf_ota_digest_rejects_use_after_finish);
+  RUN_TEST(test_sdf_ota_digest_null_arguments_rejected);
 
   printf("\n-----------------------\n");
   /* Protocol BLE tests */

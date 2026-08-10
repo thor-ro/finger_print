@@ -1,9 +1,4 @@
-# OTA Key Autogen
-
-## Purpose
-Specifies the requirements for automatic generation and management of OTA signing keys to simplify local development while preventing accidental key leaks.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Auto-generation of OTA signing key
 The system SHALL automatically generate an ECDSA P-256 (`secp256r1`) private key (`ota_private.key`) and extract its public key during the build process if the private key does not already exist. The extracted public key SHALL be a 65-byte uncompressed EC point (`0x04 || X || Y`).
@@ -19,10 +14,3 @@ The system SHALL automatically generate an ECDSA P-256 (`secp256r1`) private key
 #### Scenario: Extracted public key is uncompressed
 - **WHEN** the build extracts the public key from `ota_private.key` for embedding
 - **THEN** the extracted key is 65 bytes in uncompressed form, not a 32-byte raw key
-
-### Requirement: Prevent key commits
-The repository configuration SHALL prevent OTA private keys from being tracked by version control.
-
-#### Scenario: Developer attempts to commit keys
-- **WHEN** a developer generates an `ota_private.key` locally
-- **THEN** Git ignores the file according to the `.gitignore` rules.

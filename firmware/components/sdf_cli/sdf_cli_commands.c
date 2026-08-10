@@ -965,7 +965,15 @@ static int cmd_ota_verify(int argc, char **argv) {
            "'ota verify <bytes>' for a reliable result.\n",
            (uint32_t)next->size);
   }
-  err = sdf_ota_verify_signature(next, image_size);
+  /* No session accumulated a digest for this partition, so recompute it by
+   * reading the committed image back. */
+  uint8_t digest[SDF_OTA_DIGEST_SIZE];
+  err = sdf_ota_compute_partition_digest(next, image_size, digest);
+  if (err != ESP_OK) {
+    printf("Signature verification: FAILED to digest image (%s)\n", esp_err_to_name(err));
+    return 0;
+  }
+  err = sdf_ota_verify_signature(next, image_size, digest);
   if (err == ESP_OK) {
     printf("Signature verification: PASSED\n");
   } else {

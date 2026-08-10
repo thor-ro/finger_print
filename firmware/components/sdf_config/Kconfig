@@ -285,12 +285,18 @@ menu "OTA"
               Enable the sdf_ota component for managing OTA updates.
 
         config SDF_OTA_SIGNATURE_VERIFY
-            bool "Verify Ed25519 signature on OTA image"
-            default n
+            bool "Verify ECDSA P-256 signature on OTA image"
+            default y
             depends on SDF_OTA_ENABLE
             help
-              Verify Ed25519 signature before committing OTA image.
-              Requires mbedTLS with ed25519 support (CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED).
+              Verify the ECDSA P-256 (secp256r1) signature footer before committing an
+              OTA image. The signature covers the SHA-256 digest of the image, which is
+              accumulated incrementally during the transfer, so verification cost is
+              independent of image size.
+
+              Requires CONFIG_MBEDTLS_ECDSA_C and CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED
+              (both on by default). Images must be signed with tools/sdf_sign_ota.py using
+              the keypair whose public half the build embeds; unsigned images are rejected.
 
         config SDF_OTA_ALLOW_DOWNGRADE
             bool "Allow firmware downgrades"

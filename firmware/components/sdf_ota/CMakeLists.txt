@@ -3,12 +3,15 @@ if(IDF_TARGET STREQUAL "linux")
     # on this target - sdf_ota.c needs sdf_app_emit_audit() (hardware/stack-
     # bound, not part of test_runner's link graph) and app_update, and the
     # key-generation/signing tooling below exists to produce/embed a key that
-    # sdf_ota_signature.c's linux-compiled #else stub never reads. Register
-    # only the linux-safe subset. sdf_ota.h's sdf_ota_verify_signature()
-    # prototype #includes esp_partition.h unconditionally, so esp_partition
-    # is REQUIRES'd here too even though the linux stub never calls into it -
-    # esp_partition already builds for IDF_TARGET=linux (see sdf_storage,
-    # sdf_platform).
+    # sdf_ota_signature.c's partition-bound wrapper (compiled out here) never
+    # reads. Register only the linux-safe subset. The P-256 verification core
+    # sdf_ota_verify_digest() *is* compiled here - it takes a digest, a
+    # signature and a key and touches no flash - and is what the host tests
+    # exercise against known-answer vectors. sdf_ota.h's
+    # sdf_ota_verify_signature() prototype #includes esp_partition.h
+    # unconditionally, so esp_partition is REQUIRES'd here too even though the
+    # linux stub never calls into it - esp_partition already builds for
+    # IDF_TARGET=linux (see sdf_storage, sdf_platform).
     idf_component_register(SRCS "src/sdf_ota_version.c"
                            "src/sdf_ota_signature.c"
                            INCLUDE_DIRS "include"
@@ -19,9 +22,9 @@ else()
     set(SDF_SIGN_OTA_PY "${COMPONENT_DIR}/../../../tools/sdf_sign_ota.py")
 
     if(NOT EXISTS ${OTA_PRIVATE_KEY})
-        message(STATUS "OTA private key not found. Auto-generating throwaway key...")
+        message(STATUS "OTA private key not found. Auto-generating throwaway P-256 key...")
         execute_process(
-            COMMAND openssl genpkey -algorithm ed25519 -out ${OTA_PRIVATE_KEY}
+            COMMAND openssl ecparam -genkey -name prime256v1 -noout -out ${OTA_PRIVATE_KEY}
             RESULT_VARIABLE OPENSSL_RES
         )
         if(NOT OPENSSL_RES EQUAL 0)
@@ -38,6 +41,17 @@ else()
         if(NOT EXTRACT_RES EQUAL 0)
             message(FATAL_ERROR "Failed to extract public key using sdf_sign_ota.py")
         endif()
+    endif()
+
+    # sdf_ota_signature.c reads exactly SDF_OTA_PUBKEY_SIZE bytes from the
+    # embedded blob, so a stale 32-byte Ed25519 key left over from before the
+    # P-256 switch has to fail the build rather than be read past its end.
+    file(SIZE ${OTA_PUBLIC_KEY_BIN} OTA_PUBLIC_KEY_SIZE)
+    if(NOT OTA_PUBLIC_KEY_SIZE EQUAL 65)
+        message(FATAL_ERROR
+            "${OTA_PUBLIC_KEY_BIN} is ${OTA_PUBLIC_KEY_SIZE} bytes, expected 65 "
+            "(uncompressed P-256 point). Delete ota_private.key and ota_public_key.bin "
+            "to regenerate a P-256 keypair.")
     endif()
 
     idf_component_register(SRCS "src/sdf_ota.c"
@@ -58,7 +72,7 @@ else()
             --key ${OTA_PRIVATE_KEY}
             --output ${PROJECT_BIN_DIR}/${PROJECT_NAME}_signed.bin
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMENT "Signing OTA image with Ed25519"
+        COMMENT "Signing OTA image with ECDSA P-256"
         VERBATIM
     )
 
