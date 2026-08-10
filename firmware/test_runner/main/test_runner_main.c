@@ -190,6 +190,10 @@ extern void test_sdf_ota_digest_chunked_equals_contiguous(void);
 extern void test_sdf_ota_digest_excludes_footer(void);
 extern void test_sdf_ota_digest_rejects_use_after_finish(void);
 extern void test_sdf_ota_digest_null_arguments_rejected(void);
+extern void test_sdf_ota_window_every_split_point_identical(void);
+extern void test_sdf_ota_window_spanning_three_chunks(void);
+extern void test_sdf_ota_window_chunks_outside_window_leave_dst_untouched(void);
+extern void test_sdf_ota_window_degenerate_inputs_are_no_ops(void);
 
 /* Protocol BLE tests */
 extern void test_client_init_success(void);
@@ -434,6 +438,10 @@ void app_main(void) {
   RUN_TEST(test_sdf_ota_digest_excludes_footer);
   RUN_TEST(test_sdf_ota_digest_rejects_use_after_finish);
   RUN_TEST(test_sdf_ota_digest_null_arguments_rejected);
+  RUN_TEST(test_sdf_ota_window_every_split_point_identical);
+  RUN_TEST(test_sdf_ota_window_spanning_three_chunks);
+  RUN_TEST(test_sdf_ota_window_chunks_outside_window_leave_dst_untouched);
+  RUN_TEST(test_sdf_ota_window_degenerate_inputs_are_no_ops);
 
   printf("\n-----------------------\n");
   /* Protocol BLE tests */

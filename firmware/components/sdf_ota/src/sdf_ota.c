@@ -27,16 +27,42 @@ typedef struct {
     const esp_partition_t *target_partition;
     uint32_t expected_size;
     uint32_t bytes_written;
-    /* SHA-256 over the signed range, accumulated as bytes arrive rather than
-     * by reading the partition back at commit time. esp_ota_write() defers the
-     * trailing (size % 16) bytes into an internal buffer and only flushes them
-     * in esp_ota_end() when flash encryption is enabled, so a read-back would
-     * silently hash 0xFF for the last <=15 bytes the day encryption is turned
-     * on. Hashing on the way in is immune to that and saves a full read pass
-     * over a ~1.9MB partition. */
+    /* Everything sdf_ota_verify_and_commit() needs before esp_ota_end() is
+     * captured here from the write stream, so the commit path performs no read
+     * of target_partition while the OTA handle is open.
+     *
+     * That is not a micro-optimisation. esp_ota_write() defers the trailing
+     * (size % 16) bytes into an internal buffer and only flushes them in
+     * esp_ota_end() when flash encryption is enabled (esp_ota_ops.c:347-377,
+     * :583-592), so a read-back would see erased flash for the last <=15 bytes
+     * the day encryption is turned on - and since app images are 16-byte
+     * aligned and the footer is 68 bytes, that slice is exactly the "SDF\x01"
+     * magic. ESP-IDF v6 also allows writes to land in a *staging* partition
+     * that is only copied to the final one inside esp_ota_end()
+     * (esp_ota_ops.c:262, :598-601), which would make any earlier read return
+     * the previous image wholesale. Capturing on the way in is immune to both,
+     * and to whatever the write layer does next.
+     *
+     *   digest    SHA-256 over the signed range [0, expected_size - 68)
+     *   app_desc  the incoming esp_app_desc_t, window [32, 288), for the
+     *             version and downgrade check
+     *   footer    the 64-byte signature plus magic, window
+     *             [expected_size - 68, expected_size)
+     *
+     * All three windows are fixed at sdf_ota_begin() and depend only on writes
+     * being a pure sequential append, which they are. */
     sdf_ota_digest_t digest;
+    uint8_t app_desc[SDF_OTA_APP_DESC_SIZE];
+    uint8_t footer[SDF_OTA_FOOTER_SIZE];
     sdf_ota_state_t state;
     bool active;
+    /* True from a successful esp_ota_begin() until whichever comes first:
+     * esp_ota_abort(), or esp_ota_end() returning *any* value - it frees its
+     * entry through the cleanup: label on every path, success and failure
+     * alike (esp_ota_ops.c:604-610). Aborting after that would be a lookup of
+     * a freed handle, so the flag rather than a comment is what keeps the
+     * failure paths after esp_ota_end() from calling esp_ota_abort(). */
+    bool ota_handle_open;
 } sdf_ota_session_t;
 
 static sdf_ota_session_t s_session = {0};
@@ -115,6 +141,30 @@ static esp_err_t sdf_ota_state_transition(sdf_ota_state_t new_state)
     return ESP_OK;
 }
 
+/* The single way a session ends badly. Releases the digest context, hands the
+ * OTA handle back to ESP-IDF if it is still ours to hand back, marks the
+ * session FAILED and - the part every hand-rolled failure block used to miss -
+ * clears active, so the next sdf_ota_begin() from any transport is accepted
+ * without a reboot. Returns err unchanged so callers can `return
+ * sdf_ota_session_fail(err);` and lose nothing.
+ *
+ * Callers must hold s_session_mutex and must give it back themselves; the
+ * mutex is deliberately not touched here so this stays usable from paths that
+ * have more to do before unlocking. */
+static esp_err_t sdf_ota_session_fail(esp_err_t err)
+{
+    sdf_ota_session_digest_release();
+
+    if (s_session.ota_handle_open) {
+        esp_ota_abort(s_session.ota_handle);
+        s_session.ota_handle_open = false;
+    }
+
+    sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+    s_session.active = false;
+    return err;
+}
+
 esp_err_t sdf_ota_init(void)
 {
     if (s_session_mutex != NULL) {
@@ -157,12 +207,18 @@ esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_ha
         return ESP_ERR_NOT_FOUND;
     }
 
-    /* A signed image is at minimum a footer, so anything smaller cannot carry
-     * one. Reject here rather than underflowing signed_len below. */
-    if (image_size <= SDF_OTA_FOOTER_SIZE) {
+    /* The smallest thing that can be a signed app image is a header plus a
+     * complete esp_app_desc_t plus the footer. Below that the two capture
+     * windows would overlap or run past the end of the stream and the commit
+     * path would be verifying whatever the memset left behind, so reject here
+     * rather than in the middle of a transfer. Also keeps signed_len below
+     * from underflowing. */
+    if (image_size < SDF_OTA_MIN_IMAGE_SIZE) {
         xSemaphoreGive(s_session_mutex);
-        ESP_LOGE(TAG, "Image size %" PRIu32 " is not larger than the %u-byte signature footer",
-                 image_size, (unsigned)SDF_OTA_FOOTER_SIZE);
+        ESP_LOGE(TAG, "Image size %" PRIu32 " is below the %u-byte minimum for a signed image "
+                      "(%u-byte header + %u-byte app descriptor + %u-byte signature footer)",
+                 image_size, (unsigned)SDF_OTA_MIN_IMAGE_SIZE, (unsigned)SDF_OTA_APP_DESC_OFFSET,
+                 (unsigned)SDF_OTA_APP_DESC_SIZE, (unsigned)SDF_OTA_FOOTER_SIZE);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -190,10 +246,16 @@ esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_ha
     s_session.expected_size = image_size;
     s_session.bytes_written = 0;
     s_session.active = true;
+    s_session.ota_handle_open = true;
 
+    /* The two paths below release the handle by hand rather than through
+     * sdf_ota_session_fail(): the session is still IDLE here, and IDLE ->
+     * FAILED is not a legal transition. They must still clear the flag, or a
+     * later abort would look up a handle esp_ota_abort() has already freed. */
     err = sdf_ota_digest_begin(&s_session.digest, image_size - SDF_OTA_FOOTER_SIZE);
     if (err != ESP_OK) {
         esp_ota_abort(ota_handle);
+        s_session.ota_handle_open = false;
         s_session.active = false;
         xSemaphoreGive(s_session_mutex);
         return err;
@@ -203,6 +265,7 @@ esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_ha
     if (err != ESP_OK) {
         sdf_ota_session_digest_release();
         esp_ota_abort(ota_handle);
+        s_session.ota_handle_open = false;
         s_session.active = false;
         xSemaphoreGive(s_session_mutex);
         return err;
@@ -235,8 +298,7 @@ esp_err_t sdf_ota_write(sdf_ota_handle_t handle, const void *data, uint32_t len)
     esp_err_t err = esp_ota_write(s_session.ota_handle, data, len);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_write failed: %s", esp_err_to_name(err));
-        sdf_ota_session_digest_release();
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
@@ -248,11 +310,20 @@ esp_err_t sdf_ota_write(sdf_ota_handle_t handle, const void *data, uint32_t len)
      * along with the image is excluded without splitting chunks here. */
     err = sdf_ota_digest_update(&s_session.digest, data, len);
     if (err != ESP_OK) {
-        sdf_ota_session_digest_release();
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
+
+    /* Same append property, so the same reasoning: each window fills in
+     * whatever order the chunks happen to be sliced, and is complete once the
+     * stream has passed its end. Captured before bytes_written advances, since
+     * that is this chunk's own offset in the stream. Neither call can fail and
+     * neither depends on chunk alignment. */
+    sdf_ota_window_capture(s_session.app_desc, SDF_OTA_APP_DESC_OFFSET, SDF_OTA_APP_DESC_SIZE,
+                           s_session.bytes_written, data, len);
+    sdf_ota_window_capture(s_session.footer, s_session.expected_size - SDF_OTA_FOOTER_SIZE,
+                           SDF_OTA_FOOTER_SIZE, s_session.bytes_written, data, len);
 
     s_session.bytes_written += len;
 
@@ -275,7 +346,11 @@ esp_err_t sdf_ota_abort(sdf_ota_handle_t handle)
         return ESP_ERR_INVALID_STATE;
     }
 
-    esp_err_t err = esp_ota_abort(s_session.ota_handle);
+    esp_err_t err = ESP_OK;
+    if (s_session.ota_handle_open) {
+        err = esp_ota_abort(s_session.ota_handle);
+        s_session.ota_handle_open = false;
+    }
     sdf_ota_session_digest_release();
     s_session.active = false;
     (void)sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
@@ -301,10 +376,9 @@ esp_err_t sdf_ota_verify_integrity(sdf_ota_handle_t handle)
     if (s_session.bytes_written != s_session.expected_size) {
         ESP_LOGE(TAG, "Size mismatch: wrote %" PRIu32 ", expected %" PRIu32,
                  s_session.bytes_written, s_session.expected_size);
-        sdf_ota_session_digest_release();
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        esp_err_t fail_err = sdf_ota_session_fail(ESP_FAIL);
         xSemaphoreGive(s_session_mutex);
-        return ESP_FAIL;
+        return fail_err;
     }
 
     esp_err_t err = sdf_ota_state_transition(SDF_OTA_STATE_VERIFYING);
@@ -329,32 +403,42 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
 
     esp_err_t err = sdf_ota_state_transition(SDF_OTA_STATE_COMMITTING);
     if (err != ESP_OK) {
-        sdf_ota_session_digest_release();
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
 
-    /* Read version from target partition */
+    /* The running partition is fully committed with no handle open against it,
+     * so reading its description back from flash is sound. */
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_app_desc_t running_desc;
     err = esp_ota_get_partition_description(running, &running_desc);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to get running partition description: %s", esp_err_to_name(err));
-        sdf_ota_session_digest_release();
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
 
+    /* The incoming one is *not* - esp_ota_end() has not run yet - so it comes
+     * from the window captured off the write stream rather than from
+     * esp_ota_get_partition_description(s_session.target_partition, ...),
+     * which would read the target while the handle is still open. The magic
+     * check that call performs is repeated here, since nothing else has
+     * established that these 256 bytes are a descriptor at all. */
     esp_app_desc_t target_desc;
-    err = esp_ota_get_partition_description(s_session.target_partition, &target_desc);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to get target partition description: %s", esp_err_to_name(err));
-        sdf_ota_session_digest_release();
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+    memcpy(&target_desc, s_session.app_desc, sizeof(target_desc));
+    if (target_desc.magic_word != ESP_APP_DESC_MAGIC_WORD) {
+        ESP_LOGE(TAG, "Incoming image carries no app descriptor (magic 0x%08" PRIx32 ")",
+                 target_desc.magic_word);
+        err = sdf_ota_session_fail(ESP_ERR_NOT_FOUND);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
+    /* esp_app_desc_t's strings are fixed-size arrays that a hostile image can
+     * fill completely; terminate them before anything prints or compares. */
+    target_desc.version[sizeof(target_desc.version) - 1] = '\0';
+    target_desc.project_name[sizeof(target_desc.project_name) - 1] = '\0';
 
     ESP_LOGI(TAG, "Version check: current=%s, incoming=%s",
              running_desc.version, target_desc.version);
@@ -370,10 +454,9 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
         sdf_ota_emit_audit(SDF_AUDIT_OTA_VERSION_DOWNGRADE, 0, 0);
 #if !CONFIG_SDF_OTA_ALLOW_DOWNGRADE
         ESP_LOGE(TAG, "Downgrades not allowed (CONFIG_SDF_OTA_ALLOW_DOWNGRADE=n)");
-        sdf_ota_session_digest_release();
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(ESP_ERR_INVALID_VERSION);
         xSemaphoreGive(s_session_mutex);
-        return ESP_ERR_INVALID_VERSION;
+        return err;
 #endif
     } else if (cmp == SDF_OTA_VERSION_EQUAL) {
         ESP_LOGI(TAG, "Same version reinstall: %s", target_desc.version);
@@ -389,30 +472,34 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
     err = sdf_ota_digest_finish(&s_session.digest, digest);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to finalize image digest: %s", esp_err_to_name(err));
-        sdf_ota_session_digest_release();
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
 
-    /* Verify signature if enabled */
+    /* Verify signature if enabled. Against the footer captured from the
+     * stream, not one read back from the target - see the session struct. */
 #if CONFIG_SDF_OTA_SIGNATURE_VERIFY
-    err = sdf_ota_verify_signature(s_session.target_partition, s_session.expected_size, digest);
+    err = sdf_ota_verify_footer(s_session.footer, digest);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Signature verification failed: %s", esp_err_to_name(err));
         sdf_ota_emit_audit(SDF_AUDIT_OTA_SIGNATURE_INVALID, err, 0);
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
     ESP_LOGI(TAG, "Signature verification passed");
 #endif
 
-    /* Finalize OTA */
+    /* Finalize OTA. esp_ota_end() frees its entry on every path it can return
+     * from, success and failure alike (esp_ota_ops.c:604-610), so the handle
+     * stops being ours the moment it returns - hence the flag is cleared
+     * before the error branch, which would otherwise abort a freed handle. */
     err = esp_ota_end(s_session.ota_handle);
+    s_session.ota_handle_open = false;
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }
@@ -420,7 +507,7 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
     err = esp_ota_set_boot_partition(s_session.target_partition);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_ota_set_boot_partition failed: %s", esp_err_to_name(err));
-        sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
+        err = sdf_ota_session_fail(err);
         xSemaphoreGive(s_session_mutex);
         return err;
     }

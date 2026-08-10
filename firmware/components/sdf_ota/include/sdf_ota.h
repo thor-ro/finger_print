@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include "esp_err.h"
 #include "esp_partition.h"
+#include "esp_app_desc.h"
+#include "esp_assert.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -23,6 +25,23 @@ extern "C" {
  * because point decompression is not reliably compiled into ESP-IDF's
  * mbedTLS. */
 #define SDF_OTA_PUBKEY_SIZE  65u
+
+/* Where the incoming image carries its esp_app_desc_t. The offset is
+ * sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) = 24 + 8,
+ * which is exactly what esp_ota_get_partition_description() reads from
+ * (esp_ota_ops.c:985); both it and the 256-byte size are load-bearing parts of
+ * the image format the bootloader itself depends on. Named here so the session
+ * can capture the window off the transfer stream instead of reading the target
+ * partition back while an esp_ota_handle_t is still open. */
+#define SDF_OTA_APP_DESC_OFFSET  32u
+#define SDF_OTA_APP_DESC_SIZE    256u
+ESP_STATIC_ASSERT(SDF_OTA_APP_DESC_SIZE == sizeof(esp_app_desc_t),
+                  "SDF_OTA_APP_DESC_SIZE must track sizeof(esp_app_desc_t)");
+
+/* Smallest image a session will accept: header, a complete app descriptor and
+ * the signature footer. Anything shorter cannot carry the windows the commit
+ * path captures, and is not a bootable app image either. */
+#define SDF_OTA_MIN_IMAGE_SIZE  (SDF_OTA_APP_DESC_OFFSET + SDF_OTA_APP_DESC_SIZE + SDF_OTA_FOOTER_SIZE)
 
 /* ESP-IDF defines no ESP_ERR_INVALID_SIGNATURE - the previous implementation
  * returned one anyway, which is one of the ways it gave itself away as never
@@ -88,6 +107,18 @@ sdf_ota_version_cmp_t sdf_ota_version_compare(const char *current, const char *i
 esp_err_t sdf_ota_verify_digest(const uint8_t digest[SDF_OTA_DIGEST_SIZE],
                                 const uint8_t sig[SDF_OTA_SIG_SIZE],
                                 const uint8_t pubkey[SDF_OTA_PUBKEY_SIZE]);
+
+/* Verify a 68-byte signature footer (64-byte raw r||s, then the 4-byte "SDF\x01"
+ * magic) against digest - the SHA-256 accumulated over the signed range - using
+ * the public key embedded at build time. Takes the footer as bytes rather than
+ * as a partition to read, so a live session can hand over the copy it captured
+ * from the transfer stream instead of reading the target partition back while
+ * its esp_ota_handle_t is still open.
+ *
+ * Returns ESP_ERR_INVALID_CRC when the magic marker is absent - the "not
+ * signed" indicator - and otherwise whatever sdf_ota_verify_digest() returns. */
+esp_err_t sdf_ota_verify_footer(const uint8_t footer[SDF_OTA_FOOTER_SIZE],
+                                const uint8_t digest[SDF_OTA_DIGEST_SIZE]);
 
 /* Verify the ECDSA P-256 signature footer appended after the first image_size
  * bytes of partition, against digest - the SHA-256 accumulated over the

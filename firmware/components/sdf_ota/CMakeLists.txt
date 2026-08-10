@@ -11,11 +11,15 @@ if(IDF_TARGET STREQUAL "linux")
     # sdf_ota_verify_signature() prototype #includes esp_partition.h
     # unconditionally, so esp_partition is REQUIRES'd here too even though the
     # linux stub never calls into it - esp_partition already builds for
-    # IDF_TARGET=linux (see sdf_storage, sdf_platform).
+    # IDF_TARGET=linux (see sdf_storage, sdf_platform). esp_app_format is
+    # REQUIRES'd for the same reason: sdf_ota.h static-asserts
+    # SDF_OTA_APP_DESC_SIZE against sizeof(esp_app_desc_t), and that assert is
+    # worth keeping on the host build too - it is target-agnostic and the
+    # component builds for IDF_TARGET=linux.
     idf_component_register(SRCS "src/sdf_ota_version.c"
                            "src/sdf_ota_signature.c"
                            INCLUDE_DIRS "include"
-                           REQUIRES mbedtls sdf_common esp_partition)
+                           REQUIRES mbedtls sdf_common esp_partition esp_app_format)
 else()
     set(OTA_PRIVATE_KEY "${COMPONENT_DIR}/../../../ota_private.key")
     set(OTA_PUBLIC_KEY_BIN "${COMPONENT_DIR}/../../../ota_public_key.bin")
@@ -59,7 +63,7 @@ else()
                            "src/sdf_ota_signature.c"
                            ${SDF_VERSION_C}
                            INCLUDE_DIRS "include"
-                           REQUIRES mbedtls app_update sdf_common
+                           REQUIRES mbedtls app_update sdf_common esp_app_format
                            PRIV_REQUIRES sdf_config
                            EMBED_FILES ${OTA_PUBLIC_KEY_BIN})
 

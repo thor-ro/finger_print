@@ -105,6 +105,37 @@ void sdf_ota_digest_release(sdf_ota_digest_t *d)
 }
 
 // -----------------------------------------------------------------------------
+// Transfer-window capture
+// -----------------------------------------------------------------------------
+
+void sdf_ota_window_capture(uint8_t *dst, uint32_t win_start, uint32_t win_len,
+                            uint32_t stream_offset, const void *data, uint32_t len)
+{
+    if (dst == NULL || data == NULL || win_len == 0 || len == 0) {
+        return;
+    }
+    /* Both ranges are bounded by the image size for every caller in the tree,
+     * so neither sum can wrap; guarded anyway so the primitive is total and the
+     * clamps below cannot be reasoned around. */
+    if (win_start + win_len < win_start || stream_offset + len < stream_offset) {
+        return;
+    }
+
+    const uint32_t win_end = win_start + win_len;
+    const uint32_t chunk_end = stream_offset + len;
+
+    /* Wholly before or wholly after the window: nothing to do, dst untouched. */
+    if (chunk_end <= win_start || stream_offset >= win_end) {
+        return;
+    }
+
+    const uint32_t from = (stream_offset > win_start) ? stream_offset : win_start;
+    const uint32_t to = (chunk_end < win_end) ? chunk_end : win_end;
+
+    memcpy(dst + (from - win_start), (const uint8_t *)data + (from - stream_offset), to - from);
+}
+
+// -----------------------------------------------------------------------------
 // Signature verification
 // -----------------------------------------------------------------------------
 
@@ -242,6 +273,32 @@ esp_err_t sdf_ota_compute_partition_digest(const esp_partition_t *partition, uin
     return sdf_ota_digest_finish(&digest, digest_out);
 }
 
+esp_err_t sdf_ota_verify_footer(const uint8_t footer[SDF_OTA_FOOTER_SIZE],
+                                const uint8_t digest[SDF_OTA_DIGEST_SIZE])
+{
+    if (footer == NULL || digest == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (memcmp(footer + SDF_OTA_SIG_SIZE, SDF_OTA_MAGIC, SDF_OTA_MAGIC_SIZE) != 0) {
+        ESP_LOGE(TAG, "Signature magic marker not found (image not signed?)");
+        return ESP_ERR_INVALID_CRC;  /* Use as "not signed" indicator */
+    }
+
+    esp_err_t err = sdf_ota_verify_digest(digest, footer, sdf_ota_public_key);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Signature verification PASSED");
+    return ESP_OK;
+}
+
+/* Reads the footer back from flash, so it is correct only for a partition with
+ * no open esp_ota_handle_t - today just sdf_cli's out-of-band "ota verify",
+ * which inspects an already-committed image. A live session must not use this:
+ * it captures the footer from the transfer stream and calls
+ * sdf_ota_verify_footer() directly. */
 esp_err_t sdf_ota_verify_signature(const esp_partition_t *partition, uint32_t image_size,
                                    const uint8_t digest[SDF_OTA_DIGEST_SIZE])
 {
@@ -271,23 +328,20 @@ esp_err_t sdf_ota_verify_signature(const esp_partition_t *partition, uint32_t im
         return err;
     }
 
-    if (memcmp(footer + SDF_OTA_SIG_SIZE, SDF_OTA_MAGIC, SDF_OTA_MAGIC_SIZE) != 0) {
-        ESP_LOGE(TAG, "Signature magic marker not found (image not signed?)");
-        return ESP_ERR_INVALID_CRC;  /* Use as "not signed" indicator */
-    }
-
-    err = sdf_ota_verify_digest(digest, footer, sdf_ota_public_key);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    ESP_LOGI(TAG, "Signature verification PASSED");
-    return ESP_OK;
+    return sdf_ota_verify_footer(footer, digest);
 }
 
 #else /* !CONFIG_SDF_OTA_SIGNATURE_VERIFY || CONFIG_IDF_TARGET_LINUX */
 
 #include "esp_partition.h"
+
+esp_err_t sdf_ota_verify_footer(const uint8_t footer[SDF_OTA_FOOTER_SIZE],
+                                const uint8_t digest[SDF_OTA_DIGEST_SIZE])
+{
+    (void)footer;
+    (void)digest;
+    return ESP_OK;  /* Verification disabled */
+}
 
 esp_err_t sdf_ota_verify_signature(const esp_partition_t *partition, uint32_t image_size,
                                    const uint8_t digest[SDF_OTA_DIGEST_SIZE])

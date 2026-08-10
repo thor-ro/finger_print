@@ -253,6 +253,10 @@ static bool sdf_ble_ota_handle_end(uint16_t conn_handle, size_t payload_len) {
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "END: verification/commit failed: %s", esp_err_to_name(err));
+        /* Redundant since sdf_ota releases the session itself on every failure
+         * path - releasing it is the component's job, not the transport's -
+         * but kept because it is also harmless: a session that is already gone
+         * returns ESP_ERR_INVALID_STATE here without touching anything. */
         sdf_ota_abort(handle);
         char notify_buf[96];
         snprintf(notify_buf, sizeof(notify_buf), "{\"status\":\"failed\",\"error\":\"%s\"}",

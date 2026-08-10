@@ -655,6 +655,9 @@ static esp_err_t sdf_zigbee_ota_upgrade_status_handler(
           ret = sdf_ota_write(s_ota_session, payload, payload_size);
           if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write OTA data: %s", esp_err_to_name(ret));
+            /* sdf_ota has already released the session; keeping the handle
+             * would only feed a dead one back in on the next chunk. */
+            s_ota_session = NULL;
           }
         }
       }
@@ -672,6 +675,9 @@ static esp_err_t sdf_zigbee_ota_upgrade_status_handler(
       ret = sdf_ota_verify_integrity(s_ota_session);
       if (ret != ESP_OK) {
         ESP_LOGE(TAG, "OTA integrity check failed: %s", esp_err_to_name(ret));
+        /* Failure ends the session inside sdf_ota - dropping the handle here
+         * is what keeps a later FINISH from committing against it. */
+        s_ota_session = NULL;
       }
       break;
 

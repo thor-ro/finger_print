@@ -50,6 +50,27 @@ esp_err_t sdf_ota_digest_finish(sdf_ota_digest_t *d, uint8_t out[SDF_OTA_DIGEST_
  * ends a session, including paths that may run twice. */
 void sdf_ota_digest_release(sdf_ota_digest_t *d);
 
+/* Copy whatever part of the transfer chunk [stream_offset, stream_offset+len)
+ * falls inside the absolute window [win_start, win_start+win_len) into dst, at
+ * the offset within the window it belongs at.
+ *
+ * Same source of truth as the digest, for the same reason: the signature
+ * footer and the incoming esp_app_desc_t are needed before esp_ota_end(), and
+ * reading them back off the target partition at that point is only correct
+ * while esp_ota_write() happens not to be buffering (flash encryption) and the
+ * staging partition happens to be the final one. Windows are absolute rather
+ * than sliding because expected_size is fixed at sdf_ota_begin(), so no
+ * ring-buffer state is needed and a chunk never has to be split by the caller.
+ *
+ * Takes no partition, flash or session argument, so the chunk-boundary
+ * arithmetic - where an off-by-one would hide - is exercised directly by the
+ * host test runner on IDF_TARGET=linux. Stateless and idempotent per byte: a
+ * chunk lying wholly outside the window leaves dst untouched, and feeding the
+ * same chunk twice is harmless. Callers must still feed the stream in order and
+ * exactly once for the window to end up complete. */
+void sdf_ota_window_capture(uint8_t *dst, uint32_t win_start, uint32_t win_len,
+                            uint32_t stream_offset, const void *data, uint32_t len);
+
 #ifdef __cplusplus
 }
 #endif
