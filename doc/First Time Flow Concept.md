@@ -38,7 +38,7 @@ The setup is structured into three progressive phases.
 
 1. **Prepare Coordinator:** The user enables "Permit Join" on their Zigbee coordinator (e.g., Zigbee2MQTT).
 2. **Initiate Zigbee Join on SDF:**
-   - The user presses and holds the SDF Configuration Button for **3 seconds**.
+   - The user opens the BLE Companion web app, logs in, and taps **Request Zigbee Join** on the dashboard (see `user_manual.md`). There is no physical-button path for this — Zigbee Join is only reachable through an authenticated companion-app request.
    - The LED begins to pulse **Purple** (Awaiting Admin Auth).
 3. **Authorize:** The Admin (User ID 1) touches the fingerprint sensor to authorize the network join.
 4. **Active Joining:** The LED flashes **Rapid Purple** as the device attempts to steer to the network.
@@ -57,12 +57,13 @@ Short Press is **state-dependent**, resolving its action at the moment the butto
 | **Short Press** | Unclaimed (0 users) | None | n/a | Starts Admin Enrollment (Phase 1) |
 | **Short Press** | Claimed, Nuki not yet paired | Admin Fingerprint | `PENDING_NUKI_PAIR` (Pulse Yellow) | Enters BLE Nuki Pairing Mode (Phase 2) |
 | **Short Press** | Claimed, Nuki already paired | Admin Fingerprint | `PENDING_USER_ENROLL` (Pulse Blue) | Starts Standard User Enrollment |
-| **Triple Press** | Claimed | Admin Fingerprint | `PENDING_USER_ENROLL` (Pulse Blue) | Starts Admin User Enrollment (Permission 3) |
-| **Hold 3 sec** | Claimed | Admin Fingerprint | `PENDING_ZB_JOIN` (Pulse Purple) | Enters Zigbee Network Steering (Phase 3) |
 | **Hold 8 sec** | Any | Admin Fingerprint | `PENDING_FACTORY_RESET` (Pulse Red) | Factory Reset (Wipes users, Nuki keys, Zigbee) |
 
 > [!NOTE]
 > Double Press is no longer mapped to any action. It previously triggered Nuki Pairing, but that gesture has been retired in favor of the state-dependent Short Press behavior above, which also closes a gap where Nuki Pairing (via Double Press) could previously be triggered on an unclaimed device with no Admin fingerprint check at all. The gesture remains free for future use.
+
+> [!NOTE]
+> Triple Press and Hold 3 sec are no longer mapped to any action. They previously triggered Admin User Enrollment and Zigbee Join respectively; both are now only reachable through an authenticated request from the BLE Companion web app (see `user_manual.md`), still gated on the same Admin fingerprint authorization. Both gestures remain free for future use.
 
 > [!NOTE] 
 > Because the Configuration Button requires Admin verification for nearly all actions, the device is highly secure against physical tampering after the initial setup.
@@ -108,15 +109,15 @@ This is the primary method for adding household members, guests, or other people
 5. **Completion:** After the third scan, the template is generated and saved with the next available User ID and Standard permission (1). The LED breathes solid **Green** for a few seconds to confirm.
 6. **Ready:** The new user can now unlock the door with their fingerprint.
 
-### 5.4 Local Enrollment — Admin User (Button)
+### 5.4 Local Enrollment — Admin User (Companion App)
 
-To enroll an additional Admin (e.g., a partner or co-owner who should also be able to configure the device):
+To enroll an additional Admin (e.g., a partner or co-owner who should also be able to configure the device), use the BLE Companion web app rather than the physical button — there is no button gesture for this (see `user_manual.md`).
 
-1. **Initiate:** The Admin presses the Configuration Button **three times rapidly (Triple Press)**.
+1. **Initiate:** A logged-in companion-app user taps **Request Enroll Admin** on the dashboard.
 2. **Pending Authorization:** The LED begins to pulse **Blue**, indicating the device is in `PENDING_USER_ENROLL` state (same visual as standard enrollment).
-3. **Authorize:** The Admin touches the fingerprint sensor within 10 seconds.
+3. **Authorize:** An existing Admin touches the fingerprint sensor within 10 seconds.
 4. **Biometric Capture:** Identical to Standard User enrollment — the new user places their finger three times.
-5. **Completion:** The template is saved with Admin permission (3). The new Admin can now both unlock the door **and** authorize configuration actions.
+5. **Completion:** The template is saved with Admin permission (3). The new Admin can now both unlock the door **and** authorize configuration actions. The companion app is notified that enrollment has started.
 
 > [!IMPORTANT]
 > Adding an Admin gives that person full control over the device, including the ability to enroll/remove other users, pair to Nuki, join Zigbee networks, and factory reset the device. Only grant Admin to trusted individuals.
@@ -135,12 +136,14 @@ If the device has completed Phase 3 (Zigbee Join), additional users can be enrol
 ### 5.6 Enrollment Flow Summary
 
 ```
-Admin presses button ──► LED pulses Blue ──► Admin scans finger ──► New user scans 3× ──► LED Green ✓
-     (Short/Triple)        (Pending Auth)       (Authorization)       (Capture)           (Saved)
+Admin presses button      ──► LED pulses Blue ──► Admin scans finger ──► New user scans 3× ──► LED Green ✓
+  or requests via app          (Pending Auth)       (Authorization)       (Capture)           (Saved)
+     (Short Press /
+   companion-app request)
 ```
 
-| Enrollment Method | Button Gesture | Permission Assigned | Admin Auth Required |
+| Enrollment Method | Trigger | Permission Assigned | Admin Auth Required |
 | --- | --- | --- | --- |
 | Standard User (local) | Short Press | 1 (Standard) | Yes — Admin fingerprint |
-| Admin User (local) | Triple Press | 3 (Admin) | Yes — Admin fingerprint |
+| Admin User (local) | Companion-app request ("Request Enroll Admin") | 3 (Admin) | Yes — Admin fingerprint |
 | Remote (Zigbee) | n/a | Specified by coordinator | No (trusted network) |

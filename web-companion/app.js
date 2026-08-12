@@ -261,10 +261,8 @@ function handleConfigNotification(event) {
     try {
         const config = JSON.parse(jsonStr);
 
-        if (config.nuki_repair !== undefined) {
-            if (nukiRepairPending) {
-                nukiRepairPending.resolve(config.nuki_repair === true);
-            }
+        if (pendingBleAdminAction && config[pendingBleAdminAction.key] !== undefined) {
+            pendingBleAdminAction.resolve(config[pendingBleAdminAction.key] === true);
             return;
         }
 
@@ -281,66 +279,101 @@ function updateStatusCards(config) {
     // Lock state would come from other notifications
 }
 
-// --- Nuki Re-pairing ---
-// Reuses the Config characteristic: a write of {"action":"nuki_repair"} asks
-// the device to enter the admin-fingerprint-gated re-pair flow (see
-// sdf_ble_companion_config_access() / ble-companion-service spec, "Nuki
-// re-pair authorized"/"denied" scenarios). The device only ever notifies
-// Config with {"nuki_repair": true|false} in response to this request (see
-// sdf_ble_companion_reply_nuki_repair) - handleConfigNotification() below
-// resolves nukiRepairPending from that notify instead of treating it as a
-// general config broadcast.
-const nukiRepairBtn = document.getElementById('btn-nuki-repair');
-const nukiRepairStatus = document.getElementById('nuki-repair-status');
-let nukiRepairPending = null; // { resolve } for the next {"nuki_repair":...} notify
+// --- BLE-triggered admin actions (Nuki re-pair, Enroll-Admin, Zigbee Join) ---
+// All three reuse the Config characteristic: a write of {"action":"<key>"}
+// asks the device to enter the admin-fingerprint-gated flow for that action
+// (see sdf_ble_companion_config_access() / ble-companion-service spec). The
+// device only ever notifies Config with {"<key>": true|false} in response to
+// its own matching request (see sdf_ble_companion_reply_admin_action) -
+// handleConfigNotification() above resolves pendingBleAdminAction from that
+// notify instead of treating it as a general config broadcast. Only one such
+// request can be pending at a time (mirrors the device's own
+// single-pending-admin-action invariant), so a single pending slot - rather
+// than one per action - covers all three.
+let pendingBleAdminAction = null; // { key, resolve } for the next {"<key>":...} notify
 
 // The device's own pending-admin-action timeout is 10s
 // (SDF_ADMIN_ACTION_TIMEOUT_MS); wait a little longer client-side so the
 // device's own timeout-driven denial reply has time to arrive first.
-const NUKI_REPAIR_RESPONSE_TIMEOUT_MS = 12000;
+const BLE_ADMIN_ACTION_RESPONSE_TIMEOUT_MS = 12000;
 
-function waitForNukiRepairResult(timeoutMs) {
+function waitForBleAdminActionResult(key, timeoutMs) {
     return new Promise((resolve) => {
         const timer = setTimeout(() => {
-            nukiRepairPending = null;
+            pendingBleAdminAction = null;
             resolve(null); // no response in time - treated as ambiguous, not denied
         }, timeoutMs);
 
-        nukiRepairPending = {
+        pendingBleAdminAction = {
+            key,
             resolve(authorized) {
                 clearTimeout(timer);
-                nukiRepairPending = null;
+                pendingBleAdminAction = null;
                 resolve(authorized);
             }
         };
     });
 }
 
-nukiRepairBtn.addEventListener('click', async () => {
-    try {
-        nukiRepairBtn.disabled = true;
-        nukiRepairStatus.textContent = 'Requesting Nuki re-pair... scan the Admin fingerprint on the device.';
+// Wires up a "request <action>" button: writes {"action":key}, waits for the
+// matching {key:true|false} reply (or the client-side timeout), and shows a
+// three-way authorized / denied-or-timeout / no-response status message.
+// Shared by all three BLE-triggered admin action triggers below rather than
+// duplicated per action.
+function wireBleAdminActionButton(button, statusEl, key, pendingMessage, authorizedMessage, rejectionHint) {
+    button.addEventListener('click', async () => {
+        try {
+            button.disabled = true;
+            statusEl.textContent = pendingMessage;
 
-        const resultPromise = waitForNukiRepairResult(NUKI_REPAIR_RESPONSE_TIMEOUT_MS);
-        const payload = new TextEncoder().encode(JSON.stringify({ action: 'nuki_repair' }));
-        await configChar.writeValue(payload);
+            const resultPromise = waitForBleAdminActionResult(key, BLE_ADMIN_ACTION_RESPONSE_TIMEOUT_MS);
+            const payload = new TextEncoder().encode(JSON.stringify({ action: key }));
+            await configChar.writeValue(payload);
 
-        const authorized = await resultPromise;
-        if (authorized === true) {
-            nukiRepairStatus.textContent = 'Nuki pairing started on the device.';
-        } else if (authorized === false) {
-            nukiRepairStatus.textContent = 'Nuki re-pair request denied or timed out.';
-        } else {
-            nukiRepairStatus.textContent = 'No response received - check the device.';
+            const authorized = await resultPromise;
+            if (authorized === true) {
+                statusEl.textContent = authorizedMessage;
+            } else if (authorized === false) {
+                statusEl.textContent = 'Request denied or timed out.';
+            } else {
+                statusEl.textContent = 'No response received - check the device.';
+            }
+        } catch (err) {
+            console.error(err);
+            pendingBleAdminAction = null;
+            statusEl.textContent = `Request rejected: ${err.message} (${rejectionHint}).`;
+        } finally {
+            button.disabled = false;
         }
-    } catch (err) {
-        console.error(err);
-        nukiRepairPending = null;
-        nukiRepairStatus.textContent = `Request rejected: ${err.message} (setup may not be complete yet, or the connection isn't authenticated).`;
-    } finally {
-        nukiRepairBtn.disabled = false;
-    }
-});
+    });
+}
+
+wireBleAdminActionButton(
+    document.getElementById('btn-nuki-repair'),
+    document.getElementById('nuki-repair-status'),
+    'nuki_repair',
+    'Requesting Nuki re-pair... scan the Admin fingerprint on the device.',
+    'Nuki pairing started on the device.',
+    "setup may not be complete yet, or the connection isn't authenticated"
+);
+
+wireBleAdminActionButton(
+    document.getElementById('btn-enroll-admin'),
+    document.getElementById('enroll-admin-status'),
+    'enroll_admin',
+    'Requesting Enroll-Admin... scan the Admin fingerprint on the device.',
+    'Admin enrollment started on the device - follow the fingerprint prompts.',
+    "the connection isn't authenticated, or another admin action is already pending"
+);
+
+wireBleAdminActionButton(
+    document.getElementById('btn-zb-join'),
+    document.getElementById('zb-join-status'),
+    'zb_join',
+    'Requesting Zigbee Join window... scan the Admin fingerprint on the device.',
+    'Zigbee join window opened on the device.',
+    "the connection isn't authenticated, or another admin action is already pending"
+);
 
 // Enrollment
 document.getElementById('btn-enroll').addEventListener('click', async () => {

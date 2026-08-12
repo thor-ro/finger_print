@@ -140,8 +140,11 @@ static void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
         s->pending_admin_action_start_us = 0;
         xSemaphoreGive(s->lock);
 
-        if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL ||
-            action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN) {
+        /* ENROLL_ADMIN is no longer button-reachable (see the
+         * button-admin-actions-to-companion-app change) so it can't land
+         * here - only plain ENROLL (single-click on an unclaimed device)
+         * still bypasses the admin-fingerprint gate below. */
+        if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
             led_pulse_blue();
             sdf_services_request_enrollment(1, 3);
         } else {
@@ -236,19 +239,19 @@ void sdf_button_task(void *arg) {
             iot_button_register_cb(s_button_state.btn_handle, BUTTON_SINGLE_CLICK, NULL,
                                    sdf_button_single_click_cb, NULL);
 
-            button_event_args_t arg_3click = {.multiple_clicks = {.clicks = 3}};
-            iot_button_register_cb(s_button_state.btn_handle, BUTTON_MULTIPLE_CLICK, &arg_3click,
-                                   sdf_button_cb, (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN);
-
             /* BUTTON_DOUBLE_CLICK is intentionally left unmapped. Double-Press
              * is retired as the Nuki-pairing trigger (see the
              * nuki-pairing-setup-flow change): single-click's action is now
              * state-dependent and reaches NUKI_PAIR itself once an admin
              * exists. The gesture remains free for future use. */
 
-            button_event_args_t arg_3s = {.long_press = {.press_time = 3000}};
-            iot_button_register_cb(s_button_state.btn_handle, BUTTON_LONG_PRESS_START, &arg_3s,
-                                   sdf_button_cb, (void *)SDF_SERVICES_ADMIN_ACTION_ZB_JOIN);
+            /* Triple-click (ENROLL_ADMIN) and Hold-3s (ZB_JOIN) are
+             * intentionally left unmapped as of the
+             * button-admin-actions-to-companion-app change: both actions are
+             * now only reachable via an authenticated companion-app request
+             * (see sdf_app_on_ble_admin_action_request()), which still
+             * requires the same admin-fingerprint authorization as before.
+             * Both gestures remain free for future use. */
 
             button_event_args_t arg_8s = {.long_press = {.press_time = 8000}};
             iot_button_register_cb(s_button_state.btn_handle, BUTTON_LONG_PRESS_START, &arg_8s,

@@ -230,36 +230,45 @@ void test_web_auth_should_not_resolve_for_other_actions(void) {
       SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_FAIL));
 }
 
-/* Nuki re-pair: pending-request resolve guard */
+/* BLE-triggered admin actions (Nuki re-pair, Enroll-Admin, Zigbee Join):
+ * shared pending-request resolve guard */
 
-void test_nuki_repair_should_resolve_on_denial_or_timeout(void) {
-  TEST_ASSERT_TRUE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+void test_ble_admin_action_should_resolve_on_denial_or_timeout(void) {
+  TEST_ASSERT_TRUE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
       SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR, ESP_FAIL));
-  TEST_ASSERT_TRUE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+  TEST_ASSERT_TRUE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
       SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR, ESP_ERR_TIMEOUT));
-}
-
-void test_nuki_repair_should_not_resolve_on_success(void) {
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
-      SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR, ESP_OK));
-}
-
-void test_nuki_repair_should_not_resolve_for_other_actions(void) {
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
-      SDF_SERVICES_ADMIN_ACTION_NONE, ESP_FAIL));
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
-      SDF_SERVICES_ADMIN_ACTION_ENROLL, ESP_FAIL));
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
-      SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR, ESP_FAIL));
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
-      SDF_SERVICES_ADMIN_ACTION_ZB_JOIN, ESP_FAIL));
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
-      SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET, ESP_FAIL));
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
-      SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION, ESP_FAIL));
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+  TEST_ASSERT_TRUE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
       SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_FAIL));
-  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+  TEST_ASSERT_TRUE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_ERR_TIMEOUT));
+  TEST_ASSERT_TRUE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ZB_JOIN, ESP_FAIL));
+  TEST_ASSERT_TRUE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ZB_JOIN, ESP_ERR_TIMEOUT));
+}
+
+void test_ble_admin_action_should_not_resolve_on_success(void) {
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR, ESP_OK));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_OK));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ZB_JOIN, ESP_OK));
+}
+
+void test_ble_admin_action_should_not_resolve_for_other_actions(void) {
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NONE, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
       SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH, ESP_FAIL));
 }
 

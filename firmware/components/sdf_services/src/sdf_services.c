@@ -293,6 +293,13 @@ void sdf_services_execute_admin_action(
 
   if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN) {
     sdf_services_start_local_enrollment_with_permission(3u);
+    /* Unlike plain ENROLL (button-only, nothing to notify), ENROLL_ADMIN can
+     * also be requested over BLE, so action_cb still needs to run afterwards
+     * purely so sdf_app can route a reply back to the requesting connection
+     * - the enrollment side effect above is unchanged either way. */
+    if (action_cb != NULL) {
+      action_cb(action_ctx, action);
+    }
     return;
   }
 

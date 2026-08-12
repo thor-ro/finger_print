@@ -106,6 +106,20 @@
                 </div>
 
                 <div class="dashboard-section">
+                    <h3>Enroll Admin</h3>
+                    <p>Enroll a new Admin-permission fingerprint. An existing Admin must scan their fingerprint on the device to approve it — a BLE request alone is never enough.</p>
+                    <button id="btn-enroll-admin" class="secondary-btn">Request Enroll Admin</button>
+                    <p id="enroll-admin-status" class="status-msg"></p>
+                </div>
+
+                <div class="dashboard-section">
+                    <h3>Zigbee Join</h3>
+                    <p>Open a window for a new Zigbee device to join the network. An Admin must scan their fingerprint on the device to approve it — a BLE request alone is never enough.</p>
+                    <button id="btn-zb-join" class="secondary-btn">Request Zigbee Join</button>
+                    <p id="zb-join-status" class="status-msg"></p>
+                </div>
+
+                <div class="dashboard-section">
                     <h3>Firmware Update (OTA)</h3>
                     <div class="alert warning">
                         <strong>Warning:</strong> Ensure your battery is above 20%. OTA transfer over Bluetooth draws significant power and firmware is large — keep the app open and the device nearby until it completes.

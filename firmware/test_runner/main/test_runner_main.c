@@ -113,9 +113,9 @@ extern void test_web_auth_decide_registration_denied_does_not_persist(void);
 extern void test_web_auth_should_resolve_on_web_reg_auth_failure(void);
 extern void test_web_auth_should_not_resolve_on_web_reg_auth_success(void);
 extern void test_web_auth_should_not_resolve_for_other_actions(void);
-extern void test_nuki_repair_should_resolve_on_denial_or_timeout(void);
-extern void test_nuki_repair_should_not_resolve_on_success(void);
-extern void test_nuki_repair_should_not_resolve_for_other_actions(void);
+extern void test_ble_admin_action_should_resolve_on_denial_or_timeout(void);
+extern void test_ble_admin_action_should_not_resolve_on_success(void);
+extern void test_ble_admin_action_should_not_resolve_for_other_actions(void);
 extern void test_setup_state_unclaimed_when_no_enrolled_users(void);
 
 /* Event Router tests */
@@ -365,9 +365,9 @@ void app_main(void) {
   RUN_TEST(test_web_auth_should_resolve_on_web_reg_auth_failure);
   RUN_TEST(test_web_auth_should_not_resolve_on_web_reg_auth_success);
   RUN_TEST(test_web_auth_should_not_resolve_for_other_actions);
-  RUN_TEST(test_nuki_repair_should_resolve_on_denial_or_timeout);
-  RUN_TEST(test_nuki_repair_should_not_resolve_on_success);
-  RUN_TEST(test_nuki_repair_should_not_resolve_for_other_actions);
+  RUN_TEST(test_ble_admin_action_should_resolve_on_denial_or_timeout);
+  RUN_TEST(test_ble_admin_action_should_not_resolve_on_success);
+  RUN_TEST(test_ble_admin_action_should_not_resolve_for_other_actions);
   RUN_TEST(test_setup_state_unclaimed_when_no_enrolled_users);
 
   /* Event Router tests */

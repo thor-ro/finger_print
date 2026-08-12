@@ -133,10 +133,14 @@ bool sdf_services_web_auth_should_resolve_on_action_complete(
     sdf_services_admin_action_t action, esp_err_t result);
 
 /* Same guarantee as sdf_services_web_auth_should_resolve_on_action_complete(),
- * for the BLE-triggered Nuki re-pair request: true only for NUKI_REPAIR
- * completing with a non-OK result (denial or timeout), so the pending BLE
- * client is never left waiting indefinitely. See sdf_services_web_auth.c. */
-bool sdf_services_nuki_repair_should_resolve_on_action_complete(
+ * shared across every BLE-triggered admin action that routes its result back
+ * to an originating GATT connection (Nuki re-pair, Enroll-Admin, Zigbee
+ * Join): true only if `action` is one of those and completed with a non-OK
+ * result (denial or timeout), so the pending BLE client is never left
+ * waiting indefinitely. A single shared function rather than one per action
+ * so adding a future BLE-triggered action can't forget this guarantee. See
+ * sdf_services_web_auth.c. */
+bool sdf_services_ble_admin_action_should_resolve_on_action_complete(
     sdf_services_admin_action_t action, esp_err_t result);
 
 #endif /* SDF_SERVICES_H */
