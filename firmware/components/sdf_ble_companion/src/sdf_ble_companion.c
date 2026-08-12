@@ -13,6 +13,7 @@
 #include "esp_log.h"
 #include "esp_err.h"
 #include "esp_bt.h"
+#include "esp_random.h"
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
 #include "host/ble_gatt.h"
@@ -28,11 +29,22 @@
 #define SDF_BLE_COMPANION_MAX_CONNECTIONS 3
 #define SDF_BLE_COMPANION_ATTR_MAX_LEN 512
 
-#define SDF_BLE_COMPANION_AUTH_LOGIN 0x01
+/* LOGIN (single-message, [cmd][username][password_hash]) is retired by the
+ * challenge-response protocol below - opcode 0x01 is deliberately left
+ * unassigned (rather than reused) so an old web-companion app's LOGIN write
+ * falls through to the unknown-opcode rejection instead of ever being
+ * misinterpreted as something else. REGISTER and LOGOUT are unchanged. */
 #define SDF_BLE_COMPANION_AUTH_REGISTER 0x02
 #define SDF_BLE_COMPANION_AUTH_LOGOUT 0x00
+#define SDF_BLE_COMPANION_AUTH_LOGIN_INIT 0x03
+#define SDF_BLE_COMPANION_AUTH_LOGIN_VERIFY 0x04
 #define SDF_BLE_COMPANION_AUTH_RESULT_PENDING 0x02
 #define SDF_BLE_COMPANION_AUTH_RESULT_OK 0x01
+
+/* LOGIN_INIT read-branch challenge payload: [salt(16)][iteration_count(4,
+ * little-endian)][nonce(16)] = 36 bytes. See tasks.md 6.2. */
+#define SDF_BLE_COMPANION_LOGIN_CHALLENGE_WIRE_LEN \
+    (SDF_STORAGE_WEB_USER_SALT_LEN + 4 + SDF_SERVICES_WEB_AUTH_NONCE_LEN)
 
 /* Admin-fingerprint-gated action request sentinels on the Config
  * characteristic: a write whose JSON body is `{"action":"<name>"}` requests
@@ -249,11 +261,34 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
     }
 
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        const char *resp = (conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED)
-                               ? "AUTH_OK" : "AUTH_REQUIRED";
-        xSemaphoreGive(s_lock);
-        int rc = os_mbuf_append(ctxt->om, resp, strlen(resp));
-        return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        if (conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+            const char *resp = "AUTH_OK";
+            xSemaphoreGive(s_lock);
+            int rc = os_mbuf_append(ctxt->om, resp, strlen(resp));
+            return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        } else if (conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED) {
+            /* Deliver the LOGIN_INIT challenge issued for this connection:
+             * write-then-read, not write-then-notify - see design.md
+             * "Challenge delivery" decision. Wire layout: [salt(16)]
+             * [iteration_count(4, little-endian)][nonce(16)]. */
+            uint8_t payload[SDF_BLE_COMPANION_LOGIN_CHALLENGE_WIRE_LEN];
+            memcpy(payload, conn->pending_login_challenge.salt, SDF_STORAGE_WEB_USER_SALT_LEN);
+            uint32_t iter = conn->pending_login_challenge.iteration_count;
+            payload[SDF_STORAGE_WEB_USER_SALT_LEN + 0] = (uint8_t)(iter & 0xFF);
+            payload[SDF_STORAGE_WEB_USER_SALT_LEN + 1] = (uint8_t)((iter >> 8) & 0xFF);
+            payload[SDF_STORAGE_WEB_USER_SALT_LEN + 2] = (uint8_t)((iter >> 16) & 0xFF);
+            payload[SDF_STORAGE_WEB_USER_SALT_LEN + 3] = (uint8_t)((iter >> 24) & 0xFF);
+            memcpy(payload + SDF_STORAGE_WEB_USER_SALT_LEN + 4,
+                   conn->pending_login_challenge.nonce, SDF_SERVICES_WEB_AUTH_NONCE_LEN);
+            xSemaphoreGive(s_lock);
+            int rc = os_mbuf_append(ctxt->om, payload, sizeof(payload));
+            return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        } else {
+            const char *resp = "AUTH_REQUIRED";
+            xSemaphoreGive(s_lock);
+            int rc = os_mbuf_append(ctxt->om, resp, strlen(resp));
+            return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
@@ -261,8 +296,155 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
             uint8_t *buf = s_gatt_scratch;
             os_mbuf_copydata(om, 0, len, buf);
             uint8_t cmd = buf[0];
-            if (cmd == SDF_BLE_COMPANION_AUTH_LOGIN ||
-                cmd == SDF_BLE_COMPANION_AUTH_REGISTER) {
+            if (cmd == SDF_BLE_COMPANION_AUTH_LOGIN_INIT) {
+                size_t username_len = buf[1];
+                if (username_len == 0 ||
+                    username_len >= SDF_STORAGE_WEB_USER_NAME_MAX ||
+                    len != 2 + username_len) {
+                    xSemaphoreGive(s_lock);
+                    return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+                }
+
+                memcpy(conn->username, &buf[2], username_len);
+                conn->username[username_len] = '\0';
+
+                uint8_t nonce[SDF_SERVICES_WEB_AUTH_NONCE_LEN];
+                esp_fill_random(nonce, sizeof(nonce));
+
+                sdf_storage_web_user_t user = {0};
+                uint8_t index = 0;
+                esp_err_t find_err =
+                    sdf_storage_web_user_find_by_name(conn->username, &user, &index);
+
+                sdf_services_web_auth_challenge_t challenge;
+                if (find_err == ESP_OK) {
+                    challenge = sdf_services_web_auth_make_login_challenge(&user, nonce);
+                } else {
+                    /* Unknown username: deterministic pseudo-salt challenge,
+                     * same shape as a real account's - see design.md
+                     * "Username-enumeration mitigation". No LOGIN_VERIFY can
+                     * ever match this. */
+                    uint8_t pseudo_key[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN];
+                    sdf_storage_web_pseudo_salt_key_load_or_generate(pseudo_key);
+                    challenge = sdf_services_web_auth_make_pseudo_challenge(
+                        pseudo_key, conn->username, nonce);
+                }
+
+                conn->pending_login_challenge = challenge;
+                conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED;
+                conn->auth_pending = false;
+                xSemaphoreGive(s_lock);
+                /* Client follows up with a characteristic read to fetch the
+                 * challenge fields - see the READ_CHR branch above. */
+                return 0;
+            } else if (cmd == SDF_BLE_COMPANION_AUTH_LOGIN_VERIFY) {
+                if (len != 1 + SDF_SERVICES_WEB_AUTH_RESPONSE_LEN) {
+                    xSemaphoreGive(s_lock);
+                    return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+                }
+                if (conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED) {
+                    /* No outstanding nonce for this connection: either
+                     * LOGIN_VERIFY arrived without a prior LOGIN_INIT, or
+                     * it's a replay of an already-consumed nonce (state was
+                     * cleared below after the first attempt). */
+                    xSemaphoreGive(s_lock);
+                    return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+                }
+
+                uint8_t response[SDF_SERVICES_WEB_AUTH_RESPONSE_LEN];
+                memcpy(response, &buf[1], sizeof(response));
+                char username_copy[SDF_STORAGE_WEB_USER_NAME_MAX];
+                strlcpy(username_copy, conn->username, sizeof(username_copy));
+                uint8_t nonce_copy[SDF_SERVICES_WEB_AUTH_NONCE_LEN];
+                memcpy(nonce_copy, conn->pending_login_challenge.nonce, sizeof(nonce_copy));
+
+                /* Single-use: invalidate the challenge/nonce now, before
+                 * verifying, so this nonce can never be replayed regardless
+                 * of the outcome below. */
+                conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
+                memset(&conn->pending_login_challenge, 0, sizeof(conn->pending_login_challenge));
+
+                sdf_storage_web_user_t user = {0};
+                uint8_t index = 0;
+                esp_err_t find_err =
+                    sdf_storage_web_user_find_by_name(username_copy, &user, &index);
+                bool ok = find_err == ESP_OK &&
+                          sdf_services_web_auth_verify_response(
+                              user.stretched_credential, nonce_copy, sizeof(nonce_copy),
+                              response, sizeof(response));
+
+                if (!ok) {
+                    conn->auth_pending = false;
+
+                    /* Failed BLE login lockout: keyed by the peer's
+                     * resolved identity address (not conn_handle), so
+                     * the counter survives disconnect/reconnect. See
+                     * sdf_ble_companion_bond_state.h. LOGIN_INIT never
+                     * reaches here, so only LOGIN_VERIFY outcomes count. */
+                    struct ble_gap_conn_desc desc;
+                    sdf_ble_companion_addr_t identity = {0};
+                    bool evict = false;
+                    if (ble_gap_conn_find(conn_handle, &desc) == 0) {
+                        identity.type = desc.peer_id_addr.type;
+                        memcpy(identity.val, desc.peer_id_addr.val,
+                               sizeof(identity.val));
+                        uint8_t count = sdf_ble_companion_bond_note_login_failure(
+                            &s_bond_state, &identity);
+                        ESP_LOGW(TAG,
+                                 "BLE Companion LOGIN_VERIFY failed, conn_handle=%d, "
+                                 "failure_count=%u",
+                                 conn_handle, (unsigned)count);
+                        if (sdf_ble_companion_bond_should_evict(count)) {
+                            evict = true;
+                            sdf_ble_companion_bond_allow_list_remove(&s_bond_state,
+                                                                      &identity);
+                        }
+                    } else {
+                        ESP_LOGW(TAG,
+                                 "BLE Companion LOGIN_VERIFY failed, conn_handle=%d "
+                                 "(no connection descriptor, lockout counter not updated)",
+                                 conn_handle);
+                    }
+                    xSemaphoreGive(s_lock);
+
+                    if (evict) {
+                        /* Bond store deletion, allow-list push and connection
+                         * termination all make NimBLE calls, so they happen
+                         * outside s_lock like every other BLE call in this
+                         * file. */
+                        ESP_LOGW(TAG,
+                                 "BLE Companion failed-login threshold reached, "
+                                 "evicting bond and terminating connection: "
+                                 "conn_handle=%d",
+                                 conn_handle);
+                        ble_addr_t store_addr = {
+                            .type = identity.type,
+                        };
+                        memcpy(store_addr.val, identity.val, sizeof(store_addr.val));
+                        int rc = ble_store_util_delete_peer(&store_addr);
+                        if (rc != 0) {
+                            ESP_LOGW(TAG, "ble_store_util_delete_peer failed: %d", rc);
+                        }
+                        sdf_ble_companion_push_allow_list();
+                        ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                    }
+                    return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+                }
+
+                struct ble_gap_conn_desc desc;
+                if (ble_gap_conn_find(conn_handle, &desc) == 0) {
+                    sdf_ble_companion_addr_t identity;
+                    identity.type = desc.peer_id_addr.type;
+                    memcpy(identity.val, desc.peer_id_addr.val, sizeof(identity.val));
+                    sdf_ble_companion_bond_note_login_success(&s_bond_state, &identity);
+                }
+                xSemaphoreGive(s_lock);
+                if (sdf_ble_companion_set_authenticated(conn_handle, true) !=
+                    ESP_OK) {
+                    return BLE_ATT_ERR_UNLIKELY;
+                }
+                return 0;
+            } else if (cmd == SDF_BLE_COMPANION_AUTH_REGISTER) {
                 size_t username_len = buf[1];
                 if (username_len == 0 ||
                     username_len >= SDF_STORAGE_WEB_USER_NAME_MAX ||
@@ -273,92 +455,9 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
 
                 memcpy(conn->username, &buf[2], username_len);
                 conn->username[username_len] = '\0';
-                memcpy(conn->password_hash, &buf[2 + username_len],
+                uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+                memcpy(password_hash, &buf[2 + username_len],
                        SDF_STORAGE_WEB_USER_HASH_LEN);
-
-                if (cmd == SDF_BLE_COMPANION_AUTH_LOGIN) {
-                    sdf_storage_web_user_t user = {0};
-                    uint8_t index = 0;
-                    esp_err_t err = sdf_storage_web_user_find_by_name(
-                        conn->username, &user, &index);
-                    if (err != ESP_OK ||
-                        !sdf_services_web_auth_verify_login(
-                            &user, conn->password_hash,
-                            SDF_STORAGE_WEB_USER_HASH_LEN)) {
-                        conn->auth_state =
-                            SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
-                        conn->auth_pending = false;
-                        memset(conn->password_hash, 0,
-                               sizeof(conn->password_hash));
-
-                        /* Failed BLE login lockout: keyed by the peer's
-                         * resolved identity address (not conn_handle), so
-                         * the counter survives disconnect/reconnect. See
-                         * sdf_ble_companion_bond_state.h. */
-                        struct ble_gap_conn_desc desc;
-                        sdf_ble_companion_addr_t identity = {0};
-                        bool evict = false;
-                        if (ble_gap_conn_find(conn_handle, &desc) == 0) {
-                            identity.type = desc.peer_id_addr.type;
-                            memcpy(identity.val, desc.peer_id_addr.val,
-                                   sizeof(identity.val));
-                            uint8_t count = sdf_ble_companion_bond_note_login_failure(
-                                &s_bond_state, &identity);
-                            ESP_LOGW(TAG,
-                                     "BLE Companion LOGIN failed, conn_handle=%d, "
-                                     "failure_count=%u",
-                                     conn_handle, (unsigned)count);
-                            if (sdf_ble_companion_bond_should_evict(count)) {
-                                evict = true;
-                                sdf_ble_companion_bond_allow_list_remove(&s_bond_state,
-                                                                          &identity);
-                            }
-                        } else {
-                            ESP_LOGW(TAG,
-                                     "BLE Companion LOGIN failed, conn_handle=%d "
-                                     "(no connection descriptor, lockout counter not updated)",
-                                     conn_handle);
-                        }
-                        xSemaphoreGive(s_lock);
-
-                        if (evict) {
-                            /* Bond store deletion, allow-list push and connection
-                             * termination all make NimBLE calls, so they happen
-                             * outside s_lock like every other BLE call in this
-                             * file. */
-                            ESP_LOGW(TAG,
-                                     "BLE Companion failed-login threshold reached, "
-                                     "evicting bond and terminating connection: "
-                                     "conn_handle=%d",
-                                     conn_handle);
-                            ble_addr_t store_addr = {
-                                .type = identity.type,
-                            };
-                            memcpy(store_addr.val, identity.val, sizeof(store_addr.val));
-                            int rc = ble_store_util_delete_peer(&store_addr);
-                            if (rc != 0) {
-                                ESP_LOGW(TAG, "ble_store_util_delete_peer failed: %d", rc);
-                            }
-                            sdf_ble_companion_push_allow_list();
-                            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
-                        }
-                        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
-                    }
-
-                    struct ble_gap_conn_desc desc;
-                    if (ble_gap_conn_find(conn_handle, &desc) == 0) {
-                        sdf_ble_companion_addr_t identity;
-                        identity.type = desc.peer_id_addr.type;
-                        memcpy(identity.val, desc.peer_id_addr.val, sizeof(identity.val));
-                        sdf_ble_companion_bond_note_login_success(&s_bond_state, &identity);
-                    }
-                    xSemaphoreGive(s_lock);
-                    if (sdf_ble_companion_set_authenticated(conn_handle, true) !=
-                        ESP_OK) {
-                        return BLE_ATT_ERR_UNLIKELY;
-                    }
-                    return 0;
-                }
 
                 conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_PENDING;
                 conn->auth_pending = true;
@@ -367,16 +466,14 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                     s_callbacks.on_auth_request;
                 void *cb_ctx = s_callbacks.ctx;
                 char username_copy[SDF_STORAGE_WEB_USER_NAME_MAX];
-                uint8_t hash_copy[SDF_STORAGE_WEB_USER_HASH_LEN];
                 strlcpy(username_copy, conn->username, sizeof(username_copy));
-                memcpy(hash_copy, conn->password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
 
                 conn->auth_value_len = 1;
                 conn->auth_value[0] = SDF_BLE_COMPANION_AUTH_RESULT_PENDING;
                 xSemaphoreGive(s_lock);
 
                 if (on_auth_req) {
-                    on_auth_req(cb_ctx, username_copy, hash_copy,
+                    on_auth_req(cb_ctx, username_copy, password_hash,
                                 SDF_STORAGE_WEB_USER_HASH_LEN);
                 }
                 return 0;
@@ -384,7 +481,7 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
                 conn->auth_pending = false;
                 memset(conn->username, 0, sizeof(conn->username));
-                memset(conn->password_hash, 0, sizeof(conn->password_hash));
+                memset(&conn->pending_login_challenge, 0, sizeof(conn->pending_login_challenge));
                 conn->auth_value_len = 1;
                 conn->auth_value[0] = SDF_BLE_COMPANION_AUTH_LOGOUT;
                 xSemaphoreGive(s_lock);
@@ -733,8 +830,8 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
                         /* Full zero, not a field-by-field reset: this slot may be
                          * reused from a previous connection (see the equivalent
                          * memset in BLE_GAP_EVENT_DISCONNECT below), and stale
-                         * config_value/enroll_value/ota_value/password_hash from
-                         * that prior session must not be readable by whoever
+                         * config_value/enroll_value/ota_value/pending_login_challenge
+                         * from that prior session must not be readable by whoever
                          * ends up authenticated on this new one. */
                         memset(conn, 0, sizeof(*conn));
                         conn->conn_handle = event->connect.conn_handle;

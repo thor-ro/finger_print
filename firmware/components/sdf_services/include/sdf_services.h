@@ -107,19 +107,67 @@ esp_err_t sdf_services_get_web_reg_password_hash(uint8_t *password_hash,
 void sdf_services_clear_web_reg_auth(void);
 
 /* Web Companion Auth decisions - pure functions, no I/O, no locks. See
- * sdf_services_web_auth.c. */
+ * sdf_services_web_auth.c. Salt and nonce values are always supplied by the
+ * caller (generated via esp_fill_random in the I/O layer - sdf_app.c for
+ * REGISTER's salt, sdf_ble_companion.c for LOGIN_INIT's nonce) rather than
+ * generated here, so these functions stay deterministic and independently
+ * unit-testable. */
 
-/* Login verification. Caller (sdf_ble_companion) already looked the user up
- * via sdf_storage_web_user_find_by_name(); this just isolates the
- * constant-time comparison so it's independently testable, including with
- * crafted mismatched-length / all-zero inputs. */
-bool sdf_services_web_auth_verify_login(const sdf_storage_web_user_t *user,
-                                         const uint8_t *submitted_hash,
-                                         size_t hash_len);
+#define SDF_SERVICES_WEB_AUTH_NONCE_LEN 16
+#define SDF_SERVICES_WEB_AUTH_RESPONSE_LEN 32 /* HMAC-SHA256 output */
+
+/* Placeholder iteration count pending an on-device PBKDF2 benchmark (see
+ * design.md Open Questions / tasks.md 6.1); targets the OWASP
+ * PBKDF2-HMAC-SHA256 baseline (~210k) until that benchmark says otherwise. */
+#define SDF_SERVICES_WEB_AUTH_PBKDF2_ITERATIONS 210000u
+
+/* PBKDF2-HMAC-SHA256 credential stretch. Used once, device-side, at
+ * REGISTER to turn the received SHA256(password) into the value persisted
+ * as sdf_storage_web_user_t.stretched_credential. */
+esp_err_t sdf_services_web_auth_stretch_credential(
+    const uint8_t *received_hash, size_t received_hash_len,
+    const uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN],
+    uint32_t iteration_count,
+    uint8_t stretched_credential_out[SDF_STORAGE_WEB_USER_STRETCHED_LEN]);
+
+/* LOGIN_VERIFY decision: does the submitted response match
+ * HMAC-SHA256(stretched_credential, nonce)? Replaces the old
+ * sdf_services_web_auth_verify_login (raw hash comparison). Compared via
+ * mbedtls_ct_memcmp, same as before. */
+bool sdf_services_web_auth_verify_response(
+    const uint8_t stretched_credential[SDF_STORAGE_WEB_USER_STRETCHED_LEN],
+    const uint8_t *nonce, size_t nonce_len,
+    const uint8_t *submitted_response, size_t response_len);
+
+/* LOGIN_INIT challenge fields returned to the client. Same shape whether the
+ * account exists or not - see make_login_challenge/make_pseudo_challenge. */
+typedef struct {
+  uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+  uint32_t iteration_count;
+  uint8_t nonce[SDF_SERVICES_WEB_AUTH_NONCE_LEN];
+} sdf_services_web_auth_challenge_t;
+
+/* Challenge for a username with a stored account: real salt, real (fixed)
+ * iteration count, caller-supplied fresh nonce. */
+sdf_services_web_auth_challenge_t sdf_services_web_auth_make_login_challenge(
+    const sdf_storage_web_user_t *user,
+    const uint8_t nonce[SDF_SERVICES_WEB_AUTH_NONCE_LEN]);
+
+/* Challenge for a username with no stored account: deterministic pseudo-salt
+ * derived as HMAC(pseudo_salt_key, username), same iteration count, and the
+ * same caller-supplied fresh nonce - so the response is indistinguishable in
+ * shape from a real account's, and no LOGIN_VERIFY can ever match it. */
+sdf_services_web_auth_challenge_t sdf_services_web_auth_make_pseudo_challenge(
+    const uint8_t pseudo_salt_key[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN],
+    const char *username,
+    const uint8_t nonce[SDF_SERVICES_WEB_AUTH_NONCE_LEN]);
 
 /* Registration outcome. Mirrors sdf_app_on_web_reg_auth_result's logic minus
  * the actual sdf_storage_web_user_save() call and slot selection (still
- * sdf_app's job). */
+ * sdf_app's job). Salt is caller-generated (see comment above); this
+ * function runs the PBKDF2 stretch (via
+ * sdf_services_web_auth_stretch_credential) and persists only the salt and
+ * stretched credential, never the raw received hash. */
 typedef struct {
   bool should_persist;              /* false on denial/timeout */
   sdf_storage_web_user_t user;      /* populated only if should_persist */
@@ -128,6 +176,7 @@ typedef struct {
 
 sdf_services_web_auth_registration_decision_t sdf_services_web_auth_decide_registration(
     const char *username, const uint8_t *password_hash, size_t hash_len,
+    const uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN],
     uint8_t permission, bool admin_authorized);
 
 /* Timeout/reject unlatch guard. Trivial today (action == WEB_REG_AUTH &&

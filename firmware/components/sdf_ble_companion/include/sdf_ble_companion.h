@@ -15,8 +15,13 @@ extern "C" {
 
 typedef enum {
     SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED = 0,
-    SDF_BLE_COMPANION_AUTH_STATE_PENDING = 1,
+    SDF_BLE_COMPANION_AUTH_STATE_PENDING = 1, /* REGISTER: admin-fingerprint pending */
     SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED = 2,
+    /* LOGIN_INIT issued a challenge for this connection; conn->pending_login_challenge
+     * is valid until the client's LOGIN_VERIFY consumes it (success or failure) or
+     * the connection is dropped. Deliberately distinct from AUTH_STATE_PENDING
+     * above, which is REGISTER's unrelated admin-fingerprint wait. */
+    SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED = 3,
 } sdf_ble_companion_auth_state_t;
 
 typedef struct {
@@ -25,7 +30,12 @@ typedef struct {
     sdf_ble_companion_auth_state_t auth_state;
     bool auth_pending;
     char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-    uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+    /* Outstanding LOGIN challenge for this connection - single-connection,
+     * single-attempt scoped (never persisted), valid only while
+     * auth_state == SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED.
+     * Cleared by the disconnect memset and explicitly after each
+     * LOGIN_VERIFY attempt. */
+    sdf_services_web_auth_challenge_t pending_login_challenge;
     uint8_t auth_value[512];
     uint16_t auth_value_len;
     uint8_t config_value[512];

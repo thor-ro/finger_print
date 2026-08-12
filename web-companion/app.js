@@ -4,6 +4,23 @@ const SDF_CONFIG_UUID  = '7d5a0002-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 const SDF_ENROLL_UUID  = '7d5a0003-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 const SDF_OTA_UUID     = '7d5a0004-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 
+// Auth characteristic opcodes. LOGIN is a two-round-trip challenge-response
+// (LOGIN_INIT then LOGIN_VERIFY) rather than a single message - see
+// openspec/changes/ble-companion-login-challenge-response. REGISTER and
+// LOGOUT are unchanged.
+const SDF_AUTH_OPCODE_LOGOUT       = 0x00;
+const SDF_AUTH_OPCODE_REGISTER     = 0x02;
+const SDF_AUTH_OPCODE_LOGIN_INIT   = 0x03;
+const SDF_AUTH_OPCODE_LOGIN_VERIFY = 0x04;
+
+// Must match SDF_STORAGE_WEB_USER_SALT_LEN / SDF_SERVICES_WEB_AUTH_NONCE_LEN
+// / SDF_SERVICES_WEB_AUTH_RESPONSE_LEN in the firmware. LOGIN_INIT's read
+// response is [salt(16)][iteration_count(4, little-endian)][nonce(16)].
+const SDF_WEB_AUTH_SALT_LEN = 16;
+const SDF_WEB_AUTH_NONCE_LEN = 16;
+const SDF_WEB_AUTH_RESPONSE_LEN = 32;
+const SDF_WEB_AUTH_CHALLENGE_LEN = SDF_WEB_AUTH_SALT_LEN + 4 + SDF_WEB_AUTH_NONCE_LEN;
+
 let bluetoothDevice;
 let gattServer;
 let sdfService;
@@ -118,32 +135,128 @@ async function hashPassword(password) {
     return new Uint8Array(hashBuffer);
 }
 
+// PBKDF2-HMAC-SHA256 credential stretching, run client-side at LOGIN so the
+// device never has to spend the (expensive, tunable) stretching cost on its
+// own CPU per login attempt - only once, server-side, at REGISTER. Mirrors
+// sdf_services_web_auth_stretch_credential() in the firmware.
+async function stretchPassword(password, salt, iterationCount) {
+    const encoder = new TextEncoder();
+    const passwordKey = await crypto.subtle.importKey(
+        'raw', encoder.encode(password), { name: 'PBKDF2' }, false, ['deriveBits']
+    );
+    const bits = await crypto.subtle.deriveBits(
+        { name: 'PBKDF2', salt, iterations: iterationCount, hash: 'SHA-256' },
+        passwordKey,
+        SDF_WEB_AUTH_RESPONSE_LEN * 8
+    );
+    return new Uint8Array(bits);
+}
+
+// HMAC-SHA256(stretched_credential, nonce) - the LOGIN_VERIFY response.
+// Mirrors sdf_services_web_auth_verify_response()'s expected-response
+// computation in the firmware.
+async function computeLoginResponse(stretchedCredential, nonce) {
+    const hmacKey = await crypto.subtle.importKey(
+        'raw', stretchedCredential, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    );
+    const signature = await crypto.subtle.sign('HMAC', hmacKey, nonce);
+    return new Uint8Array(signature);
+}
+
 document.getElementById('auth-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const username = document.getElementById('username').value;
     const password = document.getElementById('password').value;
-    
+
+    if (isRegistering) {
+        await submitRegister(username, password);
+    } else {
+        await submitLogin(username, password);
+    }
+});
+
+async function submitRegister(username, password) {
     try {
         authStatus.textContent = 'Authenticating...';
         const encoder = new TextEncoder();
         const userBytes = encoder.encode(username);
         const hashBytes = await hashPassword(password);
-        
-        // Command format: [CMD, USER_LEN, USERNAME..., HASH...]
-        // CMD: 1 = Login, 2 = Register
-        const cmd = isRegistering ? 0x02 : 0x01;
+
+        // Command format: [CMD, USER_LEN, USERNAME..., HASH...]. Unchanged -
+        // the device salts and stretches server-side, once, only after an
+        // admin fingerprint confirms the REGISTER. See
+        // openspec/changes/ble-companion-login-challenge-response.
         const payload = new Uint8Array(2 + userBytes.length + hashBytes.length);
-        payload[0] = cmd;
+        payload[0] = SDF_AUTH_OPCODE_REGISTER;
         payload[1] = userBytes.length;
         payload.set(userBytes, 2);
         payload.set(hashBytes, 2 + userBytes.length);
-        
+
         await authChar.writeValue(payload);
-        authStatus.textContent = isRegistering ? 'Please scan the Admin Finger on the device to confirm.' : 'Waiting for device...';
+        authStatus.textContent = 'Please scan the Admin Finger on the device to confirm.';
     } catch (err) {
         authStatus.textContent = `Error: ${err.message}`;
     }
-});
+}
+
+// Challenge-response LOGIN: write LOGIN_INIT, read back {salt,
+// iteration_count, nonce}, stretch the password client-side and compute
+// HMAC-SHA256(stretched, nonce), then write LOGIN_VERIFY. A rejected
+// LOGIN_INIT means the device doesn't speak this protocol at all (out-of-date
+// app or firmware) - surfaced distinctly from a rejected LOGIN_VERIFY, which
+// means the credentials themselves were wrong. See design.md Risks.
+async function submitLogin(username, password) {
+    try {
+        authStatus.textContent = 'Authenticating...';
+        const encoder = new TextEncoder();
+        const userBytes = encoder.encode(username);
+
+        const initPayload = new Uint8Array(2 + userBytes.length);
+        initPayload[0] = SDF_AUTH_OPCODE_LOGIN_INIT;
+        initPayload[1] = userBytes.length;
+        initPayload.set(userBytes, 2);
+
+        try {
+            await authChar.writeValue(initPayload);
+        } catch (err) {
+            authStatus.textContent = 'Login could not start - please make sure the companion app and device firmware are both up to date, then try again.';
+            return;
+        }
+
+        const challengeView = await authChar.readValue();
+        if (challengeView.byteLength !== SDF_WEB_AUTH_CHALLENGE_LEN) {
+            authStatus.textContent = 'Login could not start - please make sure the companion app and device firmware are both up to date, then try again.';
+            return;
+        }
+        const challengeBytes = new Uint8Array(challengeView.buffer, challengeView.byteOffset, challengeView.byteLength);
+        const salt = challengeBytes.slice(0, SDF_WEB_AUTH_SALT_LEN);
+        const iterationCount = challengeView.getUint32(SDF_WEB_AUTH_SALT_LEN, true);
+        const nonce = challengeBytes.slice(SDF_WEB_AUTH_SALT_LEN + 4, SDF_WEB_AUTH_CHALLENGE_LEN);
+
+        const stretched = await stretchPassword(password, salt, iterationCount);
+        const response = await computeLoginResponse(stretched, nonce);
+
+        const verifyPayload = new Uint8Array(1 + response.length);
+        verifyPayload[0] = SDF_AUTH_OPCODE_LOGIN_VERIFY;
+        verifyPayload.set(response, 1);
+
+        try {
+            await authChar.writeValue(verifyPayload);
+        } catch (err) {
+            // Wrong username/password: the device rejects the write itself
+            // (BLE_ATT_ERR_INSUFFICIENT_AUTHEN), so there's no success
+            // notification to wait for.
+            authStatus.textContent = 'Incorrect username or password.';
+            return;
+        }
+
+        // Success is confirmed asynchronously via the Auth characteristic
+        // notification - see handleAuthNotification() below.
+        authStatus.textContent = 'Waiting for device...';
+    } catch (err) {
+        authStatus.textContent = `Error: ${err.message}`;
+    }
+}
 
 function handleAuthNotification(event) {
     const value = new Uint8Array(event.target.value.buffer);

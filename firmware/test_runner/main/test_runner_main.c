@@ -72,6 +72,10 @@ extern void test_sdf_storage_web_user_clear_success(void);
 extern void test_sdf_storage_web_user_clear_all(void);
 extern void test_sdf_storage_web_user_count(void);
 extern void test_sdf_storage_web_user_save_index_at_max_rejected(void);
+extern void test_sdf_storage_web_pseudo_salt_key_generates_on_first_use(void);
+extern void test_sdf_storage_web_pseudo_salt_key_persists_across_loads(void);
+extern void test_sdf_storage_web_pseudo_salt_key_null_arg_rejected(void);
+extern void test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key(void);
 
 /* SDF Config tests */
 extern void test_sdf_config_set_checkin_interval_bounds(void);
@@ -104,10 +108,18 @@ extern void test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok(void);
 /* SDF Services tests */
 extern void test_sdf_services_reset_state_returns_ok(void);
 extern void test_sdf_services_reset_state_can_be_called_multiple_times(void);
-extern void test_web_auth_verify_login_matching_hash_is_valid(void);
-extern void test_web_auth_verify_login_mismatched_hash_is_invalid(void);
-extern void test_web_auth_verify_login_wrong_hash_len_is_invalid(void);
-extern void test_web_auth_verify_login_all_zero_hash_is_invalid(void);
+extern void test_web_auth_stretch_credential_is_deterministic(void);
+extern void test_web_auth_stretch_credential_differs_by_salt(void);
+extern void test_web_auth_stretch_credential_invalid_args(void);
+extern void test_web_auth_verify_response_matching_is_valid(void);
+extern void test_web_auth_verify_response_mismatched_is_invalid(void);
+extern void test_web_auth_verify_response_wrong_nonce_len_is_invalid(void);
+extern void test_web_auth_verify_response_wrong_response_len_is_invalid(void);
+extern void test_web_auth_verify_response_all_zero_response_is_invalid(void);
+extern void test_web_auth_make_login_challenge_uses_stored_salt_and_nonce(void);
+extern void test_web_auth_make_pseudo_challenge_is_deterministic_per_username(void);
+extern void test_web_auth_make_pseudo_challenge_differs_by_username(void);
+extern void test_web_auth_known_and_unknown_challenges_are_same_shape(void);
 extern void test_web_auth_decide_registration_authorized_persists_user(void);
 extern void test_web_auth_decide_registration_denied_does_not_persist(void);
 extern void test_web_auth_should_resolve_on_web_reg_auth_failure(void);
@@ -340,6 +352,10 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_web_user_clear_all);
   RUN_TEST(test_sdf_storage_web_user_count);
   RUN_TEST(test_sdf_storage_web_user_save_index_at_max_rejected);
+  RUN_TEST(test_sdf_storage_web_pseudo_salt_key_generates_on_first_use);
+  RUN_TEST(test_sdf_storage_web_pseudo_salt_key_persists_across_loads);
+  RUN_TEST(test_sdf_storage_web_pseudo_salt_key_null_arg_rejected);
+  RUN_TEST(test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key);
 
   /* SDF Config tests */
   RUN_TEST(test_sdf_config_set_checkin_interval_bounds);
@@ -372,10 +388,18 @@ void app_main(void) {
   /* SDF Services tests */
   RUN_TEST(test_sdf_services_reset_state_returns_ok);
   RUN_TEST(test_sdf_services_reset_state_can_be_called_multiple_times);
-  RUN_TEST(test_web_auth_verify_login_matching_hash_is_valid);
-  RUN_TEST(test_web_auth_verify_login_mismatched_hash_is_invalid);
-  RUN_TEST(test_web_auth_verify_login_wrong_hash_len_is_invalid);
-  RUN_TEST(test_web_auth_verify_login_all_zero_hash_is_invalid);
+  RUN_TEST(test_web_auth_stretch_credential_is_deterministic);
+  RUN_TEST(test_web_auth_stretch_credential_differs_by_salt);
+  RUN_TEST(test_web_auth_stretch_credential_invalid_args);
+  RUN_TEST(test_web_auth_verify_response_matching_is_valid);
+  RUN_TEST(test_web_auth_verify_response_mismatched_is_invalid);
+  RUN_TEST(test_web_auth_verify_response_wrong_nonce_len_is_invalid);
+  RUN_TEST(test_web_auth_verify_response_wrong_response_len_is_invalid);
+  RUN_TEST(test_web_auth_verify_response_all_zero_response_is_invalid);
+  RUN_TEST(test_web_auth_make_login_challenge_uses_stored_salt_and_nonce);
+  RUN_TEST(test_web_auth_make_pseudo_challenge_is_deterministic_per_username);
+  RUN_TEST(test_web_auth_make_pseudo_challenge_differs_by_username);
+  RUN_TEST(test_web_auth_known_and_unknown_challenges_are_same_shape);
   RUN_TEST(test_web_auth_decide_registration_authorized_persists_user);
   RUN_TEST(test_web_auth_decide_registration_denied_does_not_persist);
   RUN_TEST(test_web_auth_should_resolve_on_web_reg_auth_failure);

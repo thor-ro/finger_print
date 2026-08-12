@@ -2,6 +2,7 @@
 
 #include "esp_log.h"
 #include "esp_partition.h"
+#include "esp_random.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -10,6 +11,7 @@
 #define SDF_STORAGE_KEY_AUTH_ID "auth_id"
 #define SDF_STORAGE_KEY_SHARED "shared_key"
 #define SDF_STORAGE_KEY_BLE_HANDLES "ble_handles"
+#define SDF_STORAGE_KEY_WEB_PSEUDO_SALT_KEY "web_pseudo_salt"
 
 static const char *TAG = "sdf_storage";
 static sdf_storage_security_status_t s_security_status = {
@@ -499,6 +501,36 @@ esp_err_t sdf_storage_web_user_clear_all(void) {
     }
 
     err = nvs_commit(handle);
+    nvs_close(handle);
+    return err;
+}
+
+esp_err_t sdf_storage_web_pseudo_salt_key_load_or_generate(uint8_t key_out[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN]) {
+    if (key_out == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    size_t len = SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN;
+    err = nvs_get_blob(handle, SDF_STORAGE_KEY_WEB_PSEUDO_SALT_KEY, key_out, &len);
+    if (err == ESP_OK && len == SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN) {
+        nvs_close(handle);
+        return ESP_OK;
+    }
+
+    /* Not found, or a corrupted/wrong-length blob - (re)generate. */
+    esp_fill_random(key_out, SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN);
+    err = nvs_set_blob(handle, SDF_STORAGE_KEY_WEB_PSEUDO_SALT_KEY, key_out,
+                        SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+
     nvs_close(handle);
     return err;
 }

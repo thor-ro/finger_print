@@ -7,6 +7,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_task_wdt.h"
@@ -939,8 +940,10 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
       ESP_LOGE(TAG, "Failed to fetch web reg password hash: %s",
                esp_err_to_name(hash_err));
     } else {
+      uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+      esp_fill_random(salt, sizeof(salt));
       decision = sdf_services_web_auth_decide_registration(
-          username, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN,
+          username, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN, salt,
           event->payload.web_reg_auth_result.permission, true);
     }
   }
