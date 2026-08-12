@@ -1,4 +1,5 @@
 #include "sdf_ble_companion.h"
+#include "sdf_ble_companion_bond_state.h"
 #include "sdf_storage.h"
 #include "sdf_event_router.h"
 #include "sdf_nuki_ble_transport.h"
@@ -16,6 +17,7 @@
 #include "host/ble_uuid.h"
 #include "host/ble_gatt.h"
 #include "host/ble_gap.h"
+#include "host/ble_store.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "cJSON.h"
@@ -63,16 +65,24 @@
     0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
     0x8a, 0x4f, 0x2b, 0x5c, 0x04, 0x00, 0x5a, 0x7d
 
-#define SDF_BLE_COMPANION_ADV_FAST_DURATION_MS 30000
-
-// Slow advertising intervals (approx 1 second)
-#define SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MIN BLE_GAP_ADV_ITVL_MS(1000)
-#define SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MAX BLE_GAP_ADV_ITVL_MS(2000)
+/* Default-mode advertising: sparse and allow-list-filtered (see
+ * sdf_ble_companion_start_advertising_sparse() and design.md "Sparse,
+ * Allow-List-Filtered Default Advertising"). Replaces the old
+ * fast-then-slow-forever loop - there's no more unfiltered "fast discovery"
+ * phase after boot/reconnect, since that would defeat the allow-list gate
+ * for the whole first 30 seconds after every boot/disconnect. */
+#define SDF_BLE_COMPANION_ADV_SPARSE_INTERVAL_MIN BLE_GAP_ADV_ITVL_MS(1000)
+#define SDF_BLE_COMPANION_ADV_SPARSE_INTERVAL_MAX BLE_GAP_ADV_ITVL_MS(2000)
 
 static sdf_ble_companion_connection_t s_connections[SDF_BLE_COMPANION_MAX_CONNECTIONS];
 static sdf_ble_companion_callbacks_t s_callbacks = {0};
 static bool s_initialized = false;
 static SemaphoreHandle_t s_lock = NULL;
+
+/* Allow-list membership and failed-login counters for the BLE Companion
+ * trust model (see sdf_ble_companion_bond_state.h). Protected by s_lock,
+ * same as s_connections. */
+static sdf_ble_companion_bond_state_t s_bond_state;
 
 /* Scratch buffer used by the GATT access callbacks below (sdf_ble_companion_*
  * _access) to snapshot a characteristic's value under s_lock so it can be
@@ -97,25 +107,45 @@ static uint16_t s_ota_val_handle = 0;
 static sdf_event_router_subscriber_t *s_enrollment_sub = NULL;
 static sdf_event_router_subscriber_t *s_enrollment_failed_sub = NULL;
 
-static esp_timer_handle_t s_adv_timer;
+/* One-shot timeout for the Admin-Fingerprint-Gated Device Pairing Window
+ * (see sdf_ble_companion_open_pairing_window()). Armed when the window
+ * opens; stopped early if a device is admitted before it fires. */
+static esp_timer_handle_t s_pairing_window_timer;
 
 static uint8_t s_adv_data[31];
 static uint8_t s_adv_data_len = 0;
 
 // Forward declarations
-static void sdf_ble_companion_adv_timer_cb(void *arg);
+static void sdf_ble_companion_pairing_window_timer_cb(void *arg);
+static void sdf_ble_companion_push_allow_list(void);
+static void sdf_ble_companion_restart_advertising(void);
 
-void sdf_ble_companion_start_advertising_fast(void);
-void sdf_ble_companion_start_advertising_slow(void);
-void sdf_ble_companion_start_advertising(void);
+void sdf_ble_companion_start_advertising_sparse(void);
+void sdf_ble_companion_start_advertising_pairing(void);
 
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_conn(uint16_t conn_handle);
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_free_conn(void);
 
-static void sdf_ble_companion_adv_timer_cb(void *arg) {
+static void sdf_ble_companion_pairing_window_timer_cb(void *arg) {
     (void)arg;
-    ESP_LOGI(TAG, "Fast advertising duration expired, switching to slow advertising");
-    sdf_ble_companion_start_advertising_slow();
+    bool was_open = false;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        was_open = sdf_ble_companion_bond_window_is_open(&s_bond_state);
+        sdf_ble_companion_bond_close_window(&s_bond_state);
+        xSemaphoreGive(s_lock);
+    } else {
+        ESP_LOGW(TAG, "pairing_window_timer_cb: lock contention");
+    }
+
+    if (was_open) {
+        ESP_LOGI(TAG, "BLE Companion pairing window closed (timeout, no device admitted)");
+        sdf_ble_companion_restart_advertising();
+    }
+    /* If the window was already closed (a device beat the clock and was
+     * admitted via BLE_GAP_EVENT_ENC_CHANGE, which stops this timer before
+     * it can fire), this callback firing anyway would just be a lost race
+     * against esp_timer_stop() - treat it as a no-op rather than reverting
+     * advertising out from under an in-progress or already-restarted mode. */
 }
 
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_conn(uint16_t conn_handle) {
@@ -260,10 +290,68 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                         conn->auth_pending = false;
                         memset(conn->password_hash, 0,
                                sizeof(conn->password_hash));
+
+                        /* Failed BLE login lockout: keyed by the peer's
+                         * resolved identity address (not conn_handle), so
+                         * the counter survives disconnect/reconnect. See
+                         * sdf_ble_companion_bond_state.h. */
+                        struct ble_gap_conn_desc desc;
+                        sdf_ble_companion_addr_t identity = {0};
+                        bool evict = false;
+                        if (ble_gap_conn_find(conn_handle, &desc) == 0) {
+                            identity.type = desc.peer_id_addr.type;
+                            memcpy(identity.val, desc.peer_id_addr.val,
+                                   sizeof(identity.val));
+                            uint8_t count = sdf_ble_companion_bond_note_login_failure(
+                                &s_bond_state, &identity);
+                            ESP_LOGW(TAG,
+                                     "BLE Companion LOGIN failed, conn_handle=%d, "
+                                     "failure_count=%u",
+                                     conn_handle, (unsigned)count);
+                            if (sdf_ble_companion_bond_should_evict(count)) {
+                                evict = true;
+                                sdf_ble_companion_bond_allow_list_remove(&s_bond_state,
+                                                                          &identity);
+                            }
+                        } else {
+                            ESP_LOGW(TAG,
+                                     "BLE Companion LOGIN failed, conn_handle=%d "
+                                     "(no connection descriptor, lockout counter not updated)",
+                                     conn_handle);
+                        }
                         xSemaphoreGive(s_lock);
+
+                        if (evict) {
+                            /* Bond store deletion, allow-list push and connection
+                             * termination all make NimBLE calls, so they happen
+                             * outside s_lock like every other BLE call in this
+                             * file. */
+                            ESP_LOGW(TAG,
+                                     "BLE Companion failed-login threshold reached, "
+                                     "evicting bond and terminating connection: "
+                                     "conn_handle=%d",
+                                     conn_handle);
+                            ble_addr_t store_addr = {
+                                .type = identity.type,
+                            };
+                            memcpy(store_addr.val, identity.val, sizeof(store_addr.val));
+                            int rc = ble_store_util_delete_peer(&store_addr);
+                            if (rc != 0) {
+                                ESP_LOGW(TAG, "ble_store_util_delete_peer failed: %d", rc);
+                            }
+                            sdf_ble_companion_push_allow_list();
+                            ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+                        }
                         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
                     }
 
+                    struct ble_gap_conn_desc desc;
+                    if (ble_gap_conn_find(conn_handle, &desc) == 0) {
+                        sdf_ble_companion_addr_t identity;
+                        identity.type = desc.peer_id_addr.type;
+                        memcpy(identity.val, desc.peer_id_addr.val, sizeof(identity.val));
+                        sdf_ble_companion_bond_note_login_success(&s_bond_state, &identity);
+                    }
                     xSemaphoreGive(s_lock);
                     if (sdf_ble_companion_set_authenticated(conn_handle, true) !=
                         ESP_OK) {
@@ -701,7 +789,7 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
             } else {
                 ESP_LOGW(TAG, "gap_event disconnect: lock contention");
             }
-            sdf_ble_companion_start_advertising_fast();
+            sdf_ble_companion_restart_advertising();
             break;
         }
         case BLE_GAP_EVENT_ADV_COMPLETE: {
@@ -713,6 +801,54 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
                      event->mtu.conn_handle, event->mtu.value);
             break;
         }
+        case BLE_GAP_EVENT_ENC_CHANGE: {
+            ESP_LOGI(TAG, "Encryption change: conn_handle=%d, status=%d",
+                     event->enc_change.conn_handle, event->enc_change.status);
+
+            if (event->enc_change.status != 0) {
+                /* Pairing/encryption attempt failed - nothing to admit. The
+                 * pairing window (if open) stays open for another attempt
+                 * until its own timeout fires. */
+                break;
+            }
+
+            struct ble_gap_conn_desc desc;
+            if (ble_gap_conn_find(event->enc_change.conn_handle, &desc) != 0) {
+                break;
+            }
+
+            sdf_ble_companion_addr_t identity;
+            identity.type = desc.peer_id_addr.type;
+            memcpy(identity.val, desc.peer_id_addr.val, sizeof(identity.val));
+
+            /* Note: this admits on *any* successful encryption while the
+             * window is open, including an already-trusted device that
+             * happens to reconnect during someone else's deliberately
+             * opened window - admit_if_window_open() is a no-op for an
+             * already allow-listed identity other than closing the window.
+             * Per design.md, "the first device to complete bonding during
+             * that window is added ... window closes immediately" - this is
+             * the literal behavior, not specifically restricted to *new*
+             * devices. */
+            bool admitted = false;
+            if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+                admitted = sdf_ble_companion_bond_admit_if_window_open(&s_bond_state,
+                                                                        &identity);
+                xSemaphoreGive(s_lock);
+            } else {
+                ESP_LOGW(TAG, "gap_event enc_change: lock contention");
+            }
+
+            if (admitted) {
+                ESP_LOGI(TAG,
+                         "BLE Companion pairing window: device admitted to allow "
+                         "list, conn_handle=%d",
+                         event->enc_change.conn_handle);
+                esp_timer_stop(s_pairing_window_timer);
+                sdf_ble_companion_push_allow_list();
+            }
+            break;
+        }
         default:
             break;
     }
@@ -722,15 +858,79 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
 static void sdf_ble_companion_on_host_sync(void *ctx) {
     (void)ctx;
     ESP_LOGI(TAG, "Shared NimBLE host synced");
-    sdf_ble_companion_start_advertising();
+    sdf_ble_companion_restart_advertising();
 }
 
-void sdf_ble_companion_start_advertising_fast(void) {
+/* Pushes the current allow-list snapshot into the NimBLE controller's Filter
+ * Accept List. Must be called with advertising stopped (NimBLE rejects
+ * ble_gap_wl_set() while an advertise/scan procedure using the list is
+ * active) - sdf_ble_companion_restart_advertising() takes care of that by
+ * always calling this before (re)starting filtered advertising. */
+static void sdf_ble_companion_push_allow_list(void) {
+    sdf_ble_companion_addr_t snapshot[SDF_BLE_COMPANION_BOND_TABLE_MAX];
+    size_t count = 0;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        count = sdf_ble_companion_bond_snapshot_allow_list(&s_bond_state, snapshot,
+                                                            SDF_BLE_COMPANION_BOND_TABLE_MAX);
+        xSemaphoreGive(s_lock);
+    } else {
+        ESP_LOGW(TAG, "push_allow_list: lock contention, skipping");
+        return;
+    }
+
+    ble_addr_t wl[SDF_BLE_COMPANION_BOND_TABLE_MAX];
+    for (size_t i = 0; i < count; i++) {
+        wl[i].type = snapshot[i].type;
+        memcpy(wl[i].val, snapshot[i].val, sizeof(wl[i].val));
+    }
+
+    int rc = ble_gap_wl_set(wl, (uint8_t)count);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "ble_gap_wl_set failed: %d (count=%u)", rc, (unsigned)count);
+    }
+}
+
+/* Default-mode advertising: sparse interval, restricted by the Filter
+ * Accept List (BLE_HCI_ADV_FILT_CONN) so only already-allow-listed devices
+ * can complete a connection. Scan requests are left unfiltered so the
+ * companion app can still see the device advertise by name before it's been
+ * through the pairing window - it just can't connect until admitted. See
+ * design.md "Sparse, Allow-List-Filtered Default Advertising". */
+void sdf_ble_companion_start_advertising_sparse(void) {
+    struct ble_gap_adv_params adv_params = {
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = SDF_BLE_COMPANION_ADV_SPARSE_INTERVAL_MIN,
+        .itvl_max = SDF_BLE_COMPANION_ADV_SPARSE_INTERVAL_MAX,
+        .filter_policy = BLE_HCI_ADV_FILT_CONN,
+    };
+
+    int rc = ble_gap_adv_set_data(s_adv_data, s_adv_data_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to set advertising data: %d", rc);
+        return;
+    }
+
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                           &adv_params, sdf_ble_companion_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to start sparse advertising: %d", rc);
+    } else {
+        ESP_LOGI(TAG, "Sparse, allow-list-filtered advertising started");
+    }
+}
+
+/* Pairing-window-mode advertising: fast interval, unfiltered
+ * (BLE_HCI_ADV_FILT_NONE) so a brand-new device can find and connect to it.
+ * Only used while sdf_ble_companion_bond_state_t's window is open - see
+ * sdf_ble_companion_open_pairing_window(). */
+void sdf_ble_companion_start_advertising_pairing(void) {
     struct ble_gap_adv_params adv_params = {
         .conn_mode = BLE_GAP_CONN_MODE_UND,
         .disc_mode = BLE_GAP_DISC_MODE_GEN,
         .itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN,
         .itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX,
+        .filter_policy = BLE_HCI_ADV_FILT_NONE,
     };
 
     int rc = ble_gap_adv_set_data(s_adv_data, s_adv_data_len);
@@ -742,42 +942,64 @@ void sdf_ble_companion_start_advertising_fast(void) {
     rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
                            &adv_params, sdf_ble_companion_gap_event, NULL);
     if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to start fast advertising: %d", rc);
+        ESP_LOGE(TAG, "Failed to start pairing-window advertising: %d", rc);
     } else {
-        ESP_LOGI(TAG, "Fast advertising started");
-    }
-
-    // Cancel any existing timer and arm a new one to switch to slow advertising after 30 seconds
-    esp_timer_stop(s_adv_timer);
-    esp_timer_start_once(s_adv_timer, SDF_BLE_COMPANION_ADV_FAST_DURATION_MS * 1000);
-}
-
-void sdf_ble_companion_start_advertising_slow(void) {
-    struct ble_gap_adv_params adv_params = {
-        .conn_mode = BLE_GAP_CONN_MODE_UND,
-        .disc_mode = BLE_GAP_DISC_MODE_GEN,
-        .itvl_min = SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MIN,
-        .itvl_max = SDF_BLE_COMPANION_ADV_SLOW_INTERVAL_MAX,
-    };
-
-    int rc = ble_gap_adv_set_data(s_adv_data, s_adv_data_len);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to set advertising data: %d", rc);
-        return;
-    }
-
-    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
-                           &adv_params, sdf_ble_companion_gap_event, NULL);
-    if (rc != 0) {
-        ESP_LOGE(TAG, "Failed to start slow advertising: %d", rc);
-    } else {
-        ESP_LOGI(TAG, "Slow advertising started");
+        ESP_LOGI(TAG, "Unfiltered pairing-window advertising started");
     }
 }
 
-// Keep the old function name for compatibility
-void sdf_ble_companion_start_advertising(void) {
-    sdf_ble_companion_start_advertising_fast();
+/* Single choke point for (re)starting advertising in whichever mode
+ * currently applies - called after every disconnect, at boot (host sync),
+ * when the pairing window opens, and when it closes (admission or
+ * timeout). Always stops any advertising procedure already in progress
+ * first (ble_gap_adv_start() fails with BLE_HS_EALREADY otherwise); that
+ * call is a harmless, silently-ignored no-op (BLE_HS_EALREADY) when nothing
+ * was advertising, e.g. right after a peer just connected. */
+static void sdf_ble_companion_restart_advertising(void) {
+    int stop_rc = ble_gap_adv_stop();
+    if (stop_rc != 0 && stop_rc != BLE_HS_EALREADY) {
+        ESP_LOGW(TAG, "ble_gap_adv_stop failed: %d", stop_rc);
+    }
+
+    bool window_open = false;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        window_open = sdf_ble_companion_bond_window_is_open(&s_bond_state);
+        xSemaphoreGive(s_lock);
+    } else {
+        ESP_LOGW(TAG, "restart_advertising: lock contention, defaulting to sparse");
+    }
+
+    if (window_open) {
+        sdf_ble_companion_start_advertising_pairing();
+    } else {
+        sdf_ble_companion_push_allow_list();
+        sdf_ble_companion_start_advertising_sparse();
+    }
+}
+
+esp_err_t sdf_ble_companion_open_pairing_window(void) {
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    if (sdf_ble_companion_bond_window_is_open(&s_bond_state)) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    sdf_ble_companion_bond_open_window(&s_bond_state);
+    xSemaphoreGive(s_lock);
+
+    esp_timer_stop(s_pairing_window_timer); /* defensive; should already be idle */
+    esp_timer_start_once(s_pairing_window_timer,
+                          (uint64_t)SDF_BLE_COMPANION_PAIRING_WINDOW_MS * 1000);
+
+    sdf_ble_companion_restart_advertising();
+    ESP_LOGI(TAG, "BLE Companion pairing window opened (%u ms)",
+             (unsigned)SDF_BLE_COMPANION_PAIRING_WINDOW_MS);
+    return ESP_OK;
 }
 
 static void sdf_ble_companion_build_adv_data(void) {
@@ -848,15 +1070,44 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
 
     memset(s_connections, 0, sizeof(s_connections));
 
-    // Initialize the advertising timer
+    sdf_ble_companion_bond_state_init(&s_bond_state);
+    /* Re-populate the allow list from NimBLE's own NVS-persisted bond store
+     * so a reboot doesn't strand every already-paired companion device
+     * behind the new filtered-advertising default (see
+     * sdf_ble_companion_bond_state.h). Only allow-list *membership* is
+     * restored here - failed-login counters intentionally start at zero
+     * every boot, they are never persisted to NVS (see design.md
+     * "Decisions"). This assumes the NimBLE host/bond store is already
+     * initialized by this point, same assumption the rest of this function
+     * already makes about sdf_nuki_ble_register_server_service() below. */
+    {
+        ble_addr_t bonded[SDF_BLE_COMPANION_BOND_TABLE_MAX];
+        int num_peers = 0;
+        int rc = ble_store_util_bonded_peers(bonded, &num_peers,
+                                              SDF_BLE_COMPANION_BOND_TABLE_MAX);
+        if (rc == 0) {
+            for (int i = 0; i < num_peers; i++) {
+                sdf_ble_companion_addr_t addr;
+                addr.type = bonded[i].type;
+                memcpy(addr.val, bonded[i].val, sizeof(addr.val));
+                sdf_ble_companion_bond_allow_list_add(&s_bond_state, &addr);
+            }
+            ESP_LOGI(TAG, "Seeded BLE Companion allow list with %d bonded peer(s)",
+                     num_peers);
+        } else {
+            ESP_LOGW(TAG, "ble_store_util_bonded_peers failed: %d", rc);
+        }
+    }
+
+    // Initialize the pairing-window timeout timer
     esp_timer_create_args_t timer_args = {
-        .callback = sdf_ble_companion_adv_timer_cb,
+        .callback = sdf_ble_companion_pairing_window_timer_cb,
         .arg = NULL,
-        .name = "sdf_ble_adv_timer",
+        .name = "sdf_ble_pair_timer",
     };
-    esp_err_t err = esp_timer_create(&timer_args, &s_adv_timer);
+    esp_err_t err = esp_timer_create(&timer_args, &s_pairing_window_timer);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create advertising timer: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to create pairing window timer: %s", esp_err_to_name(err));
         vSemaphoreDelete(s_lock);
         s_lock = NULL;
         return err;
@@ -865,8 +1116,8 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
     if (sdf_nuki_ble_register_server_service(sdf_ble_companion_register_gatt,
                                              sdf_ble_companion_on_host_sync,
                                              NULL) != 0) {
-        esp_timer_delete(s_adv_timer);
-        s_adv_timer = NULL;
+        esp_timer_delete(s_pairing_window_timer);
+        s_pairing_window_timer = NULL;
         vSemaphoreDelete(s_lock);
         s_lock = NULL;
         return ESP_ERR_INVALID_STATE;
@@ -935,11 +1186,11 @@ esp_err_t sdf_ble_companion_deinit(void) {
         s_enrollment_failed_sub = NULL;
     }
 
-    // Stop and delete the advertising timer
-    if (s_adv_timer) {
-        esp_timer_stop(s_adv_timer);
-        esp_timer_delete(s_adv_timer);
-        s_adv_timer = NULL;
+    // Stop and delete the pairing-window timeout timer
+    if (s_pairing_window_timer) {
+        esp_timer_stop(s_pairing_window_timer);
+        esp_timer_delete(s_pairing_window_timer);
+        s_pairing_window_timer = NULL;
     }
 
     memset(&s_callbacks, 0, sizeof(s_callbacks));

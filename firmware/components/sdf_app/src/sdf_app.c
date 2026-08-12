@@ -506,6 +506,20 @@ static void sdf_app_on_admin_action(void *ctx,
     break;
   }
 
+  case SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW: {
+    ESP_LOGI(TAG, "Admin authorized BLE Companion pairing window (button-triggered)");
+    sdf_power_mark_activity();
+
+    /* Button-triggered, unlike NUKI_REPAIR/ENROLL_ADMIN/ZB_JOIN above - no
+     * originating BLE connection to reply to. */
+    esp_err_t err = sdf_ble_companion_open_pairing_window();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to open BLE Companion pairing window: %s",
+               esp_err_to_name(err));
+    }
+    break;
+  }
+
   case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET: {
     ESP_LOGI(TAG, "Admin authorized Factory Reset");
     // Execute complete factory reset sequence

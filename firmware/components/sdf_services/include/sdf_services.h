@@ -26,6 +26,11 @@ typedef enum {
   SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN = 6,
   SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH = 7,
   SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR = 8,
+  /* Button-triggered (double-click), not BLE-triggered like WEB_REG_AUTH/
+   * NUKI_REPAIR above: opens the BLE Companion Service's Admin-Fingerprint-
+   * Gated Device Pairing Window (see sdf_ble_companion_open_pairing_window())
+   * once an Admin fingerprint authorizes it. No BLE client to reply to. */
+  SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW = 9,
 } sdf_services_admin_action_t;
 
 /* Device setup progress, derived from existing persisted state

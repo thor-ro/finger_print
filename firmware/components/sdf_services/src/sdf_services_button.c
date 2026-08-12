@@ -111,6 +111,7 @@ static void IRAM_ATTR sdf_button_isr(void *arg) {
         portYIELD_FROM_ISR();
     }
 }
+#endif
 
 /**
  * @brief Shared dispatch body for a resolved admin action, regardless of
@@ -124,8 +125,12 @@ static void IRAM_ATTR sdf_button_isr(void *arg) {
  * - so the "0 users, execute immediately" branch below can never be taken
  * for NUKI_PAIR, and it always goes through the admin-fingerprint pending
  * gate like every other non-enroll action.
+ *
+ * Not static: declared in sdf_services_internal.h so it can be driven
+ * directly by host (linux target) unit tests without the real iot_button
+ * GPIO plumbing - see test_sdf_services.c.
  */
-static void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
+void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
     ESP_LOGI(TAG, "Button callback: action=%d", (int)action);
 
     sdf_services_state_t *s = sdf_services_state();
@@ -176,6 +181,12 @@ static void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
             case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET:
                 led_pulse_red();
                 break;
+            case SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW:
+                /* Cyan mirrors NUKI_REPAIR's pending-action color in
+                 * sdf_services_admin.c - both are BLE-Companion-Service-
+                 * related admin actions. */
+                led_pulse_cyan();
+                break;
             default:
                 break;
         }
@@ -212,7 +223,6 @@ static void sdf_button_single_click_cb(void *arg, void *usr_data) {
     (void)usr_data;
     sdf_button_dispatch_action(sdf_button_resolve_single_click_action());
 }
-#endif
 
 void sdf_button_task(void *arg) {
     (void)arg;
@@ -239,11 +249,17 @@ void sdf_button_task(void *arg) {
             iot_button_register_cb(s_button_state.btn_handle, BUTTON_SINGLE_CLICK, NULL,
                                    sdf_button_single_click_cb, NULL);
 
-            /* BUTTON_DOUBLE_CLICK is intentionally left unmapped. Double-Press
-             * is retired as the Nuki-pairing trigger (see the
-             * nuki-pairing-setup-flow change): single-click's action is now
+            /* Double-Press was retired as the Nuki-pairing trigger (see the
+             * nuki-pairing-setup-flow change: single-click's action is now
              * state-dependent and reaches NUKI_PAIR itself once an admin
-             * exists. The gesture remains free for future use. */
+             * exists) and stayed free for future use until the
+             * ble-companion-trust-and-lockout change picked it up as the
+             * admin-fingerprint-gated trigger for the BLE Companion
+             * Service's Device Pairing Window (see
+             * sdf_ble_companion_open_pairing_window()). */
+            iot_button_register_cb(s_button_state.btn_handle, BUTTON_DOUBLE_CLICK, NULL,
+                                   sdf_button_cb,
+                                   (void *)SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
 
             /* Triple-click (ENROLL_ADMIN) and Hold-3s (ZB_JOIN) are
              * intentionally left unmapped as of the

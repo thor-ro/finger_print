@@ -228,6 +228,8 @@ void test_web_auth_should_not_resolve_for_other_actions(void) {
       SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION, ESP_FAIL));
   TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
       SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, ESP_FAIL));
 }
 
 /* BLE-triggered admin actions (Nuki re-pair, Enroll-Admin, Zigbee Join):
@@ -270,6 +272,8 @@ void test_ble_admin_action_should_not_resolve_for_other_actions(void) {
       SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION, ESP_FAIL));
   TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
       SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_ble_admin_action_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, ESP_FAIL));
 }
 
 /* Setup-state helper */
@@ -278,4 +282,39 @@ void test_setup_state_unclaimed_when_no_enrolled_users(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
   TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_UNCLAIMED, sdf_services_get_setup_state());
+}
+
+/* Button dispatch: BLE Companion pairing-window admin action (double-click).
+ * enrolled_user_count is set directly on the internal state (rather than via
+ * a real enrollment) so the "0 users, execute immediately" bypass in
+ * sdf_button_dispatch_action() is not taken and the admin-fingerprint
+ * pending-action gate is actually exercised - mirrors how NUKI_PAIR's own
+ * gate is only reachable once a device is claimed. */
+
+void test_button_dispatch_ble_pairing_window_sets_pending_action(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state()->enrolled_user_count = 1;
+
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
+                     sdf_services_state()->pending_admin_action);
+}
+
+void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state()->enrolled_user_count = 1;
+
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR,
+                     sdf_services_state()->pending_admin_action);
+
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
+
+  /* The already-pending NUKI_PAIR request must not be clobbered by the
+   * later double-click. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR,
+                     sdf_services_state()->pending_admin_action);
 }

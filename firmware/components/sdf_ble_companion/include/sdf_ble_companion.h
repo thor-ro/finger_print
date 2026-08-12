@@ -138,6 +138,20 @@ esp_err_t sdf_ble_companion_broadcast_ota(const uint8_t *data, size_t len);
 bool sdf_ble_companion_handle_ota_write(void *ctx, uint16_t conn_handle,
                                          const uint8_t *data, size_t len);
 
+/**
+ * Opens the Admin-Fingerprint-Gated Device Pairing Window: switches
+ * advertising to unfiltered for SDF_BLE_COMPANION_PAIRING_WINDOW_MS (see
+ * sdf_ble_companion_bond_state.h). The first device to complete bonding
+ * during that window is added to the allow list and the window closes
+ * immediately; otherwise it closes on timeout with nothing added. Intended
+ * to be called only after the "request BLE Companion pairing window" admin
+ * action (SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW) has been authorized
+ * by an Admin fingerprint - see sdf_app_on_admin_action(). Returns
+ * ESP_ERR_INVALID_STATE if a window is already open or the service isn't
+ * initialized.
+ */
+esp_err_t sdf_ble_companion_open_pairing_window(void);
+
 #ifdef __cplusplus
 }
 #endif

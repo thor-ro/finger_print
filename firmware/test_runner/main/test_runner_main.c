@@ -117,6 +117,8 @@ extern void test_ble_admin_action_should_resolve_on_denial_or_timeout(void);
 extern void test_ble_admin_action_should_not_resolve_on_success(void);
 extern void test_ble_admin_action_should_not_resolve_for_other_actions(void);
 extern void test_setup_state_unclaimed_when_no_enrolled_users(void);
+extern void test_button_dispatch_ble_pairing_window_sets_pending_action(void);
+extern void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending(void);
 
 /* Event Router tests */
 extern void test_sdf_event_router_init_returns_ok(void);
@@ -244,6 +246,20 @@ extern void test_ble_ota_protocol_decide_begin_no_session_starts_new(void);
 extern void test_ble_ota_protocol_decide_begin_matching_size_resumes(void);
 extern void test_ble_ota_protocol_decide_begin_mismatched_size_rejected(void);
 
+/* BLE Companion bond-state tests */
+extern void test_bond_login_failure_increments_counter(void);
+extern void test_bond_login_success_resets_counter(void);
+extern void test_bond_evicts_at_threshold(void);
+extern void test_bond_counter_retained_across_simulated_reconnect(void);
+extern void test_bond_counter_cleared_on_reinit(void);
+extern void test_window_first_bond_closes_window_and_allow_lists(void);
+extern void test_window_incomplete_connection_leaves_window_open(void);
+extern void test_window_timeout_closes_with_no_bond(void);
+extern void test_window_admit_when_not_open_is_a_noop(void);
+extern void test_allow_listed_device_is_allow_listed(void);
+extern void test_allow_list_snapshot_matches_membership(void);
+extern void test_addr_eq_compares_type_and_value(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -369,6 +385,8 @@ void app_main(void) {
   RUN_TEST(test_ble_admin_action_should_not_resolve_on_success);
   RUN_TEST(test_ble_admin_action_should_not_resolve_for_other_actions);
   RUN_TEST(test_setup_state_unclaimed_when_no_enrolled_users);
+  RUN_TEST(test_button_dispatch_ble_pairing_window_sets_pending_action);
+  RUN_TEST(test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending);
 
   /* Event Router tests */
   RUN_TEST(test_sdf_event_router_init_returns_ok);
@@ -497,6 +515,20 @@ void app_main(void) {
   RUN_TEST(test_ble_ota_protocol_decide_begin_no_session_starts_new);
   RUN_TEST(test_ble_ota_protocol_decide_begin_matching_size_resumes);
   RUN_TEST(test_ble_ota_protocol_decide_begin_mismatched_size_rejected);
+
+  /* BLE Companion bond-state tests */
+  RUN_TEST(test_bond_login_failure_increments_counter);
+  RUN_TEST(test_bond_login_success_resets_counter);
+  RUN_TEST(test_bond_evicts_at_threshold);
+  RUN_TEST(test_bond_counter_retained_across_simulated_reconnect);
+  RUN_TEST(test_bond_counter_cleared_on_reinit);
+  RUN_TEST(test_window_first_bond_closes_window_and_allow_lists);
+  RUN_TEST(test_window_incomplete_connection_leaves_window_open);
+  RUN_TEST(test_window_timeout_closes_with_no_bond);
+  RUN_TEST(test_window_admit_when_not_open_is_a_noop);
+  RUN_TEST(test_allow_listed_device_is_allow_listed);
+  RUN_TEST(test_allow_list_snapshot_matches_membership);
+  RUN_TEST(test_addr_eq_compares_type_and_value);
 
   /* app_main() is declared void and called without capturing a return value
    * by the linux target's main_task() (see FreeRTOS-Kernel port_idf.c), so

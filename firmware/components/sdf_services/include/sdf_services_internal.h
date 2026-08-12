@@ -84,6 +84,11 @@ void sdf_enroll_task(void *arg);
 void sdf_admin_task(void *arg);
 void sdf_button_task(void *arg);
 
+/* Button gesture -> admin action dispatch, exposed (moved from static) so
+ * host (linux target) unit tests can drive it directly without the real
+ * iot_button GPIO plumbing - see test_sdf_services.c. */
+void sdf_button_dispatch_action(sdf_services_admin_action_t action);
+
 /* Task start/stop */
 esp_err_t sdf_services_start_tasks(void);
 esp_err_t sdf_services_stop_tasks(void);
