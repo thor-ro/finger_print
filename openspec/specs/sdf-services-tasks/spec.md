@@ -517,13 +517,19 @@ The `sdf_button_task` SHALL determine the action triggered by a single-click ges
 - **AND** `sdf_storage_nuki_load()` reports previously persisted Nuki credentials
 - **THEN** the system triggers `SDF_SERVICES_ADMIN_ACTION_ENROLL`
 
-### Requirement: Double-Press Gesture Retired
-The button task SHALL NOT bind any admin action to the `BUTTON_DOUBLE_CLICK` gesture.
+### Requirement: Double-Press Requests BLE Companion Pairing Window
+The button task SHALL bind `BUTTON_DOUBLE_CLICK` to request the BLE Companion Service's admin-fingerprint-gated device pairing window, following the same `pending_admin_action` authorization flow used by every other admin action.
 
-#### Scenario: Double-click produces no action
+#### Scenario: Double-click requests the pairing window
 - **WHEN** a double-click occurs on the physical button
-- **THEN** no admin action is triggered
-- **AND** `pending_admin_action` state is unaffected
+- **AND** no other admin action is currently pending
+- **THEN** the system sets `pending_admin_action` to request the BLE Companion pairing window
+- **AND** awaits an Admin fingerprint scan within the pending-action timeout, per the existing admin-fingerprint pending-action pattern
+
+#### Scenario: Double-click ignored while another admin action is pending
+- **WHEN** a double-click occurs
+- **AND** `pending_admin_action` is already set to a different action
+- **THEN** the double-click SHALL NOT change the pending action
 
 ### Requirement: Nuki Pairing Unreachable By Button After Setup Complete
 Once setup is complete (Nuki credentials persisted), no button gesture SHALL be capable of re-triggering `SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR`. Re-pairing after setup completion SHALL only be reachable via a full factory reset (which clears persisted Nuki credentials, returning the device to the setup-incomplete state) or via an authenticated BLE Companion trigger.
@@ -537,3 +543,24 @@ Once setup is complete (Nuki credentials persisted), no button gesture SHALL be 
 - **WHEN** a factory reset completes
 - **THEN** persisted Nuki credentials are cleared
 - **AND** the next single-click, after an admin is re-enrolled, triggers `SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR` again
+
+### Requirement: Admin-Only Actions Not Bound To Physical Button Gestures
+The button task SHALL NOT bind any gesture to `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` or `SDF_SERVICES_ADMIN_ACTION_ZB_JOIN`. These actions SHALL only be reachable via an authenticated BLE Companion Service request.
+
+#### Scenario: Triple-click produces no action
+- **WHEN** a triple-click occurs on the physical button
+- **THEN** no admin action is triggered
+- **AND** `pending_admin_action` state is unaffected
+
+#### Scenario: Hold-3s produces no action
+- **WHEN** the button is held for 3 seconds
+- **THEN** no admin action is triggered
+- **AND** `pending_admin_action` state is unaffected
+
+### Requirement: Simplified Pre-Enrollment Bootstrap Branch
+On an unclaimed device (zero enrolled users), the button task's immediate-execution bootstrap path SHALL treat only `SDF_SERVICES_ADMIN_ACTION_ENROLL` as eligible for unauthenticated immediate execution. `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` SHALL NOT reach this path, since it is no longer bound to any button gesture.
+
+#### Scenario: Unclaimed device, single-click still enrolls immediately
+- **WHEN** a single-click occurs
+- **AND** the device has zero enrolled users
+- **THEN** the system starts enrollment immediately, without requiring admin authorization
