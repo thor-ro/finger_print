@@ -48,11 +48,14 @@ esp_err_t sdf_storage_erase_all(void);
 /* Web user account storage (max 5 users) */
 #define SDF_STORAGE_WEB_USER_MAX 5
 #define SDF_STORAGE_WEB_USER_NAME_MAX 32
-#define SDF_STORAGE_WEB_USER_HASH_LEN 32  /* SHA256 */
+#define SDF_STORAGE_WEB_USER_HASH_LEN 32     /* SHA256, as received at REGISTER */
+#define SDF_STORAGE_WEB_USER_SALT_LEN 16
+#define SDF_STORAGE_WEB_USER_STRETCHED_LEN 32  /* PBKDF2-HMAC-SHA256 output */
 
 typedef struct {
     char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-    uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+    uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+    uint8_t stretched_credential[SDF_STORAGE_WEB_USER_STRETCHED_LEN];
     uint8_t permission;  /* 1=standard, 2=elevated, 3=admin */
     bool valid;
 } sdf_storage_web_user_t;
@@ -63,6 +66,16 @@ esp_err_t sdf_storage_web_user_clear(uint8_t index);
 esp_err_t sdf_storage_web_user_count(size_t *count);
 esp_err_t sdf_storage_web_user_find_by_name(const char *username, sdf_storage_web_user_t *user, uint8_t *index_out);
 esp_err_t sdf_storage_web_user_clear_all(void);
+
+/* Device-local pseudo-salt HMAC key, used to derive an indistinguishable
+ * LOGIN_INIT challenge for usernames with no stored account (see
+ * sdf_services_web_auth). Generated once on first use via esp_fill_random
+ * and persisted; load-or-generate so callers never have to special-case
+ * "not yet created". Cleared together with web user accounts by
+ * sdf_storage_erase_all so the two can never drift out of sync. */
+#define SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN 32
+
+esp_err_t sdf_storage_web_pseudo_salt_key_load_or_generate(uint8_t key_out[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN]);
 
 /* Fingerprint user name storage (max 10 users, user_id 1-10). Duplicated
  * here (rather than depending on sdf_drivers/fingerprint.h's

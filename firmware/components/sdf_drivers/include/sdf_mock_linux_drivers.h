@@ -49,4 +49,13 @@ esp_err_t uart_set_pin(uart_port_t uart_num, int tx_io_num, int rx_io_num,
                        int rts_io_num, int cts_io_num);
 esp_err_t uart_driver_delete(uart_port_t uart_num);
 
+/* --------------- Test-only control hooks --------------- */
+
+/* Makes uart_read_bytes() block for delay_ms (still reporting "no data")
+ * before returning, so owner-task tests can simulate a slow sensor
+ * round-trip and observe how concurrent fp_* callers are serialized. 0
+ * (the default) preserves the old immediate-failure behavior. Not used by
+ * any production code path. */
+void sdf_mock_uart_set_read_delay_ms(uint32_t delay_ms);
+
 #endif /* SDF_MOCK_LINUX_DRIVERS_H */

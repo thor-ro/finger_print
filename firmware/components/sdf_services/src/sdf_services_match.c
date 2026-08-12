@@ -136,10 +136,11 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
 
     sdf_fingerprint_match_t match = {0};
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
-
+    /* fp_match_1n() is a blocking UART round-trip (up to
+     * CONFIG_SDF_FP_RESPONSE_TIMEOUT_MS), but the fingerprint owner task now
+     * resets its own watchdog entry per dispatched request, and this task
+     * resets its own entry while blocked waiting for the reply - no
+     * per-call-site reset needed here. */
     sdf_fingerprint_op_result_t match_result = fp_match_1n(&match);
 
     uint32_t failed_attempts_after = 0;
@@ -259,16 +260,9 @@ void sdf_match_task(void *arg) {
 #endif
     }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
-
-    /* Fast connectivity check */
+    /* Fast connectivity check. fp_probe() is a blocking UART round-trip; see
+     * the comment above fp_match_1n() - no per-call-site reset needed. */
     esp_err_t probe_err = fp_probe();
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
 
     /* Check unclaimed state on boot */
     uint16_t users[SDF_FINGERPRINT_USER_ID_MAX];

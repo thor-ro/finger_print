@@ -115,17 +115,14 @@ void sdf_services_run_enrollment_step(void) {
         return;
     }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
+    /* fp_enroll_step() is a blocking UART round-trip, but the fingerprint
+     * owner task now resets its own watchdog entry per dispatched request,
+     * and this task resets its own entry while blocked waiting for the
+     * reply - no per-call-site reset needed here. */
     fp_set_power(true);
     sdf_fingerprint_op_result_t step_result = fp_enroll_step(
         (sdf_fingerprint_enroll_step_t)current_cmd,
         snapshot_user_id, snapshot_permission);
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
 
     if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
         return;

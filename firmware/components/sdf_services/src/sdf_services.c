@@ -238,13 +238,11 @@ sdf_services_start_local_enrollment_with_permission(
   uint8_t perms[SDF_SERVICES_MAX_USERS];
 
   err = sdf_services_query_users(user_ids, perms, &count, max_users);
-  // query_users involves a sensor UART exchange that can be slow.
-  // Reset the watchdog here because this function is called from
-  // sdf_services_execute_admin_action which itself follows fp_match_1n(),
-  // meaning two long operations run back-to-back without a WDT reset.
-#ifndef CONFIG_IDF_TARGET_LINUX
-  esp_task_wdt_reset();
-#endif
+  // query_users involves a sensor UART exchange that can be slow, but the
+  // fingerprint owner task now resets its own watchdog entry per dispatched
+  // request, and this task resets its own entry while blocked waiting for
+  // the reply - no per-call-site reset needed here even though this runs
+  // right after fp_match_1n() inside sdf_services_execute_admin_action.
   if (err == ESP_OK) {
     /* Pack results into compact bitmap + packed permissions format */
     sdf_services_pack_user_list(user_ids, perms, count,
@@ -293,6 +291,13 @@ void sdf_services_execute_admin_action(
 
   if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN) {
     sdf_services_start_local_enrollment_with_permission(3u);
+    /* Unlike plain ENROLL (button-only, nothing to notify), ENROLL_ADMIN can
+     * also be requested over BLE, so action_cb still needs to run afterwards
+     * purely so sdf_app can route a reply back to the requesting connection
+     * - the enrollment side effect above is unchanged either way. */
+    if (action_cb != NULL) {
+      action_cb(action_ctx, action);
+    }
     return;
   }
 

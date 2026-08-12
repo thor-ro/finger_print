@@ -213,7 +213,8 @@ void test_sdf_storage_erase_all_idempotent(void) {
 static sdf_storage_web_user_t make_web_user(const char *username, uint8_t permission) {
   sdf_storage_web_user_t user = {0};
   strncpy(user.username, username, sizeof(user.username) - 1);
-  memset(user.password_hash, 0xAB, sizeof(user.password_hash));
+  memset(user.salt, 0xCD, sizeof(user.salt));
+  memset(user.stretched_credential, 0xAB, sizeof(user.stretched_credential));
   user.permission = permission;
   user.valid = true;
   return user;
@@ -228,7 +229,8 @@ void test_sdf_storage_web_user_save_and_load_success(void) {
   sdf_storage_web_user_t loaded = {0};
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(0, &loaded));
   TEST_ASSERT_EQUAL_STRING("alice", loaded.username);
-  TEST_ASSERT_EQUAL_MEMORY(saved.password_hash, loaded.password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
+  TEST_ASSERT_EQUAL_MEMORY(saved.salt, loaded.salt, SDF_STORAGE_WEB_USER_SALT_LEN);
+  TEST_ASSERT_EQUAL_MEMORY(saved.stretched_credential, loaded.stretched_credential, SDF_STORAGE_WEB_USER_STRETCHED_LEN);
   TEST_ASSERT_EQUAL(1, loaded.permission);
   TEST_ASSERT_TRUE(loaded.valid);
 
@@ -348,6 +350,70 @@ void test_sdf_storage_web_user_save_index_at_max_rejected(void) {
   sdf_storage_web_user_t saved = make_web_user("overflow", 1);
   esp_err_t err = sdf_storage_web_user_save(SDF_STORAGE_WEB_USER_MAX, &saved);
   TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+
+  nvs_teardown();
+}
+
+// -----------------------------------------------------------------------------
+// Web pseudo-salt HMAC key
+// -----------------------------------------------------------------------------
+
+void test_sdf_storage_web_pseudo_salt_key_generates_on_first_use(void) {
+  nvs_setup();
+
+  uint8_t key[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_pseudo_salt_key_load_or_generate(key));
+
+  // A freshly generated key should not be all-zero (esp_fill_random on the
+  // linux host target still produces non-trivial output).
+  uint8_t all_zero[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN] = {0};
+  TEST_ASSERT_NOT_EQUAL(0, memcmp(all_zero, key, sizeof(key)));
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_pseudo_salt_key_persists_across_loads(void) {
+  nvs_setup();
+
+  uint8_t first[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_pseudo_salt_key_load_or_generate(first));
+
+  uint8_t second[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_pseudo_salt_key_load_or_generate(second));
+
+  TEST_ASSERT_EQUAL_MEMORY(first, second, SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_pseudo_salt_key_null_arg_rejected(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_web_pseudo_salt_key_load_or_generate(NULL));
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key(void) {
+  nvs_setup();
+
+  sdf_storage_web_user_t saved = make_web_user("frank", 1);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved));
+
+  uint8_t key_before[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_pseudo_salt_key_load_or_generate(key_before));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
+
+  sdf_storage_web_user_t loaded = {0};
+  TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, sdf_storage_web_user_load(0, &loaded));
+
+  // The pseudo-salt key must be gone too - erase_all wipes the whole
+  // namespace, so load_or_generate() regenerates a fresh (different) key
+  // rather than returning the pre-erase one, keeping the two in lockstep.
+  uint8_t key_after[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_pseudo_salt_key_load_or_generate(key_after));
+  TEST_ASSERT_NOT_EQUAL(0, memcmp(key_before, key_after, sizeof(key_before)));
 
   nvs_teardown();
 }

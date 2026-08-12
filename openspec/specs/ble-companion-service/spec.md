@@ -14,16 +14,45 @@ The Companion Service SHALL register its GATT database with the existing NimBLE 
 - **AND** the Nuki client and Companion Service operate as central and peripheral roles on that single host
 
 ### Requirement: BLE GATT Authentication
-The system SHALL expose an Authentication characteristic. Until valid credentials (username and password hash) are written to this characteristic, all other restricted characteristics (Config, Enrollment, OTA) SHALL return insufficient authentication errors.
+The system SHALL expose an Authentication characteristic supporting a two-step challenge-response LOGIN and a single-step REGISTER. Until a LOGIN challenge is successfully verified on this characteristic, all other restricted characteristics (Config, Enrollment, OTA) SHALL return insufficient authentication errors.
+
+REGISTER SHALL accept a username and a client-computed password hash, as today. On successful registration, the system SHALL generate a random per-user salt and derive a stretched credential from the received hash using a key-derivation function; the system SHALL persist only the salt and stretched credential, never the raw received hash.
+
+LOGIN SHALL proceed as: (1) the client submits `LOGIN_INIT` with a username; (2) the system replies with that user's salt, the key-derivation iteration count, and a freshly generated single-use nonce; (3) the client submits `LOGIN_VERIFY` with a response value computed by the client; (4) the system compares the submitted response against a value it computes from the stored stretched credential and the same nonce, and authenticates the connection only on a match. The nonce SHALL be invalidated after being consumed by one `LOGIN_VERIFY` attempt (successful or not) and SHALL never be reused.
+
+For a username with no matching stored account, `LOGIN_INIT` SHALL respond with a deterministic salt and nonce indistinguishable in structure and timing from a real account's response, so that an observer cannot determine whether a given username is registered.
 
 #### Scenario: Unauthorized access blocked
-- **WHEN** unauthenticated client attempts to write to the Config characteristic
+- **WHEN** an unauthenticated client attempts to write to the Config characteristic
 - **THEN** system returns ESP_GATT_AUTH_FAIL
 
+#### Scenario: LOGIN challenge issued for a registered user
+- **WHEN** a client submits `LOGIN_INIT` with a username that has a stored account
+- **THEN** system replies with that account's stored salt, the key-derivation iteration count, and a newly generated single-use nonce
+
+#### Scenario: LOGIN challenge issued for an unknown user is indistinguishable
+- **WHEN** a client submits `LOGIN_INIT` with a username that has no stored account
+- **THEN** system replies with a deterministic salt and a newly generated nonce in the same shape as a registered-user response
+- **AND** no subsequent `LOGIN_VERIFY` response can succeed for that username
+
 #### Scenario: Successful authentication
-- **WHEN** client writes valid username and password hash to Auth characteristic
-- **THEN** system transitions BLE connection to authenticated state
-- **AND** subsequent writes to Config characteristic succeed
+- **WHEN** a client submits `LOGIN_VERIFY` with a response value that matches what the system computes from the stored stretched credential and the outstanding nonce
+- **THEN** system transitions the BLE connection to authenticated state
+- **AND** subsequent writes to the Config characteristic succeed
+
+#### Scenario: Failed authentication
+- **WHEN** a client submits `LOGIN_VERIFY` with a response value that does not match what the system computes from the stored stretched credential and the outstanding nonce
+- **THEN** system does not transition the BLE connection to authenticated state
+- **AND** the nonce is invalidated and cannot be reused
+
+#### Scenario: Nonce cannot be replayed
+- **WHEN** a client submits a second `LOGIN_VERIFY` reusing a nonce that was already consumed by a prior `LOGIN_VERIFY` on the same connection
+- **THEN** system rejects the attempt without authenticating the connection
+
+#### Scenario: Registered credential is never stored as the raw received hash
+- **WHEN** a client successfully registers a new account
+- **THEN** system persists a per-user salt and a key-derivation-stretched credential
+- **AND** system does not persist the raw hash it received over the wire
 
 ### Requirement: OTA Triggering via BLE
 The system SHALL expose an OTA characteristic that accepts a chunked binary firmware transfer from an authenticated client over the existing BLE GATT connection. The firmware SHALL NOT establish any Wi-Fi or network connection to perform an OTA update, and SHALL stream the received bytes through the existing signed OTA verification flow.
@@ -95,3 +124,117 @@ The Companion Service SHALL expose an authenticated action allowing an already-l
 - **WHEN** an authenticated GATT client requests Nuki re-pairing
 - **AND** setup is not yet complete (no Nuki credentials persisted)
 - **THEN** the request is rejected, since initial pairing during setup is reached via the physical button flow, not this trigger
+
+### Requirement: Sparse, Allow-List-Filtered Advertising
+The Companion Service SHALL advertise using a sparse duty cycle and an accept/allow-list filter policy by default, such that only bonded identities already present on the allow list can complete a connection. This replaces the prior behavior of continuous, unfiltered, undirected advertising.
+
+#### Scenario: Unknown device cannot connect
+- **WHEN** a BLE device not present on the allow list attempts to connect while the Companion Service is in its default advertising mode
+- **THEN** the connection attempt SHALL NOT succeed
+
+#### Scenario: Allow-listed device reconnects normally
+- **WHEN** a BLE device already present on the allow list attempts to connect while the Companion Service is in its default advertising mode
+- **THEN** the connection SHALL be accepted and proceed through the existing bonded/encrypted link flow
+
+### Requirement: Admin-Fingerprint-Gated Device Pairing Window
+The Companion Service SHALL expose an admin-fingerprint-gated action, triggered by the button task's Double-Press gesture, that opens a single-shot, time-boxed pairing window during which advertising is unfiltered. The window duration SHALL be a compile-time constant, default 60 seconds. The window SHALL close immediately upon the first successful bond completed during it, and that bonded identity SHALL be added to the allow list without any further authorization step. Stray or incomplete connection attempts (connections that do not complete bonding) during the window SHALL be ignored and SHALL NOT close or extend the window.
+
+#### Scenario: Pairing window opened after fingerprint approval
+- **WHEN** Double-Press occurs on the physical button
+- **AND** an Admin finger is scanned successfully within the pending-action timeout
+- **THEN** the system opens unfiltered advertising for up to the configured window duration
+
+#### Scenario: First bond closes the window and grants trust
+- **WHEN** a device completes bonding during an open pairing window
+- **THEN** the system adds that device's bonded identity to the allow list
+- **AND** the system immediately closes the pairing window and returns to sparse, allow-list-filtered advertising
+
+#### Scenario: Incomplete connection does not consume the window
+- **WHEN** a device connects during an open pairing window but does not complete bonding
+- **THEN** the pairing window SHALL remain open
+- **AND** that connection attempt SHALL NOT be added to the allow list
+
+#### Scenario: Window closes on timeout with no bond
+- **WHEN** no device completes bonding before the configured window duration elapses
+- **THEN** the system closes the pairing window and returns to sparse, allow-list-filtered advertising
+
+#### Scenario: Pairing window denied
+- **WHEN** Double-Press occurs on the physical button
+- **AND** a non-Admin finger is scanned, or the pending-action timeout elapses
+- **THEN** the system denies the request and does not open the pairing window
+
+### Requirement: Failed BLE Login Lockout With Bond Eviction
+The Companion Service SHALL track consecutive failed `LOGIN_VERIFY` attempts per bonded identity in memory, tied to its bond-tracking state so the count survives disconnect and reconnect within device uptime. This counter is intentionally not persisted across reboot. `LOGIN_INIT` requests SHALL NOT count toward this counter. Upon a bonded identity reaching the configured failed-attempt threshold (a compile-time constant, default 3), the system SHALL remove that identity's bond record and allow-list entry and SHALL terminate its live connection immediately.
+
+#### Scenario: Failed attempt increments counter
+- **WHEN** a bonded, connected device submits a `LOGIN_VERIFY` response that does not match the expected value for the outstanding nonce
+- **THEN** the system increments that identity's failed-login counter
+- **AND** the system does not disconnect the device
+
+#### Scenario: Successful login resets counter
+- **WHEN** a bonded, connected device submits a `LOGIN_VERIFY` response that matches the expected value for the outstanding nonce
+- **THEN** the system resets that identity's failed-login counter to zero
+
+#### Scenario: Requesting a challenge does not count as an attempt
+- **WHEN** a bonded, connected device submits `LOGIN_INIT`
+- **THEN** the system does not change that identity's failed-login counter
+
+#### Scenario: Threshold reached evicts the device
+- **WHEN** a bonded identity's failed-login counter reaches the configured threshold
+- **THEN** the system removes that identity's bond record and allow-list entry
+- **AND** the system terminates the live connection immediately
+
+#### Scenario: Evicted device cannot reconnect without re-pairing
+- **WHEN** a device whose bond was removed due to lockout attempts to connect again
+- **THEN** the connection attempt SHALL NOT succeed, since the identity is no longer on the allow list
+- **AND** the device can only regain access via the Admin-Fingerprint-Gated Device Pairing Window
+
+#### Scenario: Reconnecting does not reset the counter
+- **WHEN** a bonded device disconnects and reconnects before its failed-login counter reaches the threshold
+- **THEN** its failed-login counter SHALL retain its prior value rather than resetting to zero
+
+### Requirement: Admin-Fingerprint-Gated Enroll-Admin Trigger
+The Companion Service SHALL expose an authenticated action allowing an already-logged-in BLE client to request enrollment of a new administrator (`SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN`). The request SHALL follow the same pending-admin-action pattern as Web Registration Authorization and Nuki Re-Pairing: the request enters a pending state, an Admin fingerprint must be scanned on the physical device within the pending-action timeout, and the result is routed back to the originating BLE connection. A valid logged-in companion session SHALL be required to submit the request, but SHALL NOT by itself be sufficient to authorize the action.
+
+#### Scenario: Enroll-Admin request authorized
+- **WHEN** an authenticated GATT client requests enrollment of a new admin
+- **AND** an Admin finger is scanned successfully within the pending-action timeout
+- **THEN** the system begins local fingerprint enrollment for the new user with admin permission
+- **AND** the originating connection is notified that the request was authorized
+
+#### Scenario: Enroll-Admin request denied
+- **WHEN** an authenticated GATT client requests enrollment of a new admin
+- **AND** a non-Admin finger is scanned, or the pending-action timeout elapses
+- **THEN** the system denies the request
+- **AND** the originating connection is notified of the denial
+
+#### Scenario: Unauthenticated client cannot request Enroll-Admin
+- **WHEN** a BLE client that has not completed Companion Service login attempts to request admin enrollment
+- **THEN** the request is rejected without entering a pending state
+
+### Requirement: Admin-Fingerprint-Gated Zigbee Join Trigger
+The Companion Service SHALL expose an authenticated action allowing an already-logged-in BLE client to request a Zigbee join window (`SDF_SERVICES_ADMIN_ACTION_ZB_JOIN`). The request SHALL follow the same pending-admin-action pattern as Web Registration Authorization and Nuki Re-Pairing: the request enters a pending state, an Admin fingerprint must be scanned on the physical device within the pending-action timeout, and the result is routed back to the originating BLE connection. A valid logged-in companion session SHALL be required to submit the request, but SHALL NOT by itself be sufficient to authorize the action.
+
+#### Scenario: Zigbee join request authorized
+- **WHEN** an authenticated GATT client requests a Zigbee join window
+- **AND** an Admin finger is scanned successfully within the pending-action timeout
+- **THEN** the system opens the Zigbee join window
+- **AND** the originating connection is notified that the request was authorized
+
+#### Scenario: Zigbee join request denied
+- **WHEN** an authenticated GATT client requests a Zigbee join window
+- **AND** a non-Admin finger is scanned, or the pending-action timeout elapses
+- **THEN** the system denies the request
+- **AND** the originating connection is notified of the denial
+
+#### Scenario: Unauthenticated client cannot request Zigbee join
+- **WHEN** a BLE client that has not completed Companion Service login attempts to request a Zigbee join window
+- **THEN** the request is rejected without entering a pending state
+
+### Requirement: Pending BLE-Originated Admin Actions Always Resolve
+Any BLE-originated pending admin action (Web Registration Authorization, Nuki Re-Pairing, Enroll-Admin, Zigbee Join) SHALL always resolve and notify its originating connection, even if the admin action completes with a result other than success while it is pending.
+
+#### Scenario: Pending BLE-originated request resolves on non-success outcome
+- **WHEN** an admin action completes with a result other than success while a BLE-originated pending request is outstanding
+- **THEN** the system SHALL resolve the pending request as denied
+- **AND** the GATT server SHALL notify the originating connection so no BLE client is left waiting indefinitely

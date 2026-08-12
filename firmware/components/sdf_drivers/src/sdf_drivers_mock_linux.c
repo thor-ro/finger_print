@@ -10,7 +10,16 @@
 
 #include "sdf_mock_linux_drivers.h"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 /* --------------- UART mock functions --------------- */
+
+static uint32_t s_mock_uart_read_delay_ms = 0;
+
+void sdf_mock_uart_set_read_delay_ms(uint32_t delay_ms) {
+  s_mock_uart_read_delay_ms = delay_ms;
+}
 
 int uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length,
                     uint32_t ticks_to_wait) {
@@ -18,6 +27,9 @@ int uart_read_bytes(uart_port_t uart_num, void *buf, uint32_t length,
   (void)buf;
   (void)length;
   (void)ticks_to_wait;
+  if (s_mock_uart_read_delay_ms != 0) {
+    vTaskDelay(pdMS_TO_TICKS(s_mock_uart_read_delay_ms));
+  }
   return -1;
 }
 

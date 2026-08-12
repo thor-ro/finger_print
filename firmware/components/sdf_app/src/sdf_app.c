@@ -7,6 +7,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_task_wdt.h"
@@ -63,14 +64,19 @@ static uint8_t s_pending_lock_action;
 static uint8_t s_pending_lock_flags;
 static bool s_periodic_poll_pending;
 
-/* BLE-triggered Nuki re-pair request: tracks the originating connection so
- * the eventual admin-fingerprint approval/denial/timeout result (which
+/* BLE-triggered admin action requests (Nuki re-pair, Enroll-Admin, Zigbee
+ * Join): tracks the originating connection and which action it requested,
+ * so the eventual admin-fingerprint approval/denial/timeout result (which
  * arrives asynchronously with no connection context of its own - see
  * SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE's payload) can be routed back to
- * the right BLE client. Only one such request can be pending at a time,
- * mirroring pending_admin_action's own single-pending-action invariant. */
-static bool s_nuki_repair_pending;
-static uint16_t s_nuki_repair_conn_handle;
+ * the right BLE client. Shared across all three action types rather than
+ * duplicated per type: sdf_services enforces only one admin action can be
+ * pending at a time (see sdf_services_request_admin_action()), so a single
+ * pending+action+handle triple is always enough to describe "the"
+ * outstanding BLE-triggered request, if any. */
+static bool s_ble_admin_action_pending;
+static sdf_services_admin_action_t s_ble_admin_action;
+static uint16_t s_ble_admin_action_conn_handle;
 
 static sdf_lock_flow_t s_lock_flow;
 
@@ -90,7 +96,9 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
                                             const sdf_event_router_event_t *event);
 static void sdf_app_on_admin_action_complete(void *ctx,
                                               const sdf_event_router_event_t *event);
-static void sdf_app_on_nuki_repair_request(void *ctx, uint16_t conn_handle);
+static void sdf_app_on_ble_admin_action_request(void *ctx,
+                                                 sdf_services_admin_action_t action,
+                                                 uint16_t conn_handle);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
@@ -438,9 +446,12 @@ static void sdf_app_on_admin_action(void *ctx,
     ESP_LOGI(TAG, "Admin authorized Nuki re-pair (BLE-triggered)");
     sdf_power_mark_activity();
 
-    uint16_t conn_handle = s_nuki_repair_conn_handle;
-    bool was_pending = s_nuki_repair_pending;
-    s_nuki_repair_pending = false;
+    uint16_t conn_handle = s_ble_admin_action_conn_handle;
+    bool was_pending = s_ble_admin_action_pending &&
+                        s_ble_admin_action == SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR;
+    if (was_pending) {
+      s_ble_admin_action_pending = false;
+    }
 
     bool started = sdf_app_execute_nuki_pairing_start();
     if (was_pending) {
@@ -449,19 +460,66 @@ static void sdf_app_on_admin_action(void *ctx,
        * scenario; `started == false` here means pairing was already active
        * for another reason, so the client is told denied rather than left
        * to assume success. */
-      sdf_ble_companion_reply_nuki_repair(conn_handle, started);
+      sdf_ble_companion_reply_admin_action(conn_handle, action, started);
     }
     break;
   }
 
-  case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
+  case SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN: {
+    ESP_LOGI(TAG, "Admin authorized Enroll-Admin (BLE-triggered)");
+    sdf_power_mark_activity();
+
+    /* The actual enrollment side effect (sdf_services_start_local_enrollment_
+     * with_permission(3u)) already ran inside sdf_services_execute_admin_
+     * action() before this callback fires - this only routes the "request
+     * accepted, enrollment starting" reply back to the requesting BLE
+     * client, mirroring NUKI_REPAIR above. Button-triggered ENROLL_ADMIN
+     * requests no longer exist (see button-admin-actions-to-companion-app),
+     * so this callback only ever fires for a BLE-originated request. */
+    if (s_ble_admin_action_pending &&
+        s_ble_admin_action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN) {
+      uint16_t conn_handle = s_ble_admin_action_conn_handle;
+      s_ble_admin_action_pending = false;
+      sdf_ble_companion_reply_admin_action(conn_handle, action, true);
+    }
+    break;
+  }
+
+  case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN: {
     ESP_LOGI(TAG, "Admin authorized Zigbee Join");
     led_rapid_purple();
     esp_err_t err = sdf_protocol_zigbee_permit_join();
     if (err == ESP_ERR_NOT_SUPPORTED) {
       ESP_LOGI(TAG, "Ignoring Zigbee Join request because Zigbee is disabled");
     }
+
+    /* ZB_JOIN is BLE-only as of this change (its Hold-3s button gesture was
+     * removed - see sdf_services_button.c), so this callback only ever fires
+     * for a BLE-originated request today; guarded on s_ble_admin_action
+     * anyway for symmetry with the other two cases and in case a future
+     * change reintroduces a button path. */
+    if (s_ble_admin_action_pending &&
+        s_ble_admin_action == SDF_SERVICES_ADMIN_ACTION_ZB_JOIN) {
+      uint16_t conn_handle = s_ble_admin_action_conn_handle;
+      s_ble_admin_action_pending = false;
+      sdf_ble_companion_reply_admin_action(conn_handle, action, err == ESP_OK);
+    }
     break;
+  }
+
+  case SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW: {
+    ESP_LOGI(TAG, "Admin authorized BLE Companion pairing window (button-triggered)");
+    sdf_power_mark_activity();
+
+    /* Button-triggered, unlike NUKI_REPAIR/ENROLL_ADMIN/ZB_JOIN above - no
+     * originating BLE connection to reply to. */
+    esp_err_t err = sdf_ble_companion_open_pairing_window();
+    if (err != ESP_OK) {
+      ESP_LOGW(TAG, "Failed to open BLE Companion pairing window: %s",
+               esp_err_to_name(err));
+    }
+    break;
+  }
 
   case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET: {
     ESP_LOGI(TAG, "Admin authorized Factory Reset");
@@ -520,30 +578,34 @@ static void sdf_ble_companion_on_auth_request(void *ctx,
 }
 
 /* Fired by sdf_ble_companion when an authenticated GATT client writes a
- * `{"action":"nuki_repair"}` Config request (already rejected by
- * sdf_ble_companion itself, before this is ever called, if the connection
- * isn't authenticated or setup isn't complete). Routes into the same
- * admin-fingerprint pending-action flow WEB_REG_AUTH uses; the result is
- * resolved either in sdf_app_on_admin_action()'s NUKI_REPAIR case (approval)
- * or sdf_app_on_admin_action_complete() (denial/timeout) via
- * s_nuki_repair_conn_handle. */
-static void sdf_app_on_nuki_repair_request(void *ctx, uint16_t conn_handle) {
+ * `{"action":"nuki_repair"|"enroll_admin"|"zb_join"}` Config request
+ * (already rejected by sdf_ble_companion itself, before this is ever called,
+ * if the connection isn't authenticated, or - for nuki_repair specifically -
+ * if setup isn't complete). Routes into the same admin-fingerprint
+ * pending-action flow WEB_REG_AUTH uses; the result is resolved either in
+ * sdf_app_on_admin_action() (approval) or sdf_app_on_admin_action_complete()
+ * (denial/timeout) via s_ble_admin_action_conn_handle. */
+static void sdf_app_on_ble_admin_action_request(void *ctx,
+                                                 sdf_services_admin_action_t action,
+                                                 uint16_t conn_handle) {
     (void)ctx;
-    ESP_LOGI(TAG, "BLE Companion: Nuki re-pair request, conn_handle=%u",
-             (unsigned)conn_handle);
+    ESP_LOGI(TAG, "BLE Companion: admin action %d request, conn_handle=%u",
+             (int)action, (unsigned)conn_handle);
 
-    s_nuki_repair_conn_handle = conn_handle;
-    s_nuki_repair_pending = true;
+    s_ble_admin_action_conn_handle = conn_handle;
+    s_ble_admin_action = action;
+    s_ble_admin_action_pending = true;
 
-    esp_err_t err = sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR);
+    esp_err_t err = sdf_services_request_admin_action(action);
     if (err != ESP_OK) {
         /* Another admin action is already pending (button press, WEB_REG_AUTH,
          * ...) - this request never entered the pending state, so it must be
          * resolved here rather than left for sdf_app_on_admin_action_complete(),
          * which only fires for actions that *did* become pending. */
-        ESP_LOGW(TAG, "Nuki re-pair request rejected: %s", esp_err_to_name(err));
-        s_nuki_repair_pending = false;
-        sdf_ble_companion_reply_nuki_repair(conn_handle, false);
+        ESP_LOGW(TAG, "BLE admin action %d request rejected: %s", (int)action,
+                 esp_err_to_name(err));
+        s_ble_admin_action_pending = false;
+        sdf_ble_companion_reply_admin_action(conn_handle, action, false);
     }
 }
 
@@ -878,8 +940,10 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
       ESP_LOGE(TAG, "Failed to fetch web reg password hash: %s",
                esp_err_to_name(hash_err));
     } else {
+      uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+      esp_fill_random(salt, sizeof(salt));
       decision = sdf_services_web_auth_decide_registration(
-          username, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN,
+          username, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN, salt,
           event->payload.web_reg_auth_result.permission, true);
     }
   }
@@ -932,17 +996,23 @@ static void sdf_app_on_admin_action_complete(void *ctx,
     /* else: already cleared/consumed by another path - nothing to deny. */
   }
 
-  /* Same "always resolve" guarantee for the BLE-triggered Nuki re-pair
-   * request as above for WEB_REG_AUTH: sdf_admin_task only ever emits
-   * ADMIN_ACTION_COMPLETE with a non-OK result on timeout/denial, never a
-   * NUKI_REPAIR-specific success/failure event, so this is the only place
-   * that resolves the pending BLE client in those cases. */
-  if (s_nuki_repair_pending &&
-      sdf_services_nuki_repair_should_resolve_on_action_complete(action, result)) {
-    ESP_LOGW(TAG, "Nuki re-pair request not granted: %s", esp_err_to_name(result));
-    uint16_t conn_handle = s_nuki_repair_conn_handle;
-    s_nuki_repair_pending = false;
-    sdf_ble_companion_reply_nuki_repair(conn_handle, false);
+  /* Same "always resolve" guarantee for the BLE-triggered actions (Nuki
+   * re-pair, Enroll-Admin, Zigbee Join) as above for WEB_REG_AUTH:
+   * sdf_admin_task only ever emits ADMIN_ACTION_COMPLETE with a non-OK
+   * result on timeout/denial, never an action-specific success/failure
+   * event, so this is the only place that resolves the pending BLE client
+   * in those cases. Guarded on s_ble_admin_action matching `action` because
+   * a *different* admin action could complete (e.g. a button press) while
+   * one of these is pending - although sdf_services_request_admin_action()
+   * already prevents that from happening concurrently today, this keeps the
+   * guard correct even if that single-pending-action invariant ever loosens. */
+  if (s_ble_admin_action_pending && s_ble_admin_action == action &&
+      sdf_services_ble_admin_action_should_resolve_on_action_complete(action, result)) {
+    ESP_LOGW(TAG, "BLE admin action %d request not granted: %s", (int)action,
+             esp_err_to_name(result));
+    uint16_t conn_handle = s_ble_admin_action_conn_handle;
+    s_ble_admin_action_pending = false;
+    sdf_ble_companion_reply_admin_action(conn_handle, action, false);
   }
 }
 
@@ -1766,7 +1836,7 @@ sub_done:
       .on_config_write = sdf_ble_companion_on_config_write,
       .on_enroll_write = sdf_ble_companion_on_enroll_write,
       .on_ota_write = sdf_ble_companion_handle_ota_write,
-      .on_nuki_repair_request = sdf_app_on_nuki_repair_request,
+      .on_admin_action_request = sdf_app_on_ble_admin_action_request,
   };
   err = sdf_ble_companion_init(&ble_companion_cbs);
   if (err != ESP_OK) {

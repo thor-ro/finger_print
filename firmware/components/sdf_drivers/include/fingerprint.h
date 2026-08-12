@@ -11,6 +11,14 @@
 #define SDF_FINGERPRINT_USER_ID_MAX 10u
 #define SDF_FINGERPRINT_EIGENVALUE_SIZE 193u
 
+/* Reserved FreeRTOS task-notification index: the fingerprint owner task
+ * (see fingerprint.c) uses xTaskNotifyGiveIndexed()/ulTaskNotifyTakeIndexed()
+ * on this index to signal a calling task that its fp_* request has
+ * completed. Any task that calls into fp_* must not use this index for its
+ * own notifications (index 0 remains free for that, e.g. wake-ISR signals).
+ * Requires CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES >= 2. */
+#define FP_REPLY_NOTIFY_IDX 1
+
 typedef struct {
   int uart_port;
   int tx_pin;

@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
+#include "sdf_services.h"
 #include "sdf_storage.h"
 
 #ifdef __cplusplus
@@ -14,8 +15,13 @@ extern "C" {
 
 typedef enum {
     SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED = 0,
-    SDF_BLE_COMPANION_AUTH_STATE_PENDING = 1,
+    SDF_BLE_COMPANION_AUTH_STATE_PENDING = 1, /* REGISTER: admin-fingerprint pending */
     SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED = 2,
+    /* LOGIN_INIT issued a challenge for this connection; conn->pending_login_challenge
+     * is valid until the client's LOGIN_VERIFY consumes it (success or failure) or
+     * the connection is dropped. Deliberately distinct from AUTH_STATE_PENDING
+     * above, which is REGISTER's unrelated admin-fingerprint wait. */
+    SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED = 3,
 } sdf_ble_companion_auth_state_t;
 
 typedef struct {
@@ -24,7 +30,12 @@ typedef struct {
     sdf_ble_companion_auth_state_t auth_state;
     bool auth_pending;
     char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-    uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+    /* Outstanding LOGIN challenge for this connection - single-connection,
+     * single-attempt scoped (never persisted), valid only while
+     * auth_state == SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED.
+     * Cleared by the disconnect memset and explicitly after each
+     * LOGIN_VERIFY attempt. */
+    sdf_services_web_auth_challenge_t pending_login_challenge;
     uint8_t auth_value[512];
     uint16_t auth_value_len;
     uint8_t config_value[512];
@@ -49,15 +60,18 @@ typedef void (*sdf_ble_companion_enroll_write_cb)(void *ctx,
                                                    size_t len);
 
 /**
- * Fired when an already-authenticated GATT client requests Nuki re-pairing
- * (a `{"action":"nuki_repair"}` write on the Config characteristic, only
+ * Fired when an already-authenticated GATT client requests one of the
+ * admin-fingerprint-gated actions reachable over BLE - Nuki re-pair,
+ * Enroll-Admin, or Zigbee Join (a `{"action":"nuki_repair"|"enroll_admin"|
+ * "zb_join"}` write on the Config characteristic; nuki_repair is only
  * accepted once setup is already complete - see
  * sdf_ble_companion_config_access()). Parallel to on_auth_request: the
  * originating connection handle is passed through so the result can later
- * be routed back to it via sdf_ble_companion_reply_nuki_repair().
+ * be routed back to it via sdf_ble_companion_reply_admin_action().
  */
-typedef void (*sdf_ble_companion_nuki_repair_request_cb)(void *ctx,
-                                                          uint16_t conn_handle);
+typedef void (*sdf_ble_companion_admin_action_request_cb)(void *ctx,
+                                                            sdf_services_admin_action_t action,
+                                                            uint16_t conn_handle);
 
 /**
  * Returns true if the write was well-formed and accepted per the BLE OTA
@@ -79,7 +93,7 @@ typedef struct {
     sdf_ble_companion_config_write_cb on_config_write;
     sdf_ble_companion_enroll_write_cb on_enroll_write;
     sdf_ble_companion_ota_write_cb on_ota_write;
-    sdf_ble_companion_nuki_repair_request_cb on_nuki_repair_request;
+    sdf_ble_companion_admin_action_request_cb on_admin_action_request;
 } sdf_ble_companion_callbacks_t;
 
 esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks);
@@ -90,15 +104,20 @@ esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authent
 esp_err_t sdf_ble_companion_reply_auth(const char *username, bool authorized);
 
 /**
- * Routes the result of a pending BLE-triggered Nuki re-pair request back to
- * the originating connection (identified by conn_handle, unlike
- * sdf_ble_companion_reply_auth() which is keyed by username) as a
- * `{"nuki_repair":true|false}` notification on the Config characteristic.
- * Returns ESP_ERR_INVALID_STATE if the connection is no longer connected or
- * authenticated - the caller has no further recovery action to take in that
- * case, the client that would have received the reply is simply gone.
+ * Routes the result of a pending BLE-triggered admin action request (Nuki
+ * re-pair, Enroll-Admin, or Zigbee Join) back to the originating connection
+ * (identified by conn_handle, unlike sdf_ble_companion_reply_auth() which is
+ * keyed by username) as a `{"nuki_repair"|"enroll_admin"|"zb_join":
+ * true|false}` notification on the Config characteristic. Returns
+ * ESP_ERR_INVALID_ARG if `action` isn't one of those three, or
+ * ESP_ERR_INVALID_STATE if the connection is no longer connected or
+ * authenticated - the caller has no further recovery action to take in
+ * either case, the client that would have received the reply is simply gone
+ * (or was never a valid target).
  */
-esp_err_t sdf_ble_companion_reply_nuki_repair(uint16_t conn_handle, bool authorized);
+esp_err_t sdf_ble_companion_reply_admin_action(uint16_t conn_handle,
+                                                sdf_services_admin_action_t action,
+                                                bool authorized);
 
 esp_err_t sdf_ble_companion_notify_config(uint16_t conn_handle, const uint8_t *data, size_t len);
 esp_err_t sdf_ble_companion_notify_enroll(uint16_t conn_handle, const uint8_t *data, size_t len);
@@ -128,6 +147,20 @@ esp_err_t sdf_ble_companion_broadcast_ota(const uint8_t *data, size_t len);
  */
 bool sdf_ble_companion_handle_ota_write(void *ctx, uint16_t conn_handle,
                                          const uint8_t *data, size_t len);
+
+/**
+ * Opens the Admin-Fingerprint-Gated Device Pairing Window: switches
+ * advertising to unfiltered for SDF_BLE_COMPANION_PAIRING_WINDOW_MS (see
+ * sdf_ble_companion_bond_state.h). The first device to complete bonding
+ * during that window is added to the allow list and the window closes
+ * immediately; otherwise it closes on timeout with nothing added. Intended
+ * to be called only after the "request BLE Companion pairing window" admin
+ * action (SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW) has been authorized
+ * by an Admin fingerprint - see sdf_app_on_admin_action(). Returns
+ * ESP_ERR_INVALID_STATE if a window is already open or the service isn't
+ * initialized.
+ */
+esp_err_t sdf_ble_companion_open_pairing_window(void);
 
 #ifdef __cplusplus
 }

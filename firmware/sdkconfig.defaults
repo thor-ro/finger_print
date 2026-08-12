@@ -111,6 +111,11 @@ CONFIG_PM_ENABLE=y
 CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
 CONFIG_PM_DFS_INIT_AUTO=y
 
+# fingerprint.c's owner task uses a reserved indexed task notification
+# (FP_REPLY_NOTIFY_IDX) for its "request complete" doorbell, separate from
+# index 0 (e.g. sdf_match_task's wake-ISR signal) - needs >= 2 entries.
+CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=2
+
 # SDF Zigbee sleep knobs
 CONFIG_SDF_ZIGBEE_ENABLE=y
 CONFIG_SDF_ZIGBEE_SLEEP_ENABLE=y

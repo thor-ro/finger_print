@@ -51,6 +51,11 @@ extern void test_map_ack_fail(void);
 extern void test_map_ack_nouser(void);
 extern void test_map_ack_unknown(void);
 
+/* Fingerprint owner-task dispatch tests */
+extern void test_fp_owner_task_dispatch_round_trip(void);
+extern void test_fp_owner_task_serializes_concurrent_requests(void);
+extern void test_fp_owner_task_power_off_deferred_until_op_completes(void);
+
 /* Storage tests */
 extern void test_sdf_storage_nuki_save_and_load_success(void);
 extern void test_sdf_storage_nuki_load_not_found(void);
@@ -72,6 +77,10 @@ extern void test_sdf_storage_web_user_clear_success(void);
 extern void test_sdf_storage_web_user_clear_all(void);
 extern void test_sdf_storage_web_user_count(void);
 extern void test_sdf_storage_web_user_save_index_at_max_rejected(void);
+extern void test_sdf_storage_web_pseudo_salt_key_generates_on_first_use(void);
+extern void test_sdf_storage_web_pseudo_salt_key_persists_across_loads(void);
+extern void test_sdf_storage_web_pseudo_salt_key_null_arg_rejected(void);
+extern void test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key(void);
 
 /* SDF Config tests */
 extern void test_sdf_config_set_checkin_interval_bounds(void);
@@ -104,19 +113,29 @@ extern void test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok(void);
 /* SDF Services tests */
 extern void test_sdf_services_reset_state_returns_ok(void);
 extern void test_sdf_services_reset_state_can_be_called_multiple_times(void);
-extern void test_web_auth_verify_login_matching_hash_is_valid(void);
-extern void test_web_auth_verify_login_mismatched_hash_is_invalid(void);
-extern void test_web_auth_verify_login_wrong_hash_len_is_invalid(void);
-extern void test_web_auth_verify_login_all_zero_hash_is_invalid(void);
+extern void test_web_auth_stretch_credential_is_deterministic(void);
+extern void test_web_auth_stretch_credential_differs_by_salt(void);
+extern void test_web_auth_stretch_credential_invalid_args(void);
+extern void test_web_auth_verify_response_matching_is_valid(void);
+extern void test_web_auth_verify_response_mismatched_is_invalid(void);
+extern void test_web_auth_verify_response_wrong_nonce_len_is_invalid(void);
+extern void test_web_auth_verify_response_wrong_response_len_is_invalid(void);
+extern void test_web_auth_verify_response_all_zero_response_is_invalid(void);
+extern void test_web_auth_make_login_challenge_uses_stored_salt_and_nonce(void);
+extern void test_web_auth_make_pseudo_challenge_is_deterministic_per_username(void);
+extern void test_web_auth_make_pseudo_challenge_differs_by_username(void);
+extern void test_web_auth_known_and_unknown_challenges_are_same_shape(void);
 extern void test_web_auth_decide_registration_authorized_persists_user(void);
 extern void test_web_auth_decide_registration_denied_does_not_persist(void);
 extern void test_web_auth_should_resolve_on_web_reg_auth_failure(void);
 extern void test_web_auth_should_not_resolve_on_web_reg_auth_success(void);
 extern void test_web_auth_should_not_resolve_for_other_actions(void);
-extern void test_nuki_repair_should_resolve_on_denial_or_timeout(void);
-extern void test_nuki_repair_should_not_resolve_on_success(void);
-extern void test_nuki_repair_should_not_resolve_for_other_actions(void);
+extern void test_ble_admin_action_should_resolve_on_denial_or_timeout(void);
+extern void test_ble_admin_action_should_not_resolve_on_success(void);
+extern void test_ble_admin_action_should_not_resolve_for_other_actions(void);
 extern void test_setup_state_unclaimed_when_no_enrolled_users(void);
+extern void test_button_dispatch_ble_pairing_window_sets_pending_action(void);
+extern void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending(void);
 
 /* Event Router tests */
 extern void test_sdf_event_router_init_returns_ok(void);
@@ -244,6 +263,20 @@ extern void test_ble_ota_protocol_decide_begin_no_session_starts_new(void);
 extern void test_ble_ota_protocol_decide_begin_matching_size_resumes(void);
 extern void test_ble_ota_protocol_decide_begin_mismatched_size_rejected(void);
 
+/* BLE Companion bond-state tests */
+extern void test_bond_login_failure_increments_counter(void);
+extern void test_bond_login_success_resets_counter(void);
+extern void test_bond_evicts_at_threshold(void);
+extern void test_bond_counter_retained_across_simulated_reconnect(void);
+extern void test_bond_counter_cleared_on_reinit(void);
+extern void test_window_first_bond_closes_window_and_allow_lists(void);
+extern void test_window_incomplete_connection_leaves_window_open(void);
+extern void test_window_timeout_closes_with_no_bond(void);
+extern void test_window_admit_when_not_open_is_a_noop(void);
+extern void test_allow_listed_device_is_allow_listed(void);
+extern void test_allow_list_snapshot_matches_membership(void);
+extern void test_addr_eq_compares_type_and_value(void);
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -303,6 +336,10 @@ void app_main(void) {
   RUN_TEST(test_map_ack_nouser);
   RUN_TEST(test_map_ack_unknown);
 
+  RUN_TEST(test_fp_owner_task_dispatch_round_trip);
+  RUN_TEST(test_fp_owner_task_serializes_concurrent_requests);
+  RUN_TEST(test_fp_owner_task_power_off_deferred_until_op_completes);
+
   /* Storage tests */
   RUN_TEST(test_sdf_storage_nuki_save_and_load_success);
   RUN_TEST(test_sdf_storage_nuki_load_not_found);
@@ -324,6 +361,10 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_web_user_clear_all);
   RUN_TEST(test_sdf_storage_web_user_count);
   RUN_TEST(test_sdf_storage_web_user_save_index_at_max_rejected);
+  RUN_TEST(test_sdf_storage_web_pseudo_salt_key_generates_on_first_use);
+  RUN_TEST(test_sdf_storage_web_pseudo_salt_key_persists_across_loads);
+  RUN_TEST(test_sdf_storage_web_pseudo_salt_key_null_arg_rejected);
+  RUN_TEST(test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key);
 
   /* SDF Config tests */
   RUN_TEST(test_sdf_config_set_checkin_interval_bounds);
@@ -356,19 +397,29 @@ void app_main(void) {
   /* SDF Services tests */
   RUN_TEST(test_sdf_services_reset_state_returns_ok);
   RUN_TEST(test_sdf_services_reset_state_can_be_called_multiple_times);
-  RUN_TEST(test_web_auth_verify_login_matching_hash_is_valid);
-  RUN_TEST(test_web_auth_verify_login_mismatched_hash_is_invalid);
-  RUN_TEST(test_web_auth_verify_login_wrong_hash_len_is_invalid);
-  RUN_TEST(test_web_auth_verify_login_all_zero_hash_is_invalid);
+  RUN_TEST(test_web_auth_stretch_credential_is_deterministic);
+  RUN_TEST(test_web_auth_stretch_credential_differs_by_salt);
+  RUN_TEST(test_web_auth_stretch_credential_invalid_args);
+  RUN_TEST(test_web_auth_verify_response_matching_is_valid);
+  RUN_TEST(test_web_auth_verify_response_mismatched_is_invalid);
+  RUN_TEST(test_web_auth_verify_response_wrong_nonce_len_is_invalid);
+  RUN_TEST(test_web_auth_verify_response_wrong_response_len_is_invalid);
+  RUN_TEST(test_web_auth_verify_response_all_zero_response_is_invalid);
+  RUN_TEST(test_web_auth_make_login_challenge_uses_stored_salt_and_nonce);
+  RUN_TEST(test_web_auth_make_pseudo_challenge_is_deterministic_per_username);
+  RUN_TEST(test_web_auth_make_pseudo_challenge_differs_by_username);
+  RUN_TEST(test_web_auth_known_and_unknown_challenges_are_same_shape);
   RUN_TEST(test_web_auth_decide_registration_authorized_persists_user);
   RUN_TEST(test_web_auth_decide_registration_denied_does_not_persist);
   RUN_TEST(test_web_auth_should_resolve_on_web_reg_auth_failure);
   RUN_TEST(test_web_auth_should_not_resolve_on_web_reg_auth_success);
   RUN_TEST(test_web_auth_should_not_resolve_for_other_actions);
-  RUN_TEST(test_nuki_repair_should_resolve_on_denial_or_timeout);
-  RUN_TEST(test_nuki_repair_should_not_resolve_on_success);
-  RUN_TEST(test_nuki_repair_should_not_resolve_for_other_actions);
+  RUN_TEST(test_ble_admin_action_should_resolve_on_denial_or_timeout);
+  RUN_TEST(test_ble_admin_action_should_not_resolve_on_success);
+  RUN_TEST(test_ble_admin_action_should_not_resolve_for_other_actions);
   RUN_TEST(test_setup_state_unclaimed_when_no_enrolled_users);
+  RUN_TEST(test_button_dispatch_ble_pairing_window_sets_pending_action);
+  RUN_TEST(test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending);
 
   /* Event Router tests */
   RUN_TEST(test_sdf_event_router_init_returns_ok);
@@ -497,6 +548,20 @@ void app_main(void) {
   RUN_TEST(test_ble_ota_protocol_decide_begin_no_session_starts_new);
   RUN_TEST(test_ble_ota_protocol_decide_begin_matching_size_resumes);
   RUN_TEST(test_ble_ota_protocol_decide_begin_mismatched_size_rejected);
+
+  /* BLE Companion bond-state tests */
+  RUN_TEST(test_bond_login_failure_increments_counter);
+  RUN_TEST(test_bond_login_success_resets_counter);
+  RUN_TEST(test_bond_evicts_at_threshold);
+  RUN_TEST(test_bond_counter_retained_across_simulated_reconnect);
+  RUN_TEST(test_bond_counter_cleared_on_reinit);
+  RUN_TEST(test_window_first_bond_closes_window_and_allow_lists);
+  RUN_TEST(test_window_incomplete_connection_leaves_window_open);
+  RUN_TEST(test_window_timeout_closes_with_no_bond);
+  RUN_TEST(test_window_admit_when_not_open_is_a_noop);
+  RUN_TEST(test_allow_listed_device_is_allow_listed);
+  RUN_TEST(test_allow_list_snapshot_matches_membership);
+  RUN_TEST(test_addr_eq_compares_type_and_value);
 
   /* app_main() is declared void and called without capturing a return value
    * by the linux target's main_task() (see FreeRTOS-Kernel port_idf.c), so
