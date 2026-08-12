@@ -5,6 +5,7 @@ doc/*.7z
 doc/*.pxc
 ref
 firmware/.cache
+firmware/test_runner/.cache
 build_output.log
 firmware/test_runner/build*
 firmware/build

@@ -51,6 +51,11 @@ extern void test_map_ack_fail(void);
 extern void test_map_ack_nouser(void);
 extern void test_map_ack_unknown(void);
 
+/* Fingerprint owner-task dispatch tests */
+extern void test_fp_owner_task_dispatch_round_trip(void);
+extern void test_fp_owner_task_serializes_concurrent_requests(void);
+extern void test_fp_owner_task_power_off_deferred_until_op_completes(void);
+
 /* Storage tests */
 extern void test_sdf_storage_nuki_save_and_load_success(void);
 extern void test_sdf_storage_nuki_load_not_found(void);
@@ -330,6 +335,10 @@ void app_main(void) {
   RUN_TEST(test_map_ack_fail);
   RUN_TEST(test_map_ack_nouser);
   RUN_TEST(test_map_ack_unknown);
+
+  RUN_TEST(test_fp_owner_task_dispatch_round_trip);
+  RUN_TEST(test_fp_owner_task_serializes_concurrent_requests);
+  RUN_TEST(test_fp_owner_task_power_off_deferred_until_op_completes);
 
   /* Storage tests */
   RUN_TEST(test_sdf_storage_nuki_save_and_load_success);

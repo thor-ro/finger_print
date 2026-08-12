@@ -19,6 +19,11 @@ CONFIG_SDF_POWER_LOOP_INTERVAL_MS=250
 CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS=60000
 CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT=100
 
+# fingerprint.c's owner task uses a reserved indexed task notification
+# (FP_REPLY_NOTIFY_IDX) for its "request complete" doorbell, separate from
+# index 0 (e.g. sdf_match_task's wake-ISR signal) - needs >= 2 entries.
+CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=2
+
 # SDF security & hardening knobs
 CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW=8
 CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_THRESHOLD=5

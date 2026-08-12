@@ -9,6 +9,7 @@ idf_component_register(
          "../../components/sdf_state_machines/test/test_enrollment_sm.c"
          "../../components/sdf_drivers/test/test_driver_utils.c"
          "../../components/sdf_drivers/test/test_driver_protocol.c"
+         "../../components/sdf_drivers/test/test_fingerprint_owner_task.c"
          "../../components/sdf_protocol_ble/src/sdf_nuki_crypto.c"
          "../../components/sdf_protocol_ble/src/sdf_nuki_pairing.c"
          "../../components/sdf_protocol_ble/test/test_nuki_crypto.c"
