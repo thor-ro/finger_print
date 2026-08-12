@@ -49,6 +49,17 @@ typedef void (*sdf_ble_companion_enroll_write_cb)(void *ctx,
                                                    size_t len);
 
 /**
+ * Fired when an already-authenticated GATT client requests Nuki re-pairing
+ * (a `{"action":"nuki_repair"}` write on the Config characteristic, only
+ * accepted once setup is already complete - see
+ * sdf_ble_companion_config_access()). Parallel to on_auth_request: the
+ * originating connection handle is passed through so the result can later
+ * be routed back to it via sdf_ble_companion_reply_nuki_repair().
+ */
+typedef void (*sdf_ble_companion_nuki_repair_request_cb)(void *ctx,
+                                                          uint16_t conn_handle);
+
+/**
  * Returns true if the write was well-formed and accepted per the BLE OTA
  * chunked-transfer wire format (regardless of whether the underlying OTA
  * operation ultimately succeeds - such failures are reported asynchronously
@@ -68,6 +79,7 @@ typedef struct {
     sdf_ble_companion_config_write_cb on_config_write;
     sdf_ble_companion_enroll_write_cb on_enroll_write;
     sdf_ble_companion_ota_write_cb on_ota_write;
+    sdf_ble_companion_nuki_repair_request_cb on_nuki_repair_request;
 } sdf_ble_companion_callbacks_t;
 
 esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks);
@@ -76,6 +88,17 @@ esp_err_t sdf_ble_companion_deinit(void);
 bool sdf_ble_companion_is_authenticated(uint16_t conn_handle);
 esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authenticated);
 esp_err_t sdf_ble_companion_reply_auth(const char *username, bool authorized);
+
+/**
+ * Routes the result of a pending BLE-triggered Nuki re-pair request back to
+ * the originating connection (identified by conn_handle, unlike
+ * sdf_ble_companion_reply_auth() which is keyed by username) as a
+ * `{"nuki_repair":true|false}` notification on the Config characteristic.
+ * Returns ESP_ERR_INVALID_STATE if the connection is no longer connected or
+ * authenticated - the caller has no further recovery action to take in that
+ * case, the client that would have received the reply is simply gone.
+ */
+esp_err_t sdf_ble_companion_reply_nuki_repair(uint16_t conn_handle, bool authorized);
 
 esp_err_t sdf_ble_companion_notify_config(uint16_t conn_handle, const uint8_t *data, size_t len);
 esp_err_t sdf_ble_companion_notify_enroll(uint16_t conn_handle, const uint8_t *data, size_t len);

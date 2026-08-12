@@ -26,7 +26,7 @@ The setup is structured into three progressive phases.
 
 1. **Prepare Nuki:** The user presses and holds the button on their Nuki Smart Lock for 5 seconds until its LED circle glows constantly (Pairing Mode).
 2. **Initiate Nuki Pairing on SDF:** 
-   - The user presses the SDF Configuration Button **twice rapidly (Double Press)**.
+   - The user presses the SDF Configuration Button **once (Short Press)** again. Because the device is already claimed but has no Nuki credentials yet, a Short Press at this stage means "pair Nuki" rather than "enroll another user" — the button's Short Press action is state-dependent (see the summary table below).
    - The LED begins to pulse **Yellow** (Awaiting Admin Auth).
 3. **Authorize:** The Admin (User ID 1) touches the fingerprint sensor to authorize the action.
 4. **Active Pairing:** Once authorized, the LED flashes **Rapid Yellow**. The SDF connects to the Nuki over BLE, negotiates the shared key, and saves the credentials to NVS.
@@ -46,25 +46,31 @@ The setup is structured into three progressive phases.
 
 ## 3. Configuration Button Mapping Summary
 
-The device distinguishes between adding a new user, pairing to Nuki, and joining Zigbee based on **how long the physical Configuration Button is pressed**. 
+The device distinguishes between adding a new user, pairing to Nuki, and joining Zigbee based on **how long the physical Configuration Button is pressed**, and — for Short Press specifically — on the device's current setup state.
 
 The initial button press tells the device *what* action you want to perform and places the device into a "Pending Authorization" state for that specific action, indicated by a unique LED color. The subsequent Admin fingerprint scan simply answers "Are you allowed to do this?".
+
+Short Press is **state-dependent**, resolving its action at the moment the button is pressed rather than always meaning the same thing:
 
 | Action / Duration | State Condition | Authentication Required | Resulting Pending State (LED) | Action after Admin Auth |
 | --- | --- | --- | --- | --- |
 | **Short Press** | Unclaimed (0 users) | None | n/a | Starts Admin Enrollment (Phase 1) |
-| **Short Press** | Claimed (>0 users) | Admin Fingerprint | `PENDING_USER_ENROLL` (Pulse Blue) | Starts Standard User Enrollment |
+| **Short Press** | Claimed, Nuki not yet paired | Admin Fingerprint | `PENDING_NUKI_PAIR` (Pulse Yellow) | Enters BLE Nuki Pairing Mode (Phase 2) |
+| **Short Press** | Claimed, Nuki already paired | Admin Fingerprint | `PENDING_USER_ENROLL` (Pulse Blue) | Starts Standard User Enrollment |
 | **Triple Press** | Claimed | Admin Fingerprint | `PENDING_USER_ENROLL` (Pulse Blue) | Starts Admin User Enrollment (Permission 3) |
-| **Double Press** | Claimed | Admin Fingerprint | `PENDING_NUKI_PAIR` (Pulse Yellow) | Enters BLE Nuki Pairing Mode (Phase 2) |
 | **Hold 3 sec** | Claimed | Admin Fingerprint | `PENDING_ZB_JOIN` (Pulse Purple) | Enters Zigbee Network Steering (Phase 3) |
 | **Hold 8 sec** | Any | Admin Fingerprint | `PENDING_FACTORY_RESET` (Pulse Red) | Factory Reset (Wipes users, Nuki keys, Zigbee) |
+
+> [!NOTE]
+> Double Press is no longer mapped to any action. It previously triggered Nuki Pairing, but that gesture has been retired in favor of the state-dependent Short Press behavior above, which also closes a gap where Nuki Pairing (via Double Press) could previously be triggered on an unclaimed device with no Admin fingerprint check at all. The gesture remains free for future use.
 
 > [!NOTE] 
 > Because the Configuration Button requires Admin verification for nearly all actions, the device is highly secure against physical tampering after the initial setup.
 
 ## 4. Edge Cases and Considerations
 - **Lost Admin Fingerprint:** If the Admin fingerprint is unreadable, and no Zigbee coordinator is connected to remotely add another Admin, the user must perform a hard factory reset. For security, a true "Hard Reset" without the Admin fingerprint might require a special hardware procedure (e.g., holding the button while powering on the device).
-- **Timeouts:** If the user performs an action (e.g., Double Press) but does not provide an Admin fingerprint within 10 seconds, the LED flashes **Red** and the device returns to sleep.
+- **Timeouts:** If the user performs an action (e.g., Short Press to pair Nuki) but does not provide an Admin fingerprint within 10 seconds, the LED flashes **Red** and the device returns to sleep.
+- **Re-pairing after setup is complete:** Once Nuki is paired, Short Press reverts to standard user enrollment and no longer offers a button path to Nuki pairing. Re-pairing afterward (e.g., after replacing the Nuki lock) is reachable only via a full factory reset, or via an Admin-fingerprint-gated "Request Nuki Re-pair" trigger in the BLE Companion web app (see `user_manual.md`).
 
 ## 5. Adding Additional Users
 

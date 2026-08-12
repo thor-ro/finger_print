@@ -142,6 +142,9 @@ void sdf_admin_task(void *arg) {
                                 case SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH:
                                     led_pulse_white();
                                     break;
+                                case SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR:
+                                    led_pulse_cyan();
+                                    break;
                                 default:
                                     break;
                             }

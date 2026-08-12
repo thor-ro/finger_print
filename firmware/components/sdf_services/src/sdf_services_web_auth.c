@@ -45,3 +45,14 @@ bool sdf_services_web_auth_should_resolve_on_action_complete(
     sdf_services_admin_action_t action, esp_err_t result) {
   return action == SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH && result != ESP_OK;
 }
+
+/* Same "always resolve the pending BLE client" guarantee as above, for the
+ * BLE-triggered Nuki re-pair request added by the nuki-pairing-setup-flow
+ * change (see ble-companion-service spec, "Pending re-pair request always
+ * resolves"). Kept as its own explicit, tested guard - rather than folded
+ * into the WEB_REG_AUTH one above - so a future admin-action type addition
+ * can't silently break either guarantee. */
+bool sdf_services_nuki_repair_should_resolve_on_action_complete(
+    sdf_services_admin_action_t action, esp_err_t result) {
+  return action == SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR && result != ESP_OK;
+}

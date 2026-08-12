@@ -32,6 +32,15 @@
 #define SDF_BLE_COMPANION_AUTH_RESULT_PENDING 0x02
 #define SDF_BLE_COMPANION_AUTH_RESULT_OK 0x01
 
+/* Nuki re-pair request sentinel on the Config characteristic: a write whose
+ * JSON body is `{"action":"nuki_repair"}` requests the admin-fingerprint-
+ * gated re-pair flow instead of being treated as a config field update. No
+ * new characteristic is added (NimBLE CCCD budget is already fully
+ * committed by the 4 existing NOTIFY-capable characteristics), so this
+ * reuses Config's existing authenticated write path and JSON convention. */
+#define SDF_BLE_COMPANION_CONFIG_ACTION_KEY "action"
+#define SDF_BLE_COMPANION_CONFIG_ACTION_NUKI_REPAIR "nuki_repair"
+
 #define SDF_BLE_COMPANION_SVC_UUID128 \
     0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
     0x8a, 0x4f, 0x2b, 0x5c, 0x00, 0x00, 0x5a, 0x7d
@@ -301,6 +310,23 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+/* Returns true if `data` is a well-formed
+ * `{"action":"nuki_repair"}` request, false for any other Config write
+ * (including malformed JSON, which is left for the normal on_config_write
+ * passthrough to reject/ignore as it already does). */
+static bool sdf_ble_companion_is_nuki_repair_request(const uint8_t *data, size_t len) {
+    cJSON *root = cJSON_ParseWithLength((const char *)data, len);
+    if (!root) {
+        return false;
+    }
+    cJSON *action = cJSON_GetObjectItemCaseSensitive(root, SDF_BLE_COMPANION_CONFIG_ACTION_KEY);
+    bool is_repair_request = cJSON_IsString(action) && action->valuestring != NULL &&
+                              strcmp(action->valuestring,
+                                     SDF_BLE_COMPANION_CONFIG_ACTION_NUKI_REPAIR) == 0;
+    cJSON_Delete(root);
+    return is_repair_request;
+}
+
 static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_handle,
                                             struct ble_gatt_access_ctxt *ctxt, void *arg) {
     (void)attr_handle;
@@ -369,10 +395,29 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
             os_mbuf_copydata(om, 0, len, conn->config_value);
             conn->config_value_len = len;
             void (*on_config)(void *, const uint8_t *, size_t) = s_callbacks.on_config_write;
+            sdf_ble_companion_nuki_repair_request_cb on_nuki_repair =
+                s_callbacks.on_nuki_repair_request;
             void *cb_ctx = s_callbacks.ctx;
             uint8_t *tmp = s_gatt_scratch;
             memcpy(tmp, conn->config_value, len);
             xSemaphoreGive(s_lock);
+
+            if (sdf_ble_companion_is_nuki_repair_request(tmp, len)) {
+                /* Only reachable after setup is complete - initial pairing
+                 * during setup happens via the physical button flow, not
+                 * this trigger. Rejected synchronously (no pending state
+                 * entered), matching how an unauthenticated write is
+                 * already rejected synchronously above. */
+                if (sdf_services_get_setup_state() !=
+                    SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE) {
+                    return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+                }
+                if (on_nuki_repair) {
+                    on_nuki_repair(cb_ctx, conn_handle);
+                }
+                return 0;
+            }
+
             if (on_config) {
                 on_config(cb_ctx, tmp, len);
             }
@@ -956,6 +1001,18 @@ esp_err_t sdf_ble_companion_reply_auth(const char *username, bool authorized) {
     }
     /* set_authenticated acquires the lock internally */
     return sdf_ble_companion_set_authenticated(found_handle, authorized);
+}
+
+esp_err_t sdf_ble_companion_reply_nuki_repair(uint16_t conn_handle, bool authorized) {
+    char payload[32];
+    int n = snprintf(payload, sizeof(payload), "{\"nuki_repair\":%s}",
+                      authorized ? "true" : "false");
+    if (n <= 0 || (size_t)n >= sizeof(payload)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* notify_config acquires the lock internally and already handles a
+     * connection that's gone or no longer authenticated (ESP_ERR_INVALID_STATE). */
+    return sdf_ble_companion_notify_config(conn_handle, (const uint8_t *)payload, (size_t)n);
 }
 
 esp_err_t sdf_ble_companion_notify_config(uint16_t conn_handle, const uint8_t *data, size_t len) {

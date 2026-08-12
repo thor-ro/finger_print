@@ -25,7 +25,17 @@ typedef enum {
   SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION = 5,
   SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN = 6,
   SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH = 7,
+  SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR = 8,
 } sdf_services_admin_action_t;
+
+/* Device setup progress, derived from existing persisted state
+ * (enrolled_user_count, sdf_storage_nuki_load()) rather than a dedicated
+ * flag. See the "State-Dependent Single-Click Setup Action" requirement. */
+typedef enum {
+  SDF_SERVICES_SETUP_STATE_UNCLAIMED = 0,          /* no enrolled users yet */
+  SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE = 1, /* admin exists, Nuki not yet paired */
+  SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE = 2,   /* admin exists, Nuki credentials persisted */
+} sdf_services_setup_state_t;
 
 typedef void (*sdf_services_admin_action_cb)(
     void *ctx, sdf_services_admin_action_t action);
@@ -76,6 +86,11 @@ sdf_enrollment_sm_t sdf_services_get_enrollment_state(void);
 /* Admin Action API */
 esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action);
 
+/* Setup-state query, used by the button dispatch and the BLE-triggered Nuki
+ * re-pair request to decide whether the device is unclaimed, claimed with
+ * setup incomplete, or claimed with setup already complete. */
+sdf_services_setup_state_t sdf_services_get_setup_state(void);
+
 /* Web Companion Auth API */
 esp_err_t sdf_services_set_web_reg_auth(const char *username,
                                          const uint8_t *password_hash,
@@ -115,6 +130,13 @@ sdf_services_web_auth_registration_decision_t sdf_services_web_auth_decide_regis
  * type addition can't silently break the "always resolve the pending BLE
  * client" guarantee sdf_app_on_admin_action_complete's comment warns about. */
 bool sdf_services_web_auth_should_resolve_on_action_complete(
+    sdf_services_admin_action_t action, esp_err_t result);
+
+/* Same guarantee as sdf_services_web_auth_should_resolve_on_action_complete(),
+ * for the BLE-triggered Nuki re-pair request: true only for NUKI_REPAIR
+ * completing with a non-OK result (denial or timeout), so the pending BLE
+ * client is never left waiting indefinitely. See sdf_services_web_auth.c. */
+bool sdf_services_nuki_repair_should_resolve_on_action_complete(
     sdf_services_admin_action_t action, esp_err_t result);
 
 #endif /* SDF_SERVICES_H */

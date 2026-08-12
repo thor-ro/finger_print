@@ -966,6 +966,23 @@ esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action) 
 
     s_state.pending_admin_action = action;
     s_state.pending_admin_action_start_us = esp_timer_get_time();
+
+    /* LED indication based on action type. This call path (a direct
+     * sdf_services_request_admin_action() call, used by WEB_REG_AUTH and
+     * NUKI_REPAIR) never emits SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST, so it
+     * doesn't go through sdf_admin_task's own copy of this switch - mirrored
+     * here rather than shared, consistent with sdf_button_cb's own separate
+     * copy for the button-triggered path. */
+    switch (action) {
+      case SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH:
+        led_pulse_white();
+        break;
+      case SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR:
+        led_pulse_cyan();
+        break;
+      default:
+        break;
+    }
   }
 
   if (s_state.wake_sem != NULL) {
@@ -1039,6 +1056,28 @@ esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission) 
     xSemaphoreGive(s_state.wake_sem);
   }
   return ESP_OK;
+}
+
+sdf_services_setup_state_t sdf_services_get_setup_state(void) {
+  size_t enrolled_user_count = 0;
+
+  if (s_state.lock != NULL) {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired == pdTRUE) {
+      enrolled_user_count = s_state.enrolled_user_count;
+    }
+  }
+
+  if (enrolled_user_count == 0) {
+    return SDF_SERVICES_SETUP_STATE_UNCLAIMED;
+  }
+
+  uint32_t authorization_id = 0;
+  uint8_t shared_key[32] = {0};
+  if (sdf_storage_nuki_load(&authorization_id, shared_key) == ESP_OK) {
+    return SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE;
+  }
+  return SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE;
 }
 
 bool sdf_services_is_enrollment_active(void) {

@@ -257,9 +257,17 @@ function handleConfigNotification(event) {
     const value = new Uint8Array(event.target.value.buffer);
     const decoder = new TextDecoder();
     const jsonStr = decoder.decode(value);
-    
+
     try {
         const config = JSON.parse(jsonStr);
+
+        if (config.nuki_repair !== undefined) {
+            if (nukiRepairPending) {
+                nukiRepairPending.resolve(config.nuki_repair === true);
+            }
+            return;
+        }
+
         updateStatusCards(config);
     } catch (e) {
         console.warn('Config notification not valid JSON:', jsonStr);
@@ -272,6 +280,67 @@ function updateStatusCards(config) {
     }
     // Lock state would come from other notifications
 }
+
+// --- Nuki Re-pairing ---
+// Reuses the Config characteristic: a write of {"action":"nuki_repair"} asks
+// the device to enter the admin-fingerprint-gated re-pair flow (see
+// sdf_ble_companion_config_access() / ble-companion-service spec, "Nuki
+// re-pair authorized"/"denied" scenarios). The device only ever notifies
+// Config with {"nuki_repair": true|false} in response to this request (see
+// sdf_ble_companion_reply_nuki_repair) - handleConfigNotification() below
+// resolves nukiRepairPending from that notify instead of treating it as a
+// general config broadcast.
+const nukiRepairBtn = document.getElementById('btn-nuki-repair');
+const nukiRepairStatus = document.getElementById('nuki-repair-status');
+let nukiRepairPending = null; // { resolve } for the next {"nuki_repair":...} notify
+
+// The device's own pending-admin-action timeout is 10s
+// (SDF_ADMIN_ACTION_TIMEOUT_MS); wait a little longer client-side so the
+// device's own timeout-driven denial reply has time to arrive first.
+const NUKI_REPAIR_RESPONSE_TIMEOUT_MS = 12000;
+
+function waitForNukiRepairResult(timeoutMs) {
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            nukiRepairPending = null;
+            resolve(null); // no response in time - treated as ambiguous, not denied
+        }, timeoutMs);
+
+        nukiRepairPending = {
+            resolve(authorized) {
+                clearTimeout(timer);
+                nukiRepairPending = null;
+                resolve(authorized);
+            }
+        };
+    });
+}
+
+nukiRepairBtn.addEventListener('click', async () => {
+    try {
+        nukiRepairBtn.disabled = true;
+        nukiRepairStatus.textContent = 'Requesting Nuki re-pair... scan the Admin fingerprint on the device.';
+
+        const resultPromise = waitForNukiRepairResult(NUKI_REPAIR_RESPONSE_TIMEOUT_MS);
+        const payload = new TextEncoder().encode(JSON.stringify({ action: 'nuki_repair' }));
+        await configChar.writeValue(payload);
+
+        const authorized = await resultPromise;
+        if (authorized === true) {
+            nukiRepairStatus.textContent = 'Nuki pairing started on the device.';
+        } else if (authorized === false) {
+            nukiRepairStatus.textContent = 'Nuki re-pair request denied or timed out.';
+        } else {
+            nukiRepairStatus.textContent = 'No response received - check the device.';
+        }
+    } catch (err) {
+        console.error(err);
+        nukiRepairPending = null;
+        nukiRepairStatus.textContent = `Request rejected: ${err.message} (setup may not be complete yet, or the connection isn't authenticated).`;
+    } finally {
+        nukiRepairBtn.disabled = false;
+    }
+});
 
 // Enrollment
 document.getElementById('btn-enroll').addEventListener('click', async () => {

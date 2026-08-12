@@ -99,6 +99,13 @@
                 </div>
 
                 <div class="dashboard-section">
+                    <h3>Nuki Pairing</h3>
+                    <p>If the door lock needs to be re-paired with Nuki (e.g. after replacing the lock), request a re-pair below. An Admin must scan their fingerprint on the device to approve it — a BLE request alone is never enough.</p>
+                    <button id="btn-nuki-repair" class="secondary-btn">Request Nuki Re-pair</button>
+                    <p id="nuki-repair-status" class="status-msg"></p>
+                </div>
+
+                <div class="dashboard-section">
                     <h3>Firmware Update (OTA)</h3>
                     <div class="alert warning">
                         <strong>Warning:</strong> Ensure your battery is above 20%. OTA transfer over Bluetooth draws significant power and firmware is large — keep the app open and the device nearby until it completes.

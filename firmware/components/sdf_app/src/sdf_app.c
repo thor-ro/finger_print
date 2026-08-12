@@ -63,6 +63,15 @@ static uint8_t s_pending_lock_action;
 static uint8_t s_pending_lock_flags;
 static bool s_periodic_poll_pending;
 
+/* BLE-triggered Nuki re-pair request: tracks the originating connection so
+ * the eventual admin-fingerprint approval/denial/timeout result (which
+ * arrives asynchronously with no connection context of its own - see
+ * SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE's payload) can be routed back to
+ * the right BLE client. Only one such request can be pending at a time,
+ * mirroring pending_admin_action's own single-pending-action invariant. */
+static bool s_nuki_repair_pending;
+static uint16_t s_nuki_repair_conn_handle;
+
 static sdf_lock_flow_t s_lock_flow;
 
 void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
@@ -81,6 +90,7 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
                                             const sdf_event_router_event_t *event);
 static void sdf_app_on_admin_action_complete(void *ctx,
                                               const sdf_event_router_event_t *event);
+static void sdf_app_on_nuki_repair_request(void *ctx, uint16_t conn_handle);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
@@ -391,6 +401,29 @@ static int sdf_app_power_battery_percent(void *ctx) {
   return sdf_drivers_battery_get_percent();
 }
 
+/* Shared by the button-triggered NUKI_PAIR admin action and the
+ * BLE-triggered NUKI_REPAIR admin action - both authorize the exact same
+ * underlying pairing start, only how the request originated (and how its
+ * result is reported back) differs. Returns false without changing any
+ * pairing state if pairing is already active/requested. */
+static bool sdf_app_execute_nuki_pairing_start(void) {
+  if (s_pairing_active || s_pairing_requested) {
+    ESP_LOGW(TAG, "Cannot start Nuki pairing: pairing already active");
+    led_flash_red();
+    return false;
+  }
+
+  s_pairing_requested = true;
+  led_rapid_yellow();
+  sdf_nuki_ble_set_enabled(&s_ble, true);
+  sdf_nuki_ble_start(&s_ble);
+  if (!sdf_nuki_ble_is_ready(&s_ble)) {
+    ESP_LOGI(TAG, "Nuki pairing requested; waiting for BLE transport ready");
+  }
+  sdf_app_start_requested_nuki_pairing();
+  return true;
+}
+
 static void sdf_app_on_admin_action(void *ctx,
                                     sdf_services_admin_action_t action) {
   (void)ctx;
@@ -398,22 +431,28 @@ static void sdf_app_on_admin_action(void *ctx,
   case SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR:
     ESP_LOGI(TAG, "Admin authorized Nuki Pairing");
     sdf_power_mark_activity();
-    if (s_pairing_active || s_pairing_requested) {
-      ESP_LOGW(TAG, "Cannot start Nuki pairing: pairing already active");
-      led_flash_red();
-      break;
-    }
-
-    s_pairing_requested = true;
-    led_rapid_yellow();
-    sdf_nuki_ble_set_enabled(&s_ble, true);
-    sdf_nuki_ble_start(&s_ble);
-    if (!sdf_nuki_ble_is_ready(&s_ble)) {
-      ESP_LOGI(TAG,
-               "Nuki pairing requested; waiting for BLE transport ready");
-    }
-    sdf_app_start_requested_nuki_pairing();
+    sdf_app_execute_nuki_pairing_start();
     break;
+
+  case SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR: {
+    ESP_LOGI(TAG, "Admin authorized Nuki re-pair (BLE-triggered)");
+    sdf_power_mark_activity();
+
+    uint16_t conn_handle = s_nuki_repair_conn_handle;
+    bool was_pending = s_nuki_repair_pending;
+    s_nuki_repair_pending = false;
+
+    bool started = sdf_app_execute_nuki_pairing_start();
+    if (was_pending) {
+      /* Reply is the "pairing has started" notification per the
+       * ble-companion-service delta spec's "Nuki re-pair authorized"
+       * scenario; `started == false` here means pairing was already active
+       * for another reason, so the client is told denied rather than left
+       * to assume success. */
+      sdf_ble_companion_reply_nuki_repair(conn_handle, started);
+    }
+    break;
+  }
 
   case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
     ESP_LOGI(TAG, "Admin authorized Zigbee Join");
@@ -478,6 +517,34 @@ static void sdf_ble_companion_on_auth_request(void *ctx,
     memcpy(evt.payload.web_reg_auth_request.password_hash, password_hash,
            SDF_STORAGE_WEB_USER_HASH_LEN);
     sdf_event_router_emit(&evt);
+}
+
+/* Fired by sdf_ble_companion when an authenticated GATT client writes a
+ * `{"action":"nuki_repair"}` Config request (already rejected by
+ * sdf_ble_companion itself, before this is ever called, if the connection
+ * isn't authenticated or setup isn't complete). Routes into the same
+ * admin-fingerprint pending-action flow WEB_REG_AUTH uses; the result is
+ * resolved either in sdf_app_on_admin_action()'s NUKI_REPAIR case (approval)
+ * or sdf_app_on_admin_action_complete() (denial/timeout) via
+ * s_nuki_repair_conn_handle. */
+static void sdf_app_on_nuki_repair_request(void *ctx, uint16_t conn_handle) {
+    (void)ctx;
+    ESP_LOGI(TAG, "BLE Companion: Nuki re-pair request, conn_handle=%u",
+             (unsigned)conn_handle);
+
+    s_nuki_repair_conn_handle = conn_handle;
+    s_nuki_repair_pending = true;
+
+    esp_err_t err = sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR);
+    if (err != ESP_OK) {
+        /* Another admin action is already pending (button press, WEB_REG_AUTH,
+         * ...) - this request never entered the pending state, so it must be
+         * resolved here rather than left for sdf_app_on_admin_action_complete(),
+         * which only fires for actions that *did* become pending. */
+        ESP_LOGW(TAG, "Nuki re-pair request rejected: %s", esp_err_to_name(err));
+        s_nuki_repair_pending = false;
+        sdf_ble_companion_reply_nuki_repair(conn_handle, false);
+    }
 }
 
 /* Applies one numeric field from a BLE config write through a validated
@@ -849,25 +916,34 @@ static void sdf_app_on_admin_action_complete(void *ctx,
     return;
   }
 
-  if (!sdf_services_web_auth_should_resolve_on_action_complete(
-          event->payload.admin_action_complete.action,
-          event->payload.admin_action_complete.result)) {
-    return;
+  sdf_services_admin_action_t action = event->payload.admin_action_complete.action;
+  esp_err_t result = event->payload.admin_action_complete.result;
+
+  if (sdf_services_web_auth_should_resolve_on_action_complete(action, result)) {
+    char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+    uint8_t permission = 0;
+    esp_err_t err = sdf_services_get_web_reg_auth(username, sizeof(username), &permission);
+    if (err == ESP_OK) {
+      ESP_LOGW(TAG, "Web registration auth for user '%s' not granted: %s",
+               username, esp_err_to_name(result));
+      sdf_ble_companion_reply_auth(username, false);
+      sdf_services_clear_web_reg_auth();
+    }
+    /* else: already cleared/consumed by another path - nothing to deny. */
   }
 
-  char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-  uint8_t permission = 0;
-  esp_err_t err = sdf_services_get_web_reg_auth(username, sizeof(username), &permission);
-  if (err != ESP_OK) {
-    /* Already cleared/consumed by another path - nothing to deny. */
-    return;
+  /* Same "always resolve" guarantee for the BLE-triggered Nuki re-pair
+   * request as above for WEB_REG_AUTH: sdf_admin_task only ever emits
+   * ADMIN_ACTION_COMPLETE with a non-OK result on timeout/denial, never a
+   * NUKI_REPAIR-specific success/failure event, so this is the only place
+   * that resolves the pending BLE client in those cases. */
+  if (s_nuki_repair_pending &&
+      sdf_services_nuki_repair_should_resolve_on_action_complete(action, result)) {
+    ESP_LOGW(TAG, "Nuki re-pair request not granted: %s", esp_err_to_name(result));
+    uint16_t conn_handle = s_nuki_repair_conn_handle;
+    s_nuki_repair_pending = false;
+    sdf_ble_companion_reply_nuki_repair(conn_handle, false);
   }
-
-  ESP_LOGW(TAG, "Web registration auth for user '%s' not granted: %s",
-           username, esp_err_to_name(event->payload.admin_action_complete.result));
-
-  sdf_ble_companion_reply_auth(username, false);
-  sdf_services_clear_web_reg_auth();
 }
 
 static int sdf_app_start_unlock_unlatch_sequence(void) {
@@ -1690,6 +1766,7 @@ sub_done:
       .on_config_write = sdf_ble_companion_on_config_write,
       .on_enroll_write = sdf_ble_companion_on_enroll_write,
       .on_ota_write = sdf_ble_companion_handle_ota_write,
+      .on_nuki_repair_request = sdf_app_on_nuki_repair_request,
   };
   err = sdf_ble_companion_init(&ble_companion_cbs);
   if (err != ESP_OK) {

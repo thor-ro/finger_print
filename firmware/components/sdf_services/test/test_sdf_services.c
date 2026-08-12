@@ -229,3 +229,44 @@ void test_web_auth_should_not_resolve_for_other_actions(void) {
   TEST_ASSERT_FALSE(sdf_services_web_auth_should_resolve_on_action_complete(
       SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_FAIL));
 }
+
+/* Nuki re-pair: pending-request resolve guard */
+
+void test_nuki_repair_should_resolve_on_denial_or_timeout(void) {
+  TEST_ASSERT_TRUE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR, ESP_FAIL));
+  TEST_ASSERT_TRUE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR, ESP_ERR_TIMEOUT));
+}
+
+void test_nuki_repair_should_not_resolve_on_success(void) {
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR, ESP_OK));
+}
+
+void test_nuki_repair_should_not_resolve_for_other_actions(void) {
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NONE, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ZB_JOIN, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN, ESP_FAIL));
+  TEST_ASSERT_FALSE(sdf_services_nuki_repair_should_resolve_on_action_complete(
+      SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH, ESP_FAIL));
+}
+
+/* Setup-state helper */
+
+void test_setup_state_unclaimed_when_no_enrolled_users(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_UNCLAIMED, sdf_services_get_setup_state());
+}

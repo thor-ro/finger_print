@@ -112,8 +112,20 @@ static void IRAM_ATTR sdf_button_isr(void *arg) {
     }
 }
 
-static void sdf_button_cb(void *arg, void *usr_data) {
-    sdf_services_admin_action_t action = (sdf_services_admin_action_t)(uintptr_t)usr_data;
+/**
+ * @brief Shared dispatch body for a resolved admin action, regardless of
+ * whether the action was fixed at registration time (triple-click, holds)
+ * or resolved dynamically at press time (single-click).
+ *
+ * The pending-admin-action gate below is unchanged from before this action
+ * became state-dependent: NUKI_PAIR is only ever passed in here from the
+ * single-click path when `sdf_services_get_setup_state()` returned
+ * CLAIMED_INCOMPLETE, which by definition requires enrolled_user_count > 0
+ * - so the "0 users, execute immediately" branch below can never be taken
+ * for NUKI_PAIR, and it always goes through the admin-fingerprint pending
+ * gate like every other non-enroll action.
+ */
+static void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
     ESP_LOGI(TAG, "Button callback: action=%d", (int)action);
 
     sdf_services_state_t *s = sdf_services_state();
@@ -169,6 +181,34 @@ static void sdf_button_cb(void *arg, void *usr_data) {
 
     xSemaphoreGive(s->lock);
 }
+
+static void sdf_button_cb(void *arg, void *usr_data) {
+    sdf_services_admin_action_t action = (sdf_services_admin_action_t)(uintptr_t)usr_data;
+    sdf_button_dispatch_action(action);
+}
+
+/**
+ * @brief Resolve single-click's action dynamically at press time based on
+ * the device's current setup state, per the "State-Dependent Single-Click
+ * Setup Action" requirement:
+ *   - Unclaimed (no enrolled users)              -> ENROLL
+ *   - Claimed, Nuki not yet paired                -> NUKI_PAIR
+ *   - Claimed, Nuki already paired (setup complete) -> ENROLL
+ */
+static sdf_services_admin_action_t sdf_button_resolve_single_click_action(void) {
+    sdf_services_setup_state_t setup_state = sdf_services_get_setup_state();
+
+    if (setup_state == SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE) {
+        return SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR;
+    }
+    return SDF_SERVICES_ADMIN_ACTION_ENROLL;
+}
+
+static void sdf_button_single_click_cb(void *arg, void *usr_data) {
+    (void)arg;
+    (void)usr_data;
+    sdf_button_dispatch_action(sdf_button_resolve_single_click_action());
+}
 #endif
 
 void sdf_button_task(void *arg) {
@@ -194,14 +234,17 @@ void sdf_button_task(void *arg) {
 
         if (iot_button_new_gpio_device(&btn_config, &gpio_config, &s_button_state.btn_handle) == ESP_OK) {
             iot_button_register_cb(s_button_state.btn_handle, BUTTON_SINGLE_CLICK, NULL,
-                                   sdf_button_cb, (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL);
+                                   sdf_button_single_click_cb, NULL);
 
             button_event_args_t arg_3click = {.multiple_clicks = {.clicks = 3}};
             iot_button_register_cb(s_button_state.btn_handle, BUTTON_MULTIPLE_CLICK, &arg_3click,
                                    sdf_button_cb, (void *)SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN);
 
-            iot_button_register_cb(s_button_state.btn_handle, BUTTON_DOUBLE_CLICK, NULL,
-                                   sdf_button_cb, (void *)SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
+            /* BUTTON_DOUBLE_CLICK is intentionally left unmapped. Double-Press
+             * is retired as the Nuki-pairing trigger (see the
+             * nuki-pairing-setup-flow change): single-click's action is now
+             * state-dependent and reaches NUKI_PAIR itself once an admin
+             * exists. The gesture remains free for future use. */
 
             button_event_args_t arg_3s = {.long_press = {.press_time = 3000}};
             iot_button_register_cb(s_button_state.btn_handle, BUTTON_LONG_PRESS_START, &arg_3s,

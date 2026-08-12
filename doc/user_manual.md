@@ -26,7 +26,7 @@ When the lock is powered on for the first time (or after a factory reset), it en
 Once claimed, you can pair the SDF to your Nuki Smart Lock.
 
 1. **Prepare Nuki:** Press and hold the button on your Nuki Smart Lock for 5 seconds until its LED circle glows constantly (Pairing Mode).
-2. **Initiate Nuki Pairing on SDF:** Press the SDF Configuration Button **twice rapidly (Double Press)**. The LED begins to pulse **yellow** (Awaiting Admin Auth).
+2. **Initiate Nuki Pairing on SDF:** Press the SDF Configuration Button **once (Short Press)**. Since the device is claimed but Nuki isn't paired yet, Short Press means "pair Nuki" at this stage (see [Configuration Button Mapping](#configuration-button-mapping) below). The LED begins to pulse **yellow** (Awaiting Admin Auth).
 3. **Authorize:** The Admin (User ID 1) touches the fingerprint sensor within 10 seconds to authorize the action.
 4. **Active Pairing:** Once authorized, the LED flashes **rapid yellow**. The SDF connects to the Nuki over BLE, negotiates the shared key, and saves the credentials to NVS.
 5. **Completion:** The LED glows solid **green** to confirm successful pairing. The user can now unlock the door with their fingerprint.
@@ -43,19 +43,29 @@ If you want remote user management, battery monitoring, and logging through Home
 
 ## Configuration Button Mapping
 
-The device distinguishes between actions based on **how long the Configuration Button is pressed** and the **current device state** (Unclaimed vs. Claimed).
+The device distinguishes between actions based on **how long the Configuration Button is pressed** and the **current device state** (Unclaimed vs. Claimed). Short Press is **state-dependent**: its meaning is resolved at the moment of the press rather than fixed.
 
 | Action / Duration | State Condition | Authentication Required | LED Color | Result |
 | --- | --- | --- | --- | --- |
 | **Short Press** | Unclaimed (0 users) | None | n/a | Starts Admin Enrollment (User 1, Permission 3) |
-| **Short Press** | Claimed (>0 users) | Admin Fingerprint | Blue pulse | Starts Standard User Enrollment (Permission 1) |
+| **Short Press** | Claimed, Nuki not yet paired | Admin Fingerprint | Yellow pulse | Enters BLE Nuki Pairing Mode |
+| **Short Press** | Claimed, Nuki already paired | Admin Fingerprint | Blue pulse | Starts Standard User Enrollment (Permission 1) |
 | **Triple Press** | Claimed | Admin Fingerprint | Blue pulse | Starts Admin User Enrollment (Permission 3) |
-| **Double Press** | Claimed | Admin Fingerprint | Yellow pulse | Enters BLE Nuki Pairing Mode |
 | **Hold 3 sec** | Claimed | Admin Fingerprint | Purple pulse | Enters Zigbee Network Steering |
 | **Hold 8 sec** | Any | Admin Fingerprint | Red pulse | Factory Reset |
 
 > [!NOTE]
+> Double Press is no longer mapped to any action — it previously triggered Nuki Pairing, but that gesture has been retired in favor of the state-dependent Short Press behavior above. The gesture is free for future use.
+
+> [!NOTE]
 > All actions except the initial Admin Enrollment require Admin fingerprint verification within 10 seconds. If no fingerprint is provided, the LED flashes **red** and the device returns to idle.
+
+### Re-pairing Nuki After Setup Is Complete
+
+Once Nuki has been paired, Short Press no longer offers a path to Nuki pairing (it reverts to standard user enrollment, as above). If the lock ever needs to be re-paired — for example after replacing the Nuki Smart Lock — there are two ways to trigger it:
+
+1. **Factory Reset:** A full factory reset clears the Nuki credentials and returns the device to the Unclaimed state, re-opening the Short-Press-pairs-Nuki step of the first-time setup sequence on the next admin enrollment.
+2. **BLE Companion App:** Log in to the [web-companion app](../web-companion/README.md), and use the **Request Nuki Re-pair** button on the dashboard. This sends a re-pairing request over Bluetooth, which the device only accepts if you're already logged in and setup is complete. As with the original pairing, a BLE request alone is never enough — an Admin must scan their fingerprint on the physical device within 10 seconds to authorize it. The app shows a pending status while waiting, and reports back whether the request was authorized, denied, or timed out.
 
 ## Managing Fingerprints via Zigbee
 
