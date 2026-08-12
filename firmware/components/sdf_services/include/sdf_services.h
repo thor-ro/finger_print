@@ -116,10 +116,21 @@ void sdf_services_clear_web_reg_auth(void);
 #define SDF_SERVICES_WEB_AUTH_NONCE_LEN 16
 #define SDF_SERVICES_WEB_AUTH_RESPONSE_LEN 32 /* HMAC-SHA256 output */
 
-/* Placeholder iteration count pending an on-device PBKDF2 benchmark (see
- * design.md Open Questions / tasks.md 6.1); targets the OWASP
- * PBKDF2-HMAC-SHA256 baseline (~210k) until that benchmark says otherwise. */
-#define SDF_SERVICES_WEB_AUTH_PBKDF2_ITERATIONS 210000u
+/* Iteration count for the one-time, device-side REGISTER credential stretch
+ * (see design.md Open Questions / tasks.md 6.1). The OWASP baseline of
+ * ~210k iterations was benchmarked on a real ESP32-C6 (single, unaccelerated
+ * RISC-V core) at ~17.75s per call - this fully blocks the CPU (no internal
+ * yield points in mbedtls_pkcs5_pbkdf2_hmac_ext) for the whole duration,
+ * which both makes REGISTER feel hung and starves the CPU0 idle task well
+ * past the default 5s task-watchdog timeout, tripping a watchdog panic
+ * before the call can finish. 10,000 iterations (the NIST SP 800-132
+ * minimum) measures at ~845ms on the same hardware - a comfortable margin
+ * under the watchdog timeout and a reasonable one-time REGISTER-side wait,
+ * at the cost of weaker stretching than the OWASP baseline. Acceptable here
+ * because REGISTER is already gated by physical BLE proximity plus an admin
+ * fingerprint enrollment, and online LOGIN guesses are separately
+ * rate-limited by the bond lockout counter. */
+#define SDF_SERVICES_WEB_AUTH_PBKDF2_ITERATIONS 10000u
 
 /* PBKDF2-HMAC-SHA256 credential stretch. Used once, device-side, at
  * REGISTER to turn the received SHA256(password) into the value persisted
