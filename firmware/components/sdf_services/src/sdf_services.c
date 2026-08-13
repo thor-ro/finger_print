@@ -373,20 +373,16 @@ void sdf_services_execute_admin_action(
 
   if (action == SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH) {
     ESP_LOGI(TAG, "Admin authorized Web Registration");
+    /* username/permission are no longer carried on this event - the sole
+     * consumer (sdf_app_on_web_reg_auth_result) reads them back from this
+     * same owned pending-request state via sdf_services_get_web_reg_auth(),
+     * so no lock is needed here to build the payload. */
     sdf_event_router_event_t evt = {
         .type = SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
         .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
         .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        .payload.web_reg_auth_result.authorized = true,
     };
-    sdf_services_state_t *s = sdf_services_state();
-    if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-        strncpy(evt.payload.web_reg_auth_result.username, s->request_web_username,
-                SDF_STORAGE_WEB_USER_NAME_MAX - 1);
-        evt.payload.web_reg_auth_result.username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
-        evt.payload.web_reg_auth_result.authorized = true;
-        evt.payload.web_reg_auth_result.permission = s->request_web_permission;
-        xSemaphoreGive(s->lock);
-    }
     sdf_event_router_emit(&evt);
     return;
   }

@@ -5,7 +5,6 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "sdf_common.h"
-#include "sdf_storage.h"
 
 typedef enum {
     SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
@@ -33,7 +32,6 @@ typedef enum {
     SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
 
     /* Web Companion */
-    SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST,
     SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
 
     /* Button */
@@ -124,14 +122,7 @@ typedef struct {
 } sdf_event_router_admin_action_complete_payload_t;
 
 typedef struct {
-    char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-    uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
-} sdf_event_router_web_reg_auth_request_payload_t;
-
-typedef struct {
-    char username[SDF_STORAGE_WEB_USER_NAME_MAX];
     bool authorized;
-    uint8_t permission;
 } sdf_event_router_web_reg_auth_result_payload_t;
 
 typedef struct {
@@ -146,6 +137,13 @@ typedef struct {
     uint16_t detail;
 } sdf_event_router_audit_payload_t;
 
+/* The union's largest member is sdf_event_router_audit_payload_t (16 bytes),
+ * so sizeof(sdf_event_router_event_t) is ~28 bytes (verified via a scratch
+ * host-compiler sizeof() check) - down from ~76 bytes when
+ * web_reg_auth_request_payload_t (a 64-byte username+password_hash pair) was
+ * still a union member. This size is paid by every event of every type, in
+ * the router's central queue and in each per-task queue that stores the
+ * struct by value, so keep new payload members small. */
 typedef struct {
     sdf_event_router_type_t type;
     sdf_event_router_priority_t priority;
@@ -164,7 +162,6 @@ typedef struct {
         sdf_event_router_enrollment_failed_payload_t enrollment_failed;
         sdf_event_router_admin_auth_payload_t admin_auth;
         sdf_event_router_admin_action_complete_payload_t admin_action_complete;
-        sdf_event_router_web_reg_auth_request_payload_t web_reg_auth_request;
         sdf_event_router_web_reg_auth_result_payload_t web_reg_auth_result;
         sdf_event_router_button_payload_t button;
         sdf_event_router_audit_payload_t audit;

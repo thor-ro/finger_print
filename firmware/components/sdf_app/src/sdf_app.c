@@ -90,8 +90,6 @@ static int sdf_app_queue_lock_action(uint8_t lock_action, uint8_t flags);
 static int sdf_app_dispatch_pending_lock_action(void);
 static int sdf_app_start_unlock_unlatch_sequence(void);
 
-static void sdf_app_on_web_reg_auth_request(void *ctx,
-                                             const sdf_event_router_event_t *event);
 static void sdf_app_on_web_reg_auth_result(void *ctx,
                                             const sdf_event_router_event_t *event);
 static void sdf_app_on_admin_action_complete(void *ctx,
@@ -558,6 +556,13 @@ static void sdf_app_on_admin_action(void *ctx,
   }
 }
 
+/* Called directly from the NimBLE host task, mirroring
+ * sdf_app_on_ble_admin_action_request()'s direct-call pattern for
+ * NUKI_REPAIR/ENROLL_ADMIN/ZB_JOIN below - no event router hop, so the raw
+ * password hash never enters a FreeRTOS queue. Failure of either call is
+ * logged and dropped, matching the current silent-drop behavior of a failed
+ * sdf_event_router_emit() (e.g. a full queue): no new error is surfaced to
+ * the BLE client. */
 static void sdf_ble_companion_on_auth_request(void *ctx,
                                                const char *username,
                                                const uint8_t *password_hash,
@@ -565,16 +570,18 @@ static void sdf_ble_companion_on_auth_request(void *ctx,
     (void)ctx;
     ESP_LOGI(TAG, "BLE Companion: Auth request for user '%s'", username);
 
-    sdf_event_router_event_t evt = {
-        .type = SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST,
-        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
-        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-    };
-    strncpy(evt.payload.web_reg_auth_request.username, username,
-            SDF_STORAGE_WEB_USER_NAME_MAX - 1);
-    memcpy(evt.payload.web_reg_auth_request.password_hash, password_hash,
-           SDF_STORAGE_WEB_USER_HASH_LEN);
-    sdf_event_router_emit(&evt);
+    esp_err_t err = sdf_services_set_web_reg_auth(username, password_hash, hash_len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Web reg auth request dropped (set_web_reg_auth): %s",
+                 esp_err_to_name(err));
+        return;
+    }
+
+    err = sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Web reg auth request dropped (request_admin_action): %s",
+                 esp_err_to_name(err));
+    }
 }
 
 /* Fired by sdf_ble_companion when an authenticated GATT client writes a
@@ -877,10 +884,6 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
     }
     break;
   }
-  case SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST: {
-    sdf_app_on_web_reg_auth_request(ctx, event);
-    break;
-  }
   case SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT: {
     sdf_app_on_web_reg_auth_result(ctx, event);
     break;
@@ -890,23 +893,6 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
   }
 }
 
-static void sdf_app_on_web_reg_auth_request(void *ctx,
-                                             const sdf_event_router_event_t *event) {
-  (void)ctx;
-  if (!event) {
-    return;
-  }
-
-  ESP_LOGI(TAG, "Web registration auth request for user: %s",
-           event->payload.web_reg_auth_request.username);
-
-  sdf_services_set_web_reg_auth(event->payload.web_reg_auth_request.username,
-                                 event->payload.web_reg_auth_request.password_hash,
-                                 SDF_STORAGE_WEB_USER_HASH_LEN);
-
-  sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH);
-}
-
 static void sdf_app_on_web_reg_auth_result(void *ctx,
                                              const sdf_event_router_event_t *event) {
   (void)ctx;
@@ -914,12 +900,21 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
     return;
   }
 
-  ESP_LOGI(TAG, "Web registration auth result: %s for user: %s",
-           event->payload.web_reg_auth_result.authorized ? "AUTHORIZED" : "DENIED",
-           event->payload.web_reg_auth_result.username);
+  char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+  uint8_t permission = 0;
+  esp_err_t auth_err = sdf_services_get_web_reg_auth(username, sizeof(username), &permission);
+  if (auth_err != ESP_OK) {
+    /* No pending request to read from (e.g. already cleared) - nothing to
+     * reply to or persist. */
+    ESP_LOGE(TAG, "Web reg auth result with no pending request: %s",
+             esp_err_to_name(auth_err));
+    return;
+  }
 
-  const char *username = event->payload.web_reg_auth_result.username;
   bool admin_authorized = event->payload.web_reg_auth_result.authorized;
+
+  ESP_LOGI(TAG, "Web registration auth result: %s for user: %s",
+           admin_authorized ? "AUTHORIZED" : "DENIED", username);
 
   /* Default: no user decided yet, reply mirrors the admin decision. Only
    * overwritten below once a password hash was successfully fetched, so a
@@ -944,7 +939,7 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
       esp_fill_random(salt, sizeof(salt));
       decision = sdf_services_web_auth_decide_registration(
           username, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN, salt,
-          event->payload.web_reg_auth_result.permission, true);
+          permission, true);
     }
   }
 
@@ -1763,15 +1758,6 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
                                         sdf_app_on_event, NULL, &subs[subs_count]);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to audit: %s", esp_err_to_name(err));
-    goto sub_cleanup;
-  }
-  subs_count++;
-
-  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_WEB_REG_AUTH_REQUEST,
-                                        SDF_EVENT_ROUTER_PRIO_HIGH,
-                                        sdf_app_on_web_reg_auth_request, NULL, &subs[subs_count]);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "Failed to subscribe to web reg auth request: %s", esp_err_to_name(err));
     goto sub_cleanup;
   }
   subs_count++;

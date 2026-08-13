@@ -1,0 +1,9 @@
+`sdf_services_init()` in `firmware/components/sdf_services/src/sdf_services.c` always returns `ESP_ERR_INVALID_STATE` (0x103 / 259) on its true first-ever call in a process, even though it succeeds functionally (state fields, including any NVS-loaded cache, are set correctly).
+
+Root cause (confirmed pre-existing on `main`, not introduced by any recent change — verified via `git diff main`): inside `sdf_services_init()`, `sdf_services_start_tasks()` is called (~line 748) BEFORE `s_state.initialized` is set to `true` (only set at the very end of `sdf_services_init()`, ~line 771). But `sdf_services_start_tasks()`'s first line is a guard: `if (!sdf_services_is_ready()) return ESP_ERR_INVALID_STATE;`, and `sdf_services_is_ready()` reads `s_state.initialized`. So on the first call, this guard always trips, and `sdf_services_init()` propagates that error as its own return value.
+
+This went undetected because the only pre-existing test caller, `ensure_services_initialized()` in `test_sdf_services.c`, discards the return value.
+
+Consequence for future host tests: do NOT `TEST_ASSERT_EQUAL(ESP_OK, sdf_services_init(&cfg))` on a fresh/first init in a test — it will fail. Call it without asserting the return value (matching `ensure_services_initialized()`'s existing pattern), and assert on the actual state side effects instead if needed.
+
+This bug is out of scope for any single feature change to fix opportunistically — it's a distinct latent defect in the init/start_tasks ordering. Not independently verified against real hardware boot behavior, but the code path is identical for hardware and host targets, so it likely also affects production first-boot return-value checks (if any exist) — worth a dedicated fix/proposal at some point.
