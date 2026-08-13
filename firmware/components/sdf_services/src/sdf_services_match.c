@@ -101,7 +101,7 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         return;
     }
 
-    if (s->enrolled_user_count == 0) {
+    if (sdf_services_enrolled_user_count(s->enrolled_user_bmp) == 0) {
         xSemaphoreGive(s->lock);
         return;
     }
@@ -261,22 +261,23 @@ void sdf_match_task(void *arg) {
     }
 
     /* Fast connectivity check. fp_probe() is a blocking UART round-trip; see
-     * the comment above fp_match_1n() - no per-call-site reset needed. */
+     * the comment above fp_match_1n() - no per-call-site reset needed. Kept
+     * as a boot-time sensor health/connectivity indicator even though it's
+     * no longer paired with a user query below - the enrolled-user cache is
+     * already authoritative at this point (loaded synchronously from NVS in
+     * sdf_services_init(), before this task was even created), so a probe
+     * failure here doesn't change device-state reporting, only the log. */
     esp_err_t probe_err = fp_probe();
-
-    /* Check unclaimed state on boot */
-    uint16_t users[SDF_FINGERPRINT_USER_ID_MAX];
-    uint8_t perms[SDF_FINGERPRINT_USER_ID_MAX];
-    size_t count = 0;
-    esp_err_t query_err = ESP_FAIL;
-    if (probe_err == ESP_OK) {
-        query_err = sdf_services_query_users(users, perms, &count, SDF_FINGERPRINT_USER_ID_MAX);
-    } else {
-        ESP_LOGW(TAG, "Skipping user query - sensor probe failed");
+    if (probe_err != ESP_OK) {
+        ESP_LOGW(TAG, "Sensor probe failed on boot: %s", esp_err_to_name(probe_err));
     }
 
+    /* No boot-time sensor query needed: the enrolled-user cache was already
+     * loaded synchronously from NVS in sdf_services_init(), before any task
+     * (including this one) was started - see cache-enrolled-user-state. */
+    size_t count = 0;
     if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
-        s->enrolled_user_count = count;
+        count = sdf_services_enrolled_user_count(s->enrolled_user_bmp);
         xSemaphoreGive(s->lock);
     }
 
@@ -284,7 +285,7 @@ void sdf_match_task(void *arg) {
     esp_task_wdt_reset();
 #endif
 
-    if (query_err == ESP_OK && count > 0) {
+    if (count > 0) {
         led_off();
         ESP_LOGI(TAG, "===============================================");
         ESP_LOGI(TAG, "DEVICE STATE: CLAIMED (%zu enrolled users)", count);
@@ -298,11 +299,6 @@ void sdf_match_task(void *arg) {
         ESP_LOGI(TAG, "(All actions require your Admin fingerprint validation!)");
         ESP_LOGI(TAG, "===============================================");
     } else {
-        if (query_err != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to query fingerprint sensor on boot. Error code: %d", query_err);
-            ESP_LOGW(TAG, "(Assuming UNCLAIMED state for setup purposes)");
-        }
-
         ESP_LOGI(TAG, "===============================================");
         ESP_LOGI(TAG, "DEVICE STATE: UNCLAIMED (0 enrolled users)");
         ESP_LOGI(TAG, "===============================================");

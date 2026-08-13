@@ -80,11 +80,13 @@ static const char *TAG = "sdf_services";
  * Optimization #16: ~50%+ RAM savings with bitmap + packed perms.
  *
  * Bitmap: bit N = 1 means user ID (N+1) is enrolled
- * Packed perms: 2 bits per user (0=none, 1=std, 2=elev, 3=admin) */
-static uint16_t s_enrollment_user_bmp = 0;
-static uint8_t s_enrollment_perm_packed[SDF_SERVICES_PERM_PACKED_SIZE] = {0};
-static uint16_t s_perm_user_bmp = 0;
-static uint8_t s_perm_perm_packed[SDF_SERVICES_PERM_PACKED_SIZE] = {0};
+ * Packed perms: 2 bits per user (0=none, 1=std, 2=elev, 3=admin)
+ *
+ * The persisted, authoritative copy of this representation lives in
+ * s_state.enrolled_user_bmp/enrolled_perm_packed (see
+ * sdf_services_internal.h) rather than as throwaway module statics here -
+ * sdf_services_query_users() now serves callers directly from that cache
+ * instead of a live sensor query (see cache-enrolled-user-state). */
 
 /* Convert sensor query results (user_ids[], permissions[]) to packed format */
 void sdf_services_pack_user_list(const uint16_t *user_ids,
@@ -236,22 +238,22 @@ sdf_services_start_local_enrollment_with_permission(
   /* Use local temp arrays for query, then pack into compact format */
   uint16_t user_ids[SDF_SERVICES_MAX_USERS];
   uint8_t perms[SDF_SERVICES_MAX_USERS];
+  uint16_t enrollment_user_bmp = 0;
+  uint8_t enrollment_perm_packed[SDF_SERVICES_PERM_PACKED_SIZE] = {0};
 
+  /* sdf_services_query_users() is now cache-backed (see
+   * cache-enrolled-user-state) - this is an in-RAM read under a mutex, not a
+   * sensor UART round trip. */
   err = sdf_services_query_users(user_ids, perms, &count, max_users);
-  // query_users involves a sensor UART exchange that can be slow, but the
-  // fingerprint owner task now resets its own watchdog entry per dispatched
-  // request, and this task resets its own entry while blocked waiting for
-  // the reply - no per-call-site reset needed here even though this runs
-  // right after fp_match_1n() inside sdf_services_execute_admin_action.
   if (err == ESP_OK) {
     /* Pack results into compact bitmap + packed permissions format */
     sdf_services_pack_user_list(user_ids, perms, count,
-                                &s_enrollment_user_bmp,
-                                s_enrollment_perm_packed);
+                                &enrollment_user_bmp,
+                                enrollment_perm_packed);
 
     /* Find first free ID using bitmap (O(1) per check) */
     for (uint16_t id = 1; id <= SDF_SERVICES_MAX_USERS; id++) {
-      if (!SDF_SERVICES_BMP_TEST(s_enrollment_user_bmp, id)) {
+      if (!SDF_SERVICES_BMP_TEST(enrollment_user_bmp, id)) {
         new_id = id;
         break;
       }
@@ -321,9 +323,41 @@ void sdf_services_execute_admin_action(
     esp_err_t err = sdf_services_fingerprint_result_to_err(fp_result);
 
     if (err == ESP_OK) {
-      ESP_LOGI(TAG, "Changed fingerprint permission for user_id=%u to %u",
-               (unsigned)user_id, (unsigned)permission);
-      led_flash_green();
+      /* Sensor-side permission change succeeded; update the persisted cache
+       * and write it to NVS before reporting success, so the sensor and the
+       * cache/NVS never disagree (see cache-enrolled-user-state). */
+      bool persisted = false;
+      {
+        SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+        if (guard.acquired == pdTRUE) {
+          uint8_t prev_permission =
+              sdf_services_perm_get(s_state.enrolled_perm_packed, user_id);
+          sdf_services_perm_set(s_state.enrolled_perm_packed, user_id, permission);
+          persisted = (sdf_services_persist_enrolled_users_locked() == ESP_OK);
+          if (!persisted) {
+            /* Retries exhausted: leave the cache reflecting the last
+             * successfully persisted permission (stale-but-safe), no
+             * sensor-side rollback per design.md. */
+            sdf_services_perm_set(s_state.enrolled_perm_packed, user_id,
+                                  prev_permission);
+          }
+        } else {
+          err = ESP_ERR_TIMEOUT;
+        }
+      }
+
+      if (persisted) {
+        ESP_LOGI(TAG, "Changed fingerprint permission for user_id=%u to %u",
+                 (unsigned)user_id, (unsigned)permission);
+        led_flash_green();
+      } else {
+        ESP_LOGE(TAG,
+                 "Failed to persist enrolled-user cache after changing "
+                 "permission for user_id=%u",
+                 (unsigned)user_id);
+        led_flash_red();
+        err = ESP_FAIL;
+      }
     } else {
       ESP_LOGW(TAG,
                "Failed to change fingerprint permission for user_id=%u to %u: "
@@ -677,7 +711,23 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   s_state.permission_change_user_id = 0;
   s_state.permission_change_permission = 0;
   s_state.permission_change_result = ESP_OK;
-  s_state.enrolled_user_count = 0;
+  /* Load the persisted enrolled-user cache synchronously, before this
+   * function returns and sdf_services_start_tasks() below creates the
+   * button/match/admin/enroll tasks - so there is no window after boot
+   * where a task can observe the cache under-reporting a claimed device's
+   * real admin (see cache-enrolled-user-state). "Key not found" (first boot
+   * after this firmware update, or an erased device) is already translated
+   * to "zero users, ESP_OK" by sdf_storage_enrolled_users_load(); any other
+   * error is logged and conservatively also treated as zero users, since
+   * there is no sensor-side fallback query to cross-check against anymore. */
+  esp_err_t cache_load_err = sdf_storage_enrolled_users_load(
+      &s_state.enrolled_user_bmp, s_state.enrolled_perm_packed);
+  if (cache_load_err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to load enrolled-user cache from NVS: %s",
+             esp_err_to_name(cache_load_err));
+    s_state.enrolled_user_bmp = 0;
+    memset(s_state.enrolled_perm_packed, 0, sizeof(s_state.enrolled_perm_packed));
+  }
   xSemaphoreGive(s_state.lock);
 
 sdf_drivers_config_t drivers_config = {
@@ -744,6 +794,30 @@ void sdf_services_trigger_low_battery_warning(void) {
   led_flash_orange();
 }
 
+/* Number of attempts (including the first) sdf_services_persist_enrolled_users_locked()
+ * makes before giving up and reporting failure to its caller. */
+#define SDF_SERVICES_PERSIST_RETRY_COUNT 3u
+#define SDF_SERVICES_PERSIST_RETRY_DELAY_MS 50u
+
+esp_err_t sdf_services_persist_enrolled_users_locked(void) {
+  esp_err_t err = ESP_FAIL;
+  for (uint32_t attempt = 0; attempt < SDF_SERVICES_PERSIST_RETRY_COUNT; attempt++) {
+    err = sdf_storage_enrolled_users_save(s_state.enrolled_user_bmp,
+                                          s_state.enrolled_perm_packed);
+    if (err == ESP_OK) {
+      return ESP_OK;
+    }
+    ESP_LOGW(TAG,
+             "Failed to persist enrolled-user cache to NVS (attempt %u/%u): %s",
+             (unsigned)(attempt + 1), (unsigned)SDF_SERVICES_PERSIST_RETRY_COUNT,
+             esp_err_to_name(err));
+    if (attempt + 1 < SDF_SERVICES_PERSIST_RETRY_COUNT) {
+      vTaskDelay(pdMS_TO_TICKS(SDF_SERVICES_PERSIST_RETRY_DELAY_MS));
+    }
+  }
+  return err;
+}
+
 esp_err_t sdf_services_delete_user(uint16_t user_id) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
@@ -751,19 +825,37 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
    * timeout) and is already serialized by the fingerprint driver's own
    * internal mutex, so s_state.lock does not need to be held across it -
    * doing so would stall every other s_state.lock user (match cycle, admin
-   * actions, enrollment) for up to 12s. Only take the lock for the brief
-   * enrolled_user_count update below. */
+   * actions, enrollment) for up to 12s. Only take the lock for the cache
+   * update + synchronous NVS persist below. */
   sdf_fingerprint_op_result_t res = fp_delete_user(user_id);
-  if (res == SDF_FINGERPRINT_OP_OK) {
+  if (res != SDF_FINGERPRINT_OP_OK) {
+    return ESP_FAIL;
+  }
+
+  bool persisted = false;
+  {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
-    if (guard.acquired == pdTRUE && s_state.enrolled_user_count > 0) {
-      s_state.enrolled_user_count--;
+    if (guard.acquired == pdTRUE) {
+      SDF_SERVICES_BMP_CLEAR(s_state.enrolled_user_bmp, user_id);
+      persisted = (sdf_services_persist_enrolled_users_locked() == ESP_OK);
+      if (!persisted) {
+        /* Leave the cache bit set (stale-but-safe): a deleted-on-sensor,
+         * still-cached-as-enrolled user is inert (the sensor will simply
+         * never match them again) - no sensor-side rollback per design.md. */
+        SDF_SERVICES_BMP_SET(s_state.enrolled_user_bmp, user_id);
+      }
     }
   }
-  if (res == SDF_FINGERPRINT_OP_OK) {
-    sdf_storage_delete_user_name(user_id);
+
+  if (!persisted) {
+    ESP_LOGE(TAG, "Failed to persist enrolled-user cache after deleting user_id=%u",
+             (unsigned)user_id);
+    led_flash_red();
+    return ESP_FAIL;
   }
-  return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
+
+  sdf_storage_delete_user_name(user_id);
+  return ESP_OK;
 }
 
 esp_err_t sdf_services_clear_all_users(void) {
@@ -773,31 +865,64 @@ esp_err_t sdf_services_clear_all_users(void) {
    * blocking UART call already serialized by the fingerprint driver's own
    * mutex, so don't hold s_state.lock across it. */
   sdf_fingerprint_op_result_t res = fp_delete_all_users();
-  if (res == SDF_FINGERPRINT_OP_OK) {
+  if (res != SDF_FINGERPRINT_OP_OK) {
+    return ESP_FAIL;
+  }
+
+  bool persisted = false;
+  {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired == pdTRUE) {
-      s_state.enrolled_user_count = 0;
+      uint16_t prev_bmp = s_state.enrolled_user_bmp;
+      uint8_t prev_perm[sizeof(s_state.enrolled_perm_packed)];
+      memcpy(prev_perm, s_state.enrolled_perm_packed, sizeof(prev_perm));
+
+      s_state.enrolled_user_bmp = 0;
+      memset(s_state.enrolled_perm_packed, 0, sizeof(s_state.enrolled_perm_packed));
+      persisted = (sdf_services_persist_enrolled_users_locked() == ESP_OK);
+      if (!persisted) {
+        /* Leave the cache reflecting the last successfully persisted state
+         * (stale-but-safe), no sensor-side rollback per design.md. */
+        s_state.enrolled_user_bmp = prev_bmp;
+        memcpy(s_state.enrolled_perm_packed, prev_perm, sizeof(prev_perm));
+      }
     }
   }
-  if (res == SDF_FINGERPRINT_OP_OK) {
-    for (uint16_t i = SDF_FINGERPRINT_USER_ID_MIN; i <= SDF_SERVICES_MAX_USERS; i++) {
-      sdf_storage_delete_user_name(i);
-    }
+
+  if (!persisted) {
+    ESP_LOGE(TAG, "Failed to persist enrolled-user cache after clearing all users");
+    led_flash_red();
+    return ESP_FAIL;
   }
-  return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
+
+  for (uint16_t i = SDF_FINGERPRINT_USER_ID_MIN; i <= SDF_SERVICES_MAX_USERS; i++) {
+    sdf_storage_delete_user_name(i);
+  }
+  return ESP_OK;
 }
 
 esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
                                    size_t *count, size_t max_count) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
-  /* See sdf_services_delete_user(): fp_query_users() is a long blocking
-   * UART call already serialized by the fingerprint driver's own mutex, so
-   * don't hold s_state.lock across it - there's no s_state to protect here
-   * anyway, this call only touches the sensor. */
-  sdf_fingerprint_op_result_t res =
-      fp_query_users(user_ids, permissions, count, max_count);
-  return (res == SDF_FINGERPRINT_OP_OK) ? ESP_OK : ESP_FAIL;
+
+  /* Served entirely from the persisted, in-RAM cache under s_state.lock -
+   * no sensor UART round trip (see cache-enrolled-user-state). */
+  SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+  if (guard.acquired != pdTRUE) {
+    return ESP_ERR_TIMEOUT;
+  }
+
+  size_t out_count = 0;
+  for (uint16_t id = 1; id <= SDF_SERVICES_MAX_USERS && out_count < max_count; id++) {
+    if (SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, id)) {
+      user_ids[out_count] = id;
+      permissions[out_count] = sdf_services_perm_get(s_state.enrolled_perm_packed, id);
+      out_count++;
+    }
+  }
+  *count = out_count;
+  return ESP_OK;
 }
 
 esp_err_t sdf_services_change_user_permission(uint16_t user_id,
@@ -846,6 +971,9 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
   uint16_t user_ids[SDF_SERVICES_MAX_USERS];
   uint8_t perms[SDF_SERVICES_MAX_USERS];
 
+  uint16_t perm_user_bmp = 0;
+  uint8_t perm_perm_packed[SDF_SERVICES_PERM_PACKED_SIZE] = {0};
+
   err = sdf_services_query_users(user_ids, perms, &count, query_capacity);
   if (err != ESP_OK) {
     return err;
@@ -853,17 +981,17 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
 
   /* Pack results into compact bitmap + packed permissions format */
   sdf_services_pack_user_list(user_ids, perms, count,
-                              &s_perm_user_bmp,
-                              s_perm_perm_packed);
+                              &perm_user_bmp,
+                              perm_perm_packed);
 
-  bool found = SDF_SERVICES_BMP_TEST(s_perm_user_bmp, user_id);
-  uint8_t current_permission = found ? sdf_services_perm_get(s_perm_perm_packed, user_id) : 0;
+  bool found = SDF_SERVICES_BMP_TEST(perm_user_bmp, user_id);
+  uint8_t current_permission = found ? sdf_services_perm_get(perm_perm_packed, user_id) : 0;
 
   /* Count admins using packed permissions */
   size_t admin_count = 0;
   for (uint16_t id = 1; id <= SDF_SERVICES_MAX_USERS; id++) {
-    if (SDF_SERVICES_BMP_TEST(s_perm_user_bmp, id) &&
-        sdf_services_perm_get(s_perm_perm_packed, id) == 3u) {
+    if (SDF_SERVICES_BMP_TEST(perm_user_bmp, id) &&
+        sdf_services_perm_get(perm_perm_packed, id) == 3u) {
       admin_count++;
     }
   }
@@ -1007,7 +1135,15 @@ esp_err_t sdf_services_reset_state(void) {
   }
 
   // Reset all state variables to defaults
-  s_state.enrolled_user_count = 0;
+  /* Both existing callers (sdf_app.c's FACTORY_RESET admin action and the
+   * "factory reset" CLI command) run this as one step of a sequence that
+   * already calls sdf_storage_erase_all() (wiping the persisted enrolled-
+   * user NVS key, among everything else) before reaching this function, so
+   * there's nothing left to separately persist here - just zero the in-RAM
+   * cache to match the already-erased NVS/sensor state, consistent with
+   * every other field reset below. */
+  s_state.enrolled_user_bmp = 0;
+  memset(s_state.enrolled_perm_packed, 0, sizeof(s_state.enrolled_perm_packed));
   s_state.failed_attempt_count = 0;
   s_state.lockout_until_us = 0;
   s_state.failed_attempt_window_start_us = 0;
@@ -1069,7 +1205,7 @@ sdf_services_setup_state_t sdf_services_get_setup_state(void) {
   if (s_state.lock != NULL) {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired == pdTRUE) {
-      enrolled_user_count = s_state.enrolled_user_count;
+      enrolled_user_count = sdf_services_enrolled_user_count(s_state.enrolled_user_bmp);
     }
   }
 

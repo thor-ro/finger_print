@@ -417,3 +417,120 @@ void test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key(void) {
 
   nvs_teardown();
 }
+
+// -----------------------------------------------------------------------------
+// Enrolled-user cache (bitmap + packed permissions)
+// -----------------------------------------------------------------------------
+
+void test_sdf_storage_enrolled_users_save_and_load_success(void) {
+  nvs_setup();
+
+  uint16_t bmp_to_save = 0x0025; // users 1, 3, 6 enrolled
+  uint8_t perm_to_save[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0x11, 0x22, 0x33};
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_save(bmp_to_save, perm_to_save));
+
+  uint16_t bmp_loaded = 0;
+  uint8_t perm_loaded[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_load(&bmp_loaded, perm_loaded));
+
+  TEST_ASSERT_EQUAL(bmp_to_save, bmp_loaded);
+  TEST_ASSERT_EQUAL_MEMORY(perm_to_save, perm_loaded, SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_enrolled_users_load_not_found_reads_as_zero(void) {
+  nvs_setup();
+
+  // No prior save at all - namespace itself doesn't exist yet. Per
+  // design.md's Migration Plan, this SHALL read as "zero users", not an
+  // error, so a device upgrading to this firmware boots as unclaimed rather
+  // than failing to initialize.
+  uint16_t bmp_loaded = 0xFFFF;
+  uint8_t perm_loaded[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0xFF, 0xFF, 0xFF};
+  esp_err_t err = sdf_storage_enrolled_users_load(&bmp_loaded, perm_loaded);
+
+  TEST_ASSERT_EQUAL(ESP_OK, err);
+  TEST_ASSERT_EQUAL(0, bmp_loaded);
+  uint8_t all_zero[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL_MEMORY(all_zero, perm_loaded, SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_enrolled_users_load_not_found_within_existing_namespace(void) {
+  nvs_setup();
+
+  // Namespace exists (from an unrelated write) but the enrolled-users key
+  // has never been written - still reads as zero users, not an error.
+  uint8_t key_to_save[32];
+  memset(key_to_save, 0xEE, 32);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(42, key_to_save));
+
+  uint16_t bmp_loaded = 0xFFFF;
+  uint8_t perm_loaded[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0xFF, 0xFF, 0xFF};
+  esp_err_t err = sdf_storage_enrolled_users_load(&bmp_loaded, perm_loaded);
+
+  TEST_ASSERT_EQUAL(ESP_OK, err);
+  TEST_ASSERT_EQUAL(0, bmp_loaded);
+  uint8_t all_zero[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL_MEMORY(all_zero, perm_loaded, SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_enrolled_users_save_invalid_args(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_enrolled_users_save(1, NULL));
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_enrolled_users_load_invalid_args(void) {
+  nvs_setup();
+
+  uint16_t bmp = 0;
+  uint8_t perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_enrolled_users_load(NULL, perm));
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_enrolled_users_load(&bmp, NULL));
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_enrolled_users_save_overwrites_previous(void) {
+  nvs_setup();
+
+  uint8_t perm_v1[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0x01, 0x02, 0x03};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_save(0x0001, perm_v1));
+
+  uint8_t perm_v2[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0x04, 0x05, 0x06};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_save(0x0003, perm_v2));
+
+  uint16_t bmp_loaded = 0;
+  uint8_t perm_loaded[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_load(&bmp_loaded, perm_loaded));
+
+  TEST_ASSERT_EQUAL(0x0003, bmp_loaded);
+  TEST_ASSERT_EQUAL_MEMORY(perm_v2, perm_loaded, SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_erase_all_clears_enrolled_users(void) {
+  nvs_setup();
+
+  uint8_t perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0x01, 0x02, 0x03};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_save(0x0007, perm));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
+
+  uint16_t bmp_loaded = 0xFFFF;
+  uint8_t perm_loaded[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0xFF, 0xFF, 0xFF};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_load(&bmp_loaded, perm_loaded));
+  TEST_ASSERT_EQUAL(0, bmp_loaded);
+
+  nvs_teardown();
+}

@@ -121,8 +121,9 @@ static void IRAM_ATTR sdf_button_isr(void *arg) {
  * The pending-admin-action gate below is unchanged from before this action
  * became state-dependent: NUKI_PAIR is only ever passed in here from the
  * single-click path when `sdf_services_get_setup_state()` returned
- * CLAIMED_INCOMPLETE, which by definition requires enrolled_user_count > 0
- * - so the "0 users, execute immediately" branch below can never be taken
+ * CLAIMED_INCOMPLETE, which by definition requires
+ * sdf_services_enrolled_user_count() > 0 - so the "0 users, execute
+ * immediately" branch below can never be taken
  * for NUKI_PAIR, and it always goes through the admin-fingerprint pending
  * gate like every other non-enroll action.
  *
@@ -140,7 +141,7 @@ void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
     }
 
     /* If there are 0 users, there is no admin to authorize. Execute immediately. */
-    if (s->enrolled_user_count == 0) {
+    if (sdf_services_enrolled_user_count(s->enrolled_user_bmp) == 0) {
         s->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
         s->pending_admin_action_start_us = 0;
         xSemaphoreGive(s->lock);

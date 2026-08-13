@@ -90,4 +90,18 @@ esp_err_t sdf_storage_save_user_name(uint16_t user_id, const char *name);
 esp_err_t sdf_storage_load_user_name(uint16_t user_id, char *name_out, size_t max_len);
 esp_err_t sdf_storage_delete_user_name(uint16_t user_id);
 
+/* Enrolled-user cache: a bitmap (1 bit/user, IDs 1-10) plus packed
+ * permissions (2 bits/user) persisted as the authoritative record of which
+ * fingerprint users are enrolled and their permission level. Loaded
+ * synchronously by sdf_services_init() so enrolled-user state is correct
+ * from boot, without a live sensor query (see cache-enrolled-user-state).
+ * Sized for 10 users (SDF_STORAGE_FP_USER_ID_MAX): ceil(10 * 2 bits / 8) = 3
+ * bytes. Duplicated here rather than depending on sdf_services' own packed
+ * size constant, for the same layering reason as SDF_STORAGE_FP_USER_ID_MAX
+ * above - keep in sync if the user capacity ever changes. */
+#define SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN 3u
+
+esp_err_t sdf_storage_enrolled_users_save(uint16_t bmp, const uint8_t *perm_packed);
+esp_err_t sdf_storage_enrolled_users_load(uint16_t *bmp_out, uint8_t *perm_packed_out);
+
 #endif /* SDF_STORAGE_H */

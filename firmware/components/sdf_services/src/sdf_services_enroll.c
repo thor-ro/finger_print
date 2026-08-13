@@ -139,17 +139,51 @@ void sdf_services_run_enrollment_step(void) {
 
         case SDF_ENROLL_ACT_COMPLETE: {
             xSemaphoreGive(s->lock);
-            led_enrollment_success_green();
-            sdf_enroll_task_emit_complete(snapshot_user_id, snapshot_permission);
+
+            /* Newly enrolled user is now on the sensor; update the persisted
+             * cache and write it to NVS before reporting success, so the
+             * sensor and the cache/NVS never disagree (see
+             * cache-enrolled-user-state). */
+            bool persisted = false;
             if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
                 sdf_enrollment_sm_init(&s->enrollment);
                 fp_set_keep_power_on(false);
-                /* Newly enrolled user is now on the sensor; keep the cached
-                 * count in sync so the match cycle and the button admin-gate
-                 * (which treat count==0 as "no users yet") stay correct. */
-                s->enrolled_user_count++;
+
+                SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, snapshot_user_id);
+                sdf_services_perm_set(s->enrolled_perm_packed, snapshot_user_id,
+                                      snapshot_permission);
+                persisted = (sdf_services_persist_enrolled_users_locked() == ESP_OK);
+                if (!persisted) {
+                    /* Undo the in-RAM cache update so it doesn't disagree
+                     * with NVS (and, once the rollback delete below lands,
+                     * the sensor) after the lock is released. */
+                    SDF_SERVICES_BMP_CLEAR(s->enrolled_user_bmp, snapshot_user_id);
+                }
                 xSemaphoreGive(s->lock);
             }
+
+            if (persisted) {
+                led_enrollment_success_green();
+                sdf_enroll_task_emit_complete(snapshot_user_id, snapshot_permission);
+                break;
+            }
+
+            ESP_LOGE(TAG,
+                     "Failed to persist enrolled-user cache for user_id=%u "
+                     "after retries - rolling back sensor-side enrollment",
+                     (unsigned)snapshot_user_id);
+            sdf_fingerprint_op_result_t rollback_res = fp_delete_user(snapshot_user_id);
+            if (rollback_res != SDF_FINGERPRINT_OP_OK) {
+                ESP_LOGE(TAG,
+                         "Rollback delete for user_id=%u also failed (%s) - "
+                         "sensor print may be orphaned, but the cache "
+                         "correctly does not list it as enrolled",
+                         (unsigned)snapshot_user_id,
+                         sdf_services_fingerprint_result_name(rollback_res));
+            }
+            led_flash_red();
+            sdf_enroll_task_emit_failed(sm_snapshot.state,
+                                        (int8_t)SDF_ENROLLMENT_RESULT_FAILED);
             break;
         }
 

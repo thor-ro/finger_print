@@ -2,8 +2,16 @@
 
 #include <string.h>
 
+#include "nvs_flash.h"
+
 #include "sdf_services.h"
 #include "sdf_services_internal.h"
+
+/* Test-only fault injector for sdf_storage_enrolled_users_save(), compiled
+ * into sdf_storage only when SDF_STORAGE_TESTING is defined (see
+ * firmware/test_runner/main/CMakeLists.txt) - see its definition in
+ * sdf_storage.c for why cache-enrolled-user-state needs this seam. */
+extern void test_sdf_storage_set_enrolled_users_save_fail_count(uint32_t count);
 
 /* Needed only for make_response()'s independent reference HMAC below - see
  * sdf_services_web_auth.c for why these defines/private headers are needed
@@ -445,7 +453,7 @@ void test_setup_state_unclaimed_when_no_enrolled_users(void) {
 }
 
 /* Button dispatch: BLE Companion pairing-window admin action (double-click).
- * enrolled_user_count is set directly on the internal state (rather than via
+ * enrolled_user_bmp is set directly on the internal state (rather than via
  * a real enrollment) so the "0 users, execute immediately" bypass in
  * sdf_button_dispatch_action() is not taken and the admin-fingerprint
  * pending-action gate is actually exercised - mirrors how NUKI_PAIR's own
@@ -454,7 +462,7 @@ void test_setup_state_unclaimed_when_no_enrolled_users(void) {
 void test_button_dispatch_ble_pairing_window_sets_pending_action(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  sdf_services_state()->enrolled_user_count = 1;
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
 
   sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
 
@@ -465,7 +473,7 @@ void test_button_dispatch_ble_pairing_window_sets_pending_action(void) {
 void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  sdf_services_state()->enrolled_user_count = 1;
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
 
   sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
   TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR,
@@ -477,4 +485,179 @@ void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending
    * later double-click. */
   TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR,
                      sdf_services_state()->pending_admin_action);
+}
+
+/* Enrolled-user cache: boot-race regression + dispatch-gate coverage
+ * (cache-enrolled-user-state). */
+
+/* sdf_services_init() is a one-shot per process (guarded by s_state.initialized -
+ * see sdf_services.c), so this MUST be the very first call to it anywhere in
+ * this test binary, or it silently becomes a no-op that skips the NVS load
+ * this test exists to exercise. Registered as the very first "SDF Services
+ * tests" RUN_TEST in test_runner_main.c to guarantee that - see the ordering
+ * comment there. Deliberately does NOT use ensure_services_initialized(),
+ * which is only safe for tests that don't care whether init() actually ran
+ * the load. */
+void test_sdf_services_init_loads_enrolled_users_cache_before_return(void) {
+  esp_err_t nvs_err = nvs_flash_init();
+  if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
+      nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_flash_erase());
+    nvs_err = nvs_flash_init();
+  }
+  TEST_ASSERT_EQUAL(ESP_OK, nvs_err);
+
+  uint16_t saved_bmp = 0;
+  SDF_SERVICES_BMP_SET(saved_bmp, 1);
+  SDF_SERVICES_BMP_SET(saved_bmp, 5);
+  uint8_t saved_perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  sdf_services_perm_set(saved_perm, 1, 3);
+  sdf_services_perm_set(saved_perm, 5, 1);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_save(saved_bmp, saved_perm));
+
+  /* Deliberately not asserting sdf_services_init()'s return value here: on
+   * this Linux host target sdf_services_start_tasks() (called internally by
+   * sdf_services_init(), after the cache load below) fails with
+   * ESP_ERR_INVALID_STATE via sdf_services_is_ready() - a pre-existing
+   * ordering quirk on main (s_state.initialized isn't set true until after
+   * start_tasks() returns, but start_tasks() requires it true first) that
+   * predates and is out of scope for cache-enrolled-user-state, and that
+   * ensure_services_initialized() above also silently tolerates by not
+   * checking the return value. The NVS cache load below happens earlier in
+   * sdf_services_init(), synchronously and unconditionally, before that
+   * later failure path, so it's unaffected either way. */
+  sdf_services_config_t cfg;
+  sdf_services_get_default_config(&cfg);
+  sdf_services_init(&cfg);
+
+  /* No task run, no delay - this is exactly what a task reading s_state
+   * immediately after sdf_services_init() returns would see. */
+  TEST_ASSERT_EQUAL(saved_bmp, sdf_services_state()->enrolled_user_bmp);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(saved_perm, sdf_services_state()->enrolled_perm_packed,
+                                SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+}
+
+/* Must run immediately after the init test above, with no intervening
+ * sdf_services_reset_state() call, so it exercises sdf_button_dispatch_action()
+ * against the exact cache state sdf_services_init() just loaded from NVS -
+ * i.e. as the very first admin action dispatched after boot. Before this
+ * change, s_state.enrolled_user_count was zeroed unconditionally in init()
+ * and only became correct once a slow sensor query finished, so this exact
+ * scenario used to take the "0 users, execute immediately" bypass. */
+void test_button_dispatch_never_bypasses_gate_as_first_action_after_init(void) {
+  TEST_ASSERT_TRUE(sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp) > 0);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR,
+                    sdf_services_state()->pending_admin_action);
+}
+
+/* sdf_services_enrolled_user_count() popcount correctness */
+
+void test_enrolled_user_count_zero_bitmap(void) {
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(0));
+}
+
+void test_enrolled_user_count_single_bit(void) {
+  uint16_t bmp = 0;
+  SDF_SERVICES_BMP_SET(bmp, 7);
+  TEST_ASSERT_EQUAL(1, sdf_services_enrolled_user_count(bmp));
+}
+
+void test_enrolled_user_count_multiple_bits(void) {
+  uint16_t bmp = 0;
+  SDF_SERVICES_BMP_SET(bmp, 1);
+  SDF_SERVICES_BMP_SET(bmp, 2);
+  SDF_SERVICES_BMP_SET(bmp, 10);
+  TEST_ASSERT_EQUAL(3, sdf_services_enrolled_user_count(bmp));
+}
+
+void test_enrolled_user_count_all_ten_users(void) {
+  uint16_t bmp = 0;
+  for (uint16_t id = 1; id <= 10; id++) {
+    SDF_SERVICES_BMP_SET(bmp, id);
+  }
+  TEST_ASSERT_EQUAL(10, sdf_services_enrolled_user_count(bmp));
+}
+
+void test_enrolled_user_count_updates_after_clear(void) {
+  uint16_t bmp = 0;
+  SDF_SERVICES_BMP_SET(bmp, 3);
+  SDF_SERVICES_BMP_SET(bmp, 4);
+  SDF_SERVICES_BMP_CLEAR(bmp, 3);
+  TEST_ASSERT_EQUAL(1, sdf_services_enrolled_user_count(bmp));
+}
+
+/* sdf_services_persist_enrolled_users_locked(): the shared cache-to-NVS
+ * write helper every mutation path (enroll completion, delete_user,
+ * clear_all_users, change_user_permission) funnels through after updating
+ * s_state's cache fields and before reporting success (tasks 5.1-5.5). Its
+ * caller-facing contract - "write s_state's current cache fields to NVS,
+ * retrying with backoff, and report success/failure" - is exercised
+ * directly here rather than through each of the four public mutation
+ * functions: those all also require a successful fp_*() sensor round trip
+ * before they ever reach this helper, and the Linux host target's mock UART
+ * never produces a valid frame (see test_fingerprint_owner_task.c and the
+ * fp-io-owner-task change this depends on), so fp_delete_user(),
+ * fp_delete_all_users(), fp_change_user_permission() and fp_enroll_step()
+ * cannot be made to succeed in a host test. That pre-existing, documented
+ * constraint is why the sensor-rollback and red-LED wrapper logic around
+ * each of those four call sites (e.g. sdf_services_enroll.c's
+ * SDF_ENROLL_ACT_COMPLETE branch) is exercised on hardware (see tasks.md
+ * section 8) rather than here. */
+
+void test_persist_enrolled_users_locked_writes_current_cache_to_nvs(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 2);
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 9);
+  sdf_services_perm_set(s->enrolled_perm_packed, 2, 3);
+  sdf_services_perm_set(s->enrolled_perm_packed, 9, 2);
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_persist_enrolled_users_locked());
+
+  uint16_t loaded_bmp = 0;
+  uint8_t loaded_perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_load(&loaded_bmp, loaded_perm));
+  TEST_ASSERT_EQUAL(s->enrolled_user_bmp, loaded_bmp);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(s->enrolled_perm_packed, loaded_perm,
+                                SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+}
+
+/* Mirrors the retry count each mutation path relies on
+ * (SDF_SERVICES_PERSIST_RETRY_COUNT = 3 in sdf_services.c): a persistent
+ * failure (all 3 attempts fail) must be reported to the caller as failure,
+ * without corrupting the in-RAM cache fields the caller is responsible for
+ * rolling back. */
+void test_persist_enrolled_users_locked_fails_after_exhausting_retries(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 4);
+  sdf_services_perm_set(s->enrolled_perm_packed, 4, 1);
+  uint16_t bmp_before = s->enrolled_user_bmp;
+  uint8_t perm_before[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN];
+  memcpy(perm_before, s->enrolled_perm_packed, sizeof(perm_before));
+
+  test_sdf_storage_set_enrolled_users_save_fail_count(3);
+  TEST_ASSERT_EQUAL(ESP_FAIL, sdf_services_persist_enrolled_users_locked());
+
+  /* The helper itself doesn't touch the cache on failure - only its callers
+   * decide whether/how to roll back - so it must still hold what the caller
+   * asked it to persist. */
+  TEST_ASSERT_EQUAL(bmp_before, s->enrolled_user_bmp);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(perm_before, s->enrolled_perm_packed,
+                                SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+
+  /* One fewer failure than the retry count still succeeds on the final
+   * attempt - confirms the fail-count fixture itself, and that a transient
+   * (not persistent) failure doesn't cause a false failure report. */
+  test_sdf_storage_set_enrolled_users_save_fail_count(2);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_persist_enrolled_users_locked());
 }

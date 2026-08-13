@@ -1,5 +1,7 @@
 #include "sdf_storage.h"
 
+#include <string.h>
+
 #include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_random.h"
@@ -12,6 +14,8 @@
 #define SDF_STORAGE_KEY_SHARED "shared_key"
 #define SDF_STORAGE_KEY_BLE_HANDLES "ble_handles"
 #define SDF_STORAGE_KEY_WEB_PSEUDO_SALT_KEY "web_pseudo_salt"
+#define SDF_STORAGE_KEY_ENROLLED_USERS_BMP "enr_bmp"
+#define SDF_STORAGE_KEY_ENROLLED_USERS_PERM "enr_perm"
 
 static const char *TAG = "sdf_storage";
 static sdf_storage_security_status_t s_security_status = {
@@ -609,6 +613,101 @@ esp_err_t sdf_storage_delete_user_name(uint16_t user_id) {
 
     nvs_close(handle);
     return err;
+}
+
+#ifdef SDF_STORAGE_TESTING
+/* Test-only fault injection: when non-zero, the next N calls to
+ * sdf_storage_enrolled_users_save() fail with ESP_FAIL instead of touching
+ * NVS, decrementing this counter once per call. Lets host tests exercise
+ * sdf_services_persist_enrolled_users_locked()'s retry-then-give-up
+ * behavior deterministically, without a real NVS-level failure mode to
+ * trigger (see cache-enrolled-user-state design.md). */
+static uint32_t s_test_enrolled_users_save_fail_count = 0;
+
+void test_sdf_storage_set_enrolled_users_save_fail_count(uint32_t count) {
+  s_test_enrolled_users_save_fail_count = count;
+}
+#endif
+
+esp_err_t sdf_storage_enrolled_users_save(uint16_t bmp, const uint8_t *perm_packed) {
+  if (perm_packed == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+#ifdef SDF_STORAGE_TESTING
+  if (s_test_enrolled_users_save_fail_count > 0) {
+    s_test_enrolled_users_save_fail_count--;
+    return ESP_FAIL;
+  }
+#endif
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_set_u16(handle, SDF_STORAGE_KEY_ENROLLED_USERS_BMP, bmp);
+  if (err == ESP_OK) {
+    err = nvs_set_blob(handle, SDF_STORAGE_KEY_ENROLLED_USERS_PERM, perm_packed,
+                       SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+  }
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_enrolled_users_load(uint16_t *bmp_out, uint8_t *perm_packed_out) {
+  if (bmp_out == NULL || perm_packed_out == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    /* Namespace not created yet (first boot after this firmware update, or
+     * an erased device) - treat as "zero users enrolled", not an error. */
+    *bmp_out = 0;
+    memset(perm_packed_out, 0, SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+    return ESP_OK;
+  }
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint16_t bmp = 0;
+  err = nvs_get_u16(handle, SDF_STORAGE_KEY_ENROLLED_USERS_BMP, &bmp);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    *bmp_out = 0;
+    memset(perm_packed_out, 0, SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+    nvs_close(handle);
+    return ESP_OK;
+  }
+  if (err != ESP_OK) {
+    nvs_close(handle);
+    return err;
+  }
+
+  size_t len = SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN;
+  err = nvs_get_blob(handle, SDF_STORAGE_KEY_ENROLLED_USERS_PERM, perm_packed_out, &len);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    *bmp_out = 0;
+    memset(perm_packed_out, 0, SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+    nvs_close(handle);
+    return ESP_OK;
+  }
+  if (err == ESP_OK && len != SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN) {
+    err = ESP_ERR_NVS_INVALID_LENGTH;
+  }
+  if (err == ESP_OK) {
+    *bmp_out = bmp;
+  }
+
+  nvs_close(handle);
+  return err;
 }
 
 esp_err_t sdf_storage_erase_all(void) {

@@ -50,7 +50,16 @@ typedef struct {
   uint16_t permission_change_user_id;
   uint8_t permission_change_permission;
   esp_err_t permission_change_result;
-  size_t enrolled_user_count;
+  /* Authoritative enrolled-user record: a bitmap (1 bit/user, IDs 1-10) plus
+   * packed permissions (2 bits/user), loaded synchronously from NVS in
+   * sdf_services_init() (before any task starts) and kept in sync with the
+   * fingerprint sensor via synchronous NVS persistence on every successful
+   * enroll/delete/clear/permission-change. See cache-enrolled-user-state.
+   * enrolled_user_count is intentionally NOT a stored field - it's always
+   * computed via sdf_services_enrolled_user_count() below, so it can't drift
+   * from the bitmap it's derived from. */
+  uint16_t enrolled_user_bmp;
+  uint8_t enrolled_perm_packed[3];
 
   /* Web Companion registration authorization */
   bool web_reg_auth_pending;
@@ -93,6 +102,13 @@ void sdf_button_dispatch_action(sdf_services_admin_action_t action);
 esp_err_t sdf_services_start_tasks(void);
 esp_err_t sdf_services_stop_tasks(void);
 
+/* Writes the current s_state.enrolled_user_bmp/enrolled_perm_packed to NVS,
+ * retrying with backoff on failure. Callable only while s_state.lock is
+ * already held (see cache-enrolled-user-state design.md's synchronous
+ * ordered persistence algorithm). Returns ESP_OK once the write lands, or
+ * the last error observed once retries are exhausted. */
+esp_err_t sdf_services_persist_enrolled_users_locked(void);
+
 /* Bitmap helpers */
 #define SDF_SERVICES_BMP_TEST(bmp, id)  ((bmp) & (1u << ((id) - 1)))
 #define SDF_SERVICES_BMP_SET(bmp, id)   ((bmp) |= (1u << ((id) - 1)))
@@ -110,6 +126,13 @@ static inline void sdf_services_perm_set(uint8_t *packed, uint16_t id, uint8_t p
     uint8_t *byte = &packed[(id - 1) / 4];
     uint8_t shift = ((id - 1) % 4) * 2;
     *byte = (*byte & ~(0x3 << shift)) | ((perm & 0x3) << shift);
+}
+
+/* Enrolled-user count is always derived from the bitmap, never stored
+ * independently - see enrolled_user_bmp's doc comment above. */
+static inline size_t sdf_services_enrolled_user_count(uint16_t enrolled_user_bmp)
+{
+    return (size_t)__builtin_popcount((unsigned int)enrolled_user_bmp);
 }
 
 /* Pack sensor query results into compact bitmap + packed permissions */

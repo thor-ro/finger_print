@@ -34,8 +34,9 @@ typedef enum {
 } sdf_services_admin_action_t;
 
 /* Device setup progress, derived from existing persisted state
- * (enrolled_user_count, sdf_storage_nuki_load()) rather than a dedicated
- * flag. See the "State-Dependent Single-Click Setup Action" requirement. */
+ * (sdf_services_enrolled_user_count(), sdf_storage_nuki_load()) rather than a
+ * dedicated flag. See the "State-Dependent Single-Click Setup Action"
+ * requirement. */
 typedef enum {
   SDF_SERVICES_SETUP_STATE_UNCLAIMED = 0,          /* no enrolled users yet */
   SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE = 1, /* admin exists, Nuki not yet paired */

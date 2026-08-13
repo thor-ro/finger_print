@@ -44,3 +44,4 @@ target_compile_definitions(${COMPONENT_LIB} PRIVATE
 target_compile_definitions(__idf_sdf_drivers PRIVATE SDF_DRIVERS_TESTING)
 target_compile_definitions(__idf_sdf_power PRIVATE SDF_POWER_TESTING)
 target_compile_definitions(__idf_sdf_protocol_ble PRIVATE SDF_PROTOCOL_BLE_TESTING)
+target_compile_definitions(__idf_sdf_storage PRIVATE SDF_STORAGE_TESTING)

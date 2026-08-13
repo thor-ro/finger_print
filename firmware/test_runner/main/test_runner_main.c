@@ -81,6 +81,13 @@ extern void test_sdf_storage_web_pseudo_salt_key_generates_on_first_use(void);
 extern void test_sdf_storage_web_pseudo_salt_key_persists_across_loads(void);
 extern void test_sdf_storage_web_pseudo_salt_key_null_arg_rejected(void);
 extern void test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key(void);
+extern void test_sdf_storage_enrolled_users_save_and_load_success(void);
+extern void test_sdf_storage_enrolled_users_load_not_found_reads_as_zero(void);
+extern void test_sdf_storage_enrolled_users_load_not_found_within_existing_namespace(void);
+extern void test_sdf_storage_enrolled_users_save_invalid_args(void);
+extern void test_sdf_storage_enrolled_users_load_invalid_args(void);
+extern void test_sdf_storage_enrolled_users_save_overwrites_previous(void);
+extern void test_sdf_storage_erase_all_clears_enrolled_users(void);
 
 /* SDF Config tests */
 extern void test_sdf_config_set_checkin_interval_bounds(void);
@@ -111,8 +118,22 @@ extern void test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supporte
 extern void test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok(void);
 
 /* SDF Services tests */
+/* Must be the very first two RUN_TEST calls in this section (see their doc
+ * comments in test_sdf_services.c): sdf_services_init() only loads the
+ * enrolled-user cache from NVS on the first call ever made to it in this
+ * process, and the second test depends on running immediately after the
+ * first with no intervening sdf_services_reset_state() call. */
+extern void test_sdf_services_init_loads_enrolled_users_cache_before_return(void);
+extern void test_button_dispatch_never_bypasses_gate_as_first_action_after_init(void);
 extern void test_sdf_services_reset_state_returns_ok(void);
 extern void test_sdf_services_reset_state_can_be_called_multiple_times(void);
+extern void test_enrolled_user_count_zero_bitmap(void);
+extern void test_enrolled_user_count_single_bit(void);
+extern void test_enrolled_user_count_multiple_bits(void);
+extern void test_enrolled_user_count_all_ten_users(void);
+extern void test_enrolled_user_count_updates_after_clear(void);
+extern void test_persist_enrolled_users_locked_writes_current_cache_to_nvs(void);
+extern void test_persist_enrolled_users_locked_fails_after_exhausting_retries(void);
 extern void test_web_auth_stretch_credential_is_deterministic(void);
 extern void test_web_auth_stretch_credential_differs_by_salt(void);
 extern void test_web_auth_stretch_credential_invalid_args(void);
@@ -365,6 +386,13 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_web_pseudo_salt_key_persists_across_loads);
   RUN_TEST(test_sdf_storage_web_pseudo_salt_key_null_arg_rejected);
   RUN_TEST(test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key);
+  RUN_TEST(test_sdf_storage_enrolled_users_save_and_load_success);
+  RUN_TEST(test_sdf_storage_enrolled_users_load_not_found_reads_as_zero);
+  RUN_TEST(test_sdf_storage_enrolled_users_load_not_found_within_existing_namespace);
+  RUN_TEST(test_sdf_storage_enrolled_users_save_invalid_args);
+  RUN_TEST(test_sdf_storage_enrolled_users_load_invalid_args);
+  RUN_TEST(test_sdf_storage_enrolled_users_save_overwrites_previous);
+  RUN_TEST(test_sdf_storage_erase_all_clears_enrolled_users);
 
   /* SDF Config tests */
   RUN_TEST(test_sdf_config_set_checkin_interval_bounds);
@@ -395,8 +423,17 @@ void app_main(void) {
   RUN_TEST(test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok);
 
   /* SDF Services tests */
+  RUN_TEST(test_sdf_services_init_loads_enrolled_users_cache_before_return);
+  RUN_TEST(test_button_dispatch_never_bypasses_gate_as_first_action_after_init);
   RUN_TEST(test_sdf_services_reset_state_returns_ok);
   RUN_TEST(test_sdf_services_reset_state_can_be_called_multiple_times);
+  RUN_TEST(test_enrolled_user_count_zero_bitmap);
+  RUN_TEST(test_enrolled_user_count_single_bit);
+  RUN_TEST(test_enrolled_user_count_multiple_bits);
+  RUN_TEST(test_enrolled_user_count_all_ten_users);
+  RUN_TEST(test_enrolled_user_count_updates_after_clear);
+  RUN_TEST(test_persist_enrolled_users_locked_writes_current_cache_to_nvs);
+  RUN_TEST(test_persist_enrolled_users_locked_fails_after_exhausting_retries);
   RUN_TEST(test_web_auth_stretch_credential_is_deterministic);
   RUN_TEST(test_web_auth_stretch_credential_differs_by_salt);
   RUN_TEST(test_web_auth_stretch_credential_invalid_args);
