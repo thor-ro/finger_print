@@ -13,6 +13,10 @@ extern sdf_power_wake_reason_t
 sdf_power_map_wakeup_reason(esp_sleep_wakeup_cause_t cause);
 extern void test_sdf_power_set_base_checkin_interval_ms(uint32_t interval_ms);
 extern void test_sdf_power_set_battery_percent_raw(uint8_t battery_percent);
+extern uint32_t test_sdf_power_compute_stay_awake_wait_ms(
+    int64_t now_us, int64_t last_activity_us, uint32_t idle_before_sleep_ms,
+    int64_t wake_guard_until_us, int64_t next_battery_report_us,
+    uint32_t wait_cap_ms);
 
 // -----------------------------------------------------------------------------
 // Unit Tests
@@ -135,3 +139,46 @@ void test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery(
 
   cfg->adaptive_checkin = saved_adaptive;
 }
+
+void test_sdf_power_compute_stay_awake_wait_matches_nearest_deadline(void) {
+  int64_t now_us = 10000000LL;
+
+  /* Case 1: idle_before_sleep is nearest deadline (500ms vs 2000ms vs 5000ms) */
+  int64_t last_act_us = now_us - 4500000LL; // 5000ms - 4500ms = 500ms remaining
+  uint32_t idle_ms = 5000;
+  int64_t guard_us = now_us + 2000000LL;   // 2000ms remaining
+  int64_t batt_us = now_us + 5000000LL;    // 5000ms remaining
+  TEST_ASSERT_EQUAL_UINT32(500, test_sdf_power_compute_stay_awake_wait_ms(
+      now_us, last_act_us, idle_ms, guard_us, batt_us, 1000));
+
+  /* Case 2: post-wake guard is nearest deadline (300ms vs 5000ms vs 10000ms) */
+  last_act_us = now_us;
+  guard_us = now_us + 300000LL; // 300ms remaining
+  batt_us = now_us + 10000000LL;
+  TEST_ASSERT_EQUAL_UINT32(300, test_sdf_power_compute_stay_awake_wait_ms(
+      now_us, last_act_us, idle_ms, guard_us, batt_us, 1000));
+
+  /* Case 3: next battery report is nearest deadline (200ms vs 5000ms vs 2000ms) */
+  guard_us = now_us + 2000000LL;
+  batt_us = now_us + 200000LL;  // 200ms remaining
+  TEST_ASSERT_EQUAL_UINT32(200, test_sdf_power_compute_stay_awake_wait_ms(
+      now_us, last_act_us, idle_ms, guard_us, batt_us, 1000));
+}
+
+void test_sdf_power_compute_stay_awake_wait_clamps_to_cap_and_zero(void) {
+  int64_t now_us = 10000000LL;
+
+  /* Case 1: All deadlines farther than cap (5000ms, 2000ms, 10000ms vs 1000ms cap) */
+  int64_t last_act_us = now_us;
+  uint32_t idle_ms = 5000;
+  int64_t guard_us = now_us + 2000000LL;
+  int64_t batt_us = now_us + 10000000LL;
+  TEST_ASSERT_EQUAL_UINT32(1000, test_sdf_power_compute_stay_awake_wait_ms(
+      now_us, last_act_us, idle_ms, guard_us, batt_us, 1000));
+
+  /* Case 2: Deadline in the past (clock jump / elapsed) -> returns 0 */
+  last_act_us = now_us - 6000000LL; // 5000ms - 6000ms = -1000ms (past)
+  TEST_ASSERT_EQUAL_UINT32(0, test_sdf_power_compute_stay_awake_wait_ms(
+      now_us, last_act_us, idle_ms, guard_us, batt_us, 1000));
+}
+

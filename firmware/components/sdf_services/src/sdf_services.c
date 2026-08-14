@@ -281,6 +281,99 @@ sdf_services_start_local_enrollment_with_permission(
   }
 }
 
+void sdf_services_pulse_pending_action_led(sdf_services_admin_action_t action) {
+  switch (action) {
+    case SDF_SERVICES_ADMIN_ACTION_NONE:
+    case SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION:
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_ENROLL:
+    case SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN:
+      led_pulse_blue();
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR:
+      led_pulse_yellow();
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_ZB_JOIN:
+      led_pulse_purple();
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET:
+      led_pulse_red();
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH:
+      led_pulse_white();
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR:
+    case SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW:
+      led_pulse_cyan();
+      break;
+    default:
+      break;
+  }
+}
+
+/**
+ * @brief Evaluates and executes the unauthenticated bootstrap bypass for admin actions
+ * on an unclaimed device (0 enrolled users).
+ *
+ * This function is the single authorization decision point for whether an admin
+ * action may execute without admin-fingerprint authorization.
+ * The bypass is granted ONLY for requests originating from local physical interaction
+ * (SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL) when sdf_services_enrolled_user_count() == 0.
+ * Remotely-originated requests are never granted the bypass.
+ *
+ * For SDF_SERVICES_ADMIN_ACTION_ENROLL, pulses the blue LED and requests enrollment (1, 3).
+ * For all other actions, executes the configured admin_action_cb immediately.
+ *
+ * Reproduces the lock discipline exactly: acquires s_state.lock to check user count and
+ * clear pending action state, releases s_state.lock, and only then executes the action.
+ *
+ * @param action The admin action requested.
+ * @param origin The origin of the request (local physical vs remote).
+ * @return true if the bypass was granted and executed, false otherwise.
+ */
+bool sdf_services_try_bootstrap_admin_action(
+    sdf_services_admin_action_t action,
+    sdf_services_admin_origin_t origin) {
+  if (origin != SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL) {
+    return false;
+  }
+
+  if (s_state.lock == NULL) {
+    return false;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return false;
+  }
+
+  if (sdf_services_enrolled_user_count(s_state.enrolled_user_bmp) != 0) {
+    xSemaphoreGive(s_state.lock);
+    return false;
+  }
+
+  /* If there are 0 users, there is no admin to authorize. Execute immediately. */
+  s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_state.pending_admin_action_start_us = 0;
+  sdf_services_admin_action_cb action_cb = s_state.config.admin_action_cb;
+  void *action_ctx = s_state.config.admin_action_ctx;
+  xSemaphoreGive(s_state.lock);
+
+  /* ENROLL_ADMIN is no longer button-reachable (see the
+   * button-admin-actions-to-companion-app change) so it can't land
+   * here - only plain ENROLL (single-click on an unclaimed device)
+   * still bypasses the admin-fingerprint gate. */
+  if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
+    led_pulse_blue();
+    sdf_services_request_enrollment(1, 3);
+  } else {
+    if (action_cb != NULL) {
+      action_cb(action_ctx, action);
+    }
+  }
+
+  return true;
+}
+
 void sdf_services_execute_admin_action(
     sdf_services_admin_action_t action,
     sdf_services_admin_action_cb action_cb, void *action_ctx) {
@@ -555,22 +648,13 @@ esp_err_t sdf_services_start_tasks(void) {
         return ESP_FAIL;
     }
 
-    /* Create button task */
-    task_ok = xTaskCreate(sdf_button_task, SDF_BUTTON_TASK_NAME,
-                          SDF_BUTTON_TASK_STACK, NULL,
-                          SDF_BUTTON_TASK_PRIORITY, &s->button_task);
-    if (task_ok != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create button task");
-        vTaskDelete(s->match_task);
-        vTaskDelete(s->enroll_task);
-        vTaskDelete(s->admin_task);
-        s->match_task = NULL;
-        s->enroll_task = NULL;
-        s->admin_task = NULL;
-        return ESP_FAIL;
+    /* Initialize button handling */
+    esp_err_t btn_err = sdf_button_init();
+    if (btn_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to initialize button handling: %s", esp_err_to_name(btn_err));
     }
 
-    ESP_LOGI(TAG, "All 4 services tasks started");
+    ESP_LOGI(TAG, "All 3 services tasks started");
     return ESP_OK;
 }
 
@@ -584,6 +668,8 @@ esp_err_t sdf_services_stop_tasks(void) {
         sdf_platform_gpio_isr_handler_remove(s->config.wake_gpio);
     }
 
+    sdf_button_deinit();
+
     if (s->lock != NULL) {
         SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
         if (guard.acquired == pdTRUE) {
@@ -591,14 +677,18 @@ esp_err_t sdf_services_stop_tasks(void) {
         }
     }
 
+    /* Push stop signal to enroll and admin tasks so they wake immediately */
+    sdf_enroll_task_wake();
+    sdf_admin_task_wake();
+
     /* Each task polls stop_requested (see sdf_match_task / sdf_enroll_task /
-     * sdf_admin_task / sdf_button_task) and exits on its own -
+     * sdf_admin_task) and exits on its own -
      * unsubscribing from the event router and self-deleting - instead of
      * being killed from outside via vTaskDelete(). Killing a task from
      * outside can leave s_state.lock permanently held if the victim
      * happened to be inside a critical section (or, for match/enroll, mid
      * the ~12s blocking fingerprint UART call) at the moment of deletion.
-     * Poll for all four to clear their handles, bounded generously enough
+     * Poll for all three to clear their handles, bounded generously enough
      * to cover that worst-case 12s UART timeout. */
     const int poll_interval_ms = 50;
     const int max_wait_ms = 13000;
@@ -611,8 +701,7 @@ esp_err_t sdf_services_stop_tasks(void) {
              * other s_state.lock user for the whole polling window. */
             SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
             all_stopped = (guard.acquired == pdTRUE) && s->match_task == NULL &&
-                          s->enroll_task == NULL && s->admin_task == NULL &&
-                          s->button_task == NULL;
+                          s->enroll_task == NULL && s->admin_task == NULL;
         }
         if (all_stopped) {
             break;
@@ -638,10 +727,6 @@ esp_err_t sdf_services_stop_tasks(void) {
         if (s->admin_task) {
             vTaskDelete(s->admin_task);
             s->admin_task = NULL;
-        }
-        if (s->button_task) {
-            vTaskDelete(s->button_task);
-            s->button_task = NULL;
         }
     }
 
@@ -760,11 +845,12 @@ sdf_drivers_config_t drivers_config = {
     }
   }
 
-  /* Button is now handled by sdf_button_task */
-
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
       pdTRUE) {
     s_state.initialized = true;
+    if (s_state.enroll_task != NULL) {
+      xTaskNotifyGive(s_state.enroll_task);
+    }
     xSemaphoreGive(s_state.lock);
   }
 
@@ -1026,6 +1112,7 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
     s_state.permission_change_result = ESP_ERR_TIMEOUT;
     s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION;
     s_state.pending_admin_action_start_us = esp_timer_get_time();
+    sdf_admin_task_wake();
   }
 
   led_pulse_blue();
@@ -1077,6 +1164,11 @@ esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action) 
     return ESP_ERR_INVALID_STATE;
   }
 
+  /* Consult the bootstrap bypass helper (passing remote origin) */
+  if (sdf_services_try_bootstrap_admin_action(action, SDF_SERVICES_ADMIN_ORIGIN_REMOTE)) {
+    return ESP_OK;
+  }
+
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired != pdTRUE) {
@@ -1096,22 +1188,8 @@ esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action) 
     s_state.pending_admin_action = action;
     s_state.pending_admin_action_start_us = esp_timer_get_time();
 
-    /* LED indication based on action type. This call path (a direct
-     * sdf_services_request_admin_action() call, used by WEB_REG_AUTH and
-     * NUKI_REPAIR) never emits SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST, so it
-     * doesn't go through sdf_admin_task's own copy of this switch - mirrored
-     * here rather than shared, consistent with sdf_button_cb's own separate
-     * copy for the button-triggered path. */
-    switch (action) {
-      case SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH:
-        led_pulse_white();
-        break;
-      case SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR:
-        led_pulse_cyan();
-        break;
-      default:
-        break;
-    }
+    sdf_services_pulse_pending_action_led(action);
+    sdf_admin_task_wake();
   }
 
   if (s_state.wake_sem != NULL) {

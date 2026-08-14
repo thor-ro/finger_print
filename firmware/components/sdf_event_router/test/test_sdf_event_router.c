@@ -90,3 +90,39 @@ void test_sdf_event_router_unsubscribe(void) {
     vTaskDelay(pdMS_TO_TICKS(50));
     TEST_ASSERT_EQUAL(0, s_test_event_count);
 }
+
+void test_sdf_event_router_emit_nonblocking_delivers(void) {
+    s_test_event_count = 0;
+    s_test_handle = NULL;
+
+    esp_err_t err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BUTTON_PRESS,
+                                               SDF_EVENT_ROUTER_PRIO_HIGH,
+                                               test_event_handler, NULL, &s_test_handle);
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+    TEST_ASSERT_NOT_NULL(s_test_handle);
+
+    sdf_event_router_event_t event = {
+        .type = SDF_EVENT_ROUTER_BUTTON_PRESS,
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+        .payload.button = {
+            .press_type = SDF_EVENT_ROUTER_BUTTON_PRESS_SINGLE,
+            .press_duration_ms = 0
+        }
+    };
+
+    err = sdf_event_router_emit_nonblocking(&event);
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+    TEST_ASSERT_EQUAL(1, s_test_event_count);
+    TEST_ASSERT_EQUAL(SDF_EVENT_ROUTER_BUTTON_PRESS, s_last_event.type);
+    TEST_ASSERT_EQUAL(SDF_EVENT_ROUTER_BUTTON_PRESS_SINGLE, s_last_event.payload.button.press_type);
+
+    err = sdf_event_router_unsubscribe(s_test_handle);
+    TEST_ASSERT_EQUAL(ESP_OK, err);
+    s_test_handle = NULL;
+}
+
+void test_sdf_event_router_emit_nonblocking_null_args(void) {
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_event_router_emit_nonblocking(NULL));
+}

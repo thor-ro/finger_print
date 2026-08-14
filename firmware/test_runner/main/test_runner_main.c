@@ -157,6 +157,19 @@ extern void test_ble_admin_action_should_not_resolve_for_other_actions(void);
 extern void test_setup_state_unclaimed_when_no_enrolled_users(void);
 extern void test_button_dispatch_ble_pairing_window_sets_pending_action(void);
 extern void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending(void);
+extern void test_pulse_pending_action_led_covers_all_actions(void);
+extern void test_request_admin_action_ble_pairing_window_sets_pending_action(void);
+extern void test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device(void);
+extern void test_bootstrap_bypass_clears_existing_pending_action_before_execution(void);
+extern void test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action(void);
+extern void test_button_dispatch_claimed_device_sets_pending_action(void);
+extern void test_button_single_click_resolves_to_enroll_on_unclaimed_device(void);
+extern void test_button_single_click_resolves_to_nuki_pair_on_claimed_incomplete_device(void);
+extern void test_button_single_click_resolves_to_enroll_on_claimed_complete_device(void);
+extern void test_button_dispatch_factory_reset_on_claimed_device_sets_pending_action(void);
+extern void test_button_press_dropped_under_backpressure_leaves_no_state(void);
+extern void test_button_init_deinit_stop_start_cycle(void);
+extern void test_task_wake_helpers_safe_when_idle(void);
 
 /* Event Router tests */
 extern void test_sdf_event_router_init_returns_ok(void);
@@ -164,6 +177,8 @@ extern void test_sdf_event_router_init_idempotent(void);
 extern void test_sdf_event_router_subscribe_and_emit(void);
 extern void test_sdf_event_router_subscribe_rejects_invalid_type(void);
 extern void test_sdf_event_router_unsubscribe(void);
+extern void test_sdf_event_router_emit_nonblocking_delivers(void);
+extern void test_sdf_event_router_emit_nonblocking_null_args(void);
 
 /* Tasks tests */
 extern void test_sdf_power_wakeup_reason_mapping(void);
@@ -171,6 +186,8 @@ extern void test_sdf_power_checkin_clamping(void);
 extern void test_sdf_power_battery_bounds(void);
 extern void test_sdf_power_calculate_checkin_interval_disabled_returns_base(void);
 extern void test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery(void);
+extern void test_sdf_power_compute_stay_awake_wait_matches_nearest_deadline(void);
+extern void test_sdf_power_compute_stay_awake_wait_clamps_to_cap_and_zero(void);
 
 /* Nuki crypto tests */
 extern void test_crypto_secretbox_round_trip(void);
@@ -457,6 +474,19 @@ void app_main(void) {
   RUN_TEST(test_setup_state_unclaimed_when_no_enrolled_users);
   RUN_TEST(test_button_dispatch_ble_pairing_window_sets_pending_action);
   RUN_TEST(test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending);
+  RUN_TEST(test_pulse_pending_action_led_covers_all_actions);
+  RUN_TEST(test_request_admin_action_ble_pairing_window_sets_pending_action);
+  RUN_TEST(test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device);
+  RUN_TEST(test_bootstrap_bypass_clears_existing_pending_action_before_execution);
+  RUN_TEST(test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action);
+  RUN_TEST(test_button_dispatch_claimed_device_sets_pending_action);
+  RUN_TEST(test_button_single_click_resolves_to_enroll_on_unclaimed_device);
+  RUN_TEST(test_button_single_click_resolves_to_nuki_pair_on_claimed_incomplete_device);
+  RUN_TEST(test_button_single_click_resolves_to_enroll_on_claimed_complete_device);
+  RUN_TEST(test_button_dispatch_factory_reset_on_claimed_device_sets_pending_action);
+  RUN_TEST(test_button_press_dropped_under_backpressure_leaves_no_state);
+  RUN_TEST(test_button_init_deinit_stop_start_cycle);
+  RUN_TEST(test_task_wake_helpers_safe_when_idle);
 
   /* Event Router tests */
   RUN_TEST(test_sdf_event_router_init_returns_ok);
@@ -464,6 +494,8 @@ void app_main(void) {
   RUN_TEST(test_sdf_event_router_subscribe_and_emit);
   RUN_TEST(test_sdf_event_router_subscribe_rejects_invalid_type);
   RUN_TEST(test_sdf_event_router_unsubscribe);
+  RUN_TEST(test_sdf_event_router_emit_nonblocking_delivers);
+  RUN_TEST(test_sdf_event_router_emit_nonblocking_null_args);
 
   /* Tasks tests */
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);
@@ -471,6 +503,8 @@ void app_main(void) {
   RUN_TEST(test_sdf_power_battery_bounds);
   RUN_TEST(test_sdf_power_calculate_checkin_interval_disabled_returns_base);
   RUN_TEST(test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery);
+  RUN_TEST(test_sdf_power_compute_stay_awake_wait_matches_nearest_deadline);
+  RUN_TEST(test_sdf_power_compute_stay_awake_wait_clamps_to_cap_and_zero);
 
   /* Nuki crypto tests */
   RUN_TEST(test_crypto_secretbox_round_trip);

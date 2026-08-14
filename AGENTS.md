@@ -49,7 +49,7 @@ Each component exposes public API in `include/` and internals in `src/`:
 - `sdf_drivers` — Hardware drivers (fingerprint UART, LED, battery, GPIO)
 - `sdf_protocol_ble` — BLE/Nuki protocol adaptor
 - `sdf_protocol_zigbee` — Zigbee Door Lock cluster adaptor (owns `sdf_zigbee_task`)
-- `sdf_services` — Core services (owns `sdf_match_task`, `sdf_enroll_task`, `sdf_admin_task`, `sdf_button_task`)
+- `sdf_services` — Core services (owns `sdf_match_task`, `sdf_enroll_task`, `sdf_admin_task`)
 - `sdf_state_machines` — Enrollment and device state machines
 - `sdf_power` — Power manager & sleep (owns `sdf_power_task`)
 - `sdf_platform` — ESP32-C6 HAL wrappers

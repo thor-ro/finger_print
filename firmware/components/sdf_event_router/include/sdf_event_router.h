@@ -125,8 +125,14 @@ typedef struct {
     bool authorized;
 } sdf_event_router_web_reg_auth_result_payload_t;
 
+typedef enum {
+    SDF_EVENT_ROUTER_BUTTON_PRESS_SINGLE = 1,
+    SDF_EVENT_ROUTER_BUTTON_PRESS_DOUBLE = 2,
+    SDF_EVENT_ROUTER_BUTTON_PRESS_LONG = 3,
+} sdf_event_router_button_press_type_t;
+
 typedef struct {
-    uint8_t press_type;
+    uint8_t press_type; /* sdf_event_router_button_press_type_t */
     uint32_t press_duration_ms;
 } sdf_event_router_button_payload_t;
 
@@ -177,5 +183,6 @@ esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type, sdf_event_rou
                                      sdf_event_router_cb cb, void *ctx, sdf_event_router_subscriber_t **handle);
 esp_err_t sdf_event_router_unsubscribe(sdf_event_router_subscriber_t *handle);
 esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event);
+esp_err_t sdf_event_router_emit_nonblocking(const sdf_event_router_event_t *event);
 
 #endif /* SDF_EVENT_ROUTER_H */

@@ -19,7 +19,8 @@
 #define SDF_ENROLL_TASK_NAME "sdf_enroll"
 #define SDF_ENROLL_TASK_STACK 4096
 #define SDF_ENROLL_TASK_PRIORITY 4
-#define SDF_ENROLL_POLL_INTERVAL_MS 100
+#define SDF_ENROLL_IDLE_WAIT_CAP_MS 1000u
+#define SDF_ENROLL_RETRY_INTERVAL_MS 200u
 
 static const char *TAG = "sdf_services_enroll";
 
@@ -29,10 +30,31 @@ typedef struct {
     sdf_event_router_subscriber_t *sub_power_wake;
     sdf_event_router_subscriber_t *sub_power_sleep;
     TaskHandle_t task_handle;
+    esp_timer_handle_t retry_timer;
     bool suspended;
 } sdf_enroll_task_state_t;
 
 static sdf_enroll_task_state_t s_enroll_state = {0};
+
+void sdf_enroll_task_wake(void) {
+    if (s_enroll_state.event_queue != NULL) {
+        sdf_event_router_event_t evt = {0};
+        xQueueSend(s_enroll_state.event_queue, &evt, 0);
+    }
+    if (s_enroll_state.task_handle != NULL) {
+        xTaskNotifyGive(s_enroll_state.task_handle);
+    }
+}
+
+static void sdf_enroll_retry_timer_cb(void *arg) {
+    (void)arg;
+    if (s_enroll_state.event_queue != NULL) {
+        sdf_event_router_event_t evt = {
+            .type = SDF_EVENT_ROUTER_ENROLLMENT_STEP_RESULT,
+        };
+        xQueueSend(s_enroll_state.event_queue, &evt, 0);
+    }
+}
 
 static void sdf_enroll_task_event_cb(void *ctx, const sdf_event_router_event_t *event) {
     sdf_enroll_task_state_t *state = (sdf_enroll_task_state_t *)ctx;
@@ -60,9 +82,20 @@ static void sdf_enroll_task_init_subscriptions(sdf_enroll_task_state_t *state) {
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
                                SDF_EVENT_ROUTER_PRIO_LOW,
                                sdf_enroll_task_event_cb, state, &state->sub_power_sleep);
+
+    esp_timer_create_args_t timer_args = {
+        .callback = sdf_enroll_retry_timer_cb,
+        .name = "enroll_retry",
+    };
+    esp_timer_create(&timer_args, &state->retry_timer);
 }
 
 static void sdf_enroll_task_deinit_subscriptions(sdf_enroll_task_state_t *state) {
+    if (state->retry_timer) {
+        esp_timer_stop(state->retry_timer);
+        esp_timer_delete(state->retry_timer);
+        state->retry_timer = NULL;
+    }
     if (state->sub_start) sdf_event_router_unsubscribe(state->sub_start);
     if (state->sub_power_wake) sdf_event_router_unsubscribe(state->sub_power_wake);
     if (state->sub_power_sleep) sdf_event_router_unsubscribe(state->sub_power_sleep);
@@ -135,10 +168,17 @@ void sdf_services_run_enrollment_step(void) {
             xSemaphoreGive(s->lock);
             ESP_LOGW(TAG, "Enrollment step retry %u", (unsigned)next.retry_count);
             led_enrollment_step_retry();
+            if (s_enroll_state.retry_timer) {
+                esp_timer_start_once(s_enroll_state.retry_timer,
+                                     (uint64_t)SDF_ENROLL_RETRY_INTERVAL_MS * 1000ULL);
+            }
             break;
 
         case SDF_ENROLL_ACT_COMPLETE: {
             xSemaphoreGive(s->lock);
+            if (s_enroll_state.retry_timer) {
+                esp_timer_stop(s_enroll_state.retry_timer);
+            }
 
             /* Newly enrolled user is now on the sensor; update the persisted
              * cache and write it to NVS before reporting success, so the
@@ -191,6 +231,9 @@ void sdf_services_run_enrollment_step(void) {
             uint8_t step = sm_snapshot.state;
             sdf_enrollment_result_t result = s->enrollment.result;
             xSemaphoreGive(s->lock);
+            if (s_enroll_state.retry_timer) {
+                esp_timer_stop(s_enroll_state.retry_timer);
+            }
             led_enrollment_failed();
             sdf_enroll_task_emit_failed(step, (int8_t)result);
             if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
@@ -202,6 +245,13 @@ void sdf_services_run_enrollment_step(void) {
         }
 
         case SDF_ENROLL_ACT_EXECUTE_STEP:
+            xSemaphoreGive(s->lock);
+            if (s_enroll_state.retry_timer) {
+                esp_timer_start_once(s_enroll_state.retry_timer,
+                                     (uint64_t)SDF_ENROLL_RETRY_INTERVAL_MS * 1000ULL);
+            }
+            break;
+
         case SDF_ENROLL_ACT_NONE:
         default:
             xSemaphoreGive(s->lock);
@@ -222,7 +272,7 @@ void sdf_enroll_task(void *arg) {
 
     /* Wait for initialization to complete */
     while (!sdf_services_is_ready()) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
 #ifndef CONFIG_IDF_TARGET_LINUX
         esp_task_wdt_reset();
 #endif
@@ -237,7 +287,8 @@ void sdf_enroll_task(void *arg) {
         }
 
         sdf_event_router_event_t event;
-        if (xQueueReceive(s_enroll_state.event_queue, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (xQueueReceive(s_enroll_state.event_queue, &event,
+                          pdMS_TO_TICKS(SDF_ENROLL_IDLE_WAIT_CAP_MS)) == pdTRUE) {
             switch (event.type) {
                 case SDF_EVENT_ROUTER_ENROLLMENT_START: {
                     ESP_LOGI(TAG, "Enrollment start: user_id=%u permission=%u",
@@ -253,6 +304,9 @@ void sdf_enroll_task(void *arg) {
                     }
 
                     sdf_services_start_pending_enrollment_if_any();
+                    if (!s_enroll_state.suspended) {
+                        sdf_services_run_enrollment_step();
+                    }
                     break;
                 }
 
@@ -266,19 +320,20 @@ void sdf_enroll_task(void *arg) {
                     s_enroll_state.suspended = true;
                     break;
 
+                case SDF_EVENT_ROUTER_ENROLLMENT_STEP_RESULT:
+                    if (!s_enroll_state.suspended) {
+                        sdf_services_run_enrollment_step();
+                    }
+                    break;
+
                 default:
                     break;
             }
         }
 
-        if (!s_enroll_state.suspended) {
 #ifndef CONFIG_IDF_TARGET_LINUX
-            esp_task_wdt_reset();
+        esp_task_wdt_reset();
 #endif
-            sdf_services_run_enrollment_step();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(SDF_ENROLL_POLL_INTERVAL_MS));
     }
 
     /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind

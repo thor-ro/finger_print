@@ -487,6 +487,171 @@ void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending
                      sdf_services_state()->pending_admin_action);
 }
 
+void test_pulse_pending_action_led_covers_all_actions(void) {
+  /* Exercising every enum variant ensures no unhandled case in the switch */
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_NONE);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_ENROLL);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_ZB_JOIN);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
+}
+
+void test_request_admin_action_ble_pairing_window_sets_pending_action(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state()->initialized = true;
+
+  TEST_ASSERT_EQUAL(
+      ESP_OK,
+      sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
+                    sdf_services_state()->pending_admin_action);
+}
+
+void test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state()->initialized = true;
+
+  /* Helper explicitly rejects remote origin on zero-user device */
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
+  TEST_ASSERT_FALSE(sdf_services_try_bootstrap_admin_action(
+      SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, SDF_SERVICES_ADMIN_ORIGIN_REMOTE));
+
+  /* sdf_services_request_admin_action() sets pending action rather than bypassing */
+  TEST_ASSERT_EQUAL(
+      ESP_OK,
+      sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
+                    sdf_services_state()->pending_admin_action);
+}
+
+void test_bootstrap_bypass_clears_existing_pending_action_before_execution(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state()->initialized = true;
+
+  /* Simulate a stale or pre-existing pending action */
+  sdf_services_state()->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET;
+  sdf_services_state()->pending_admin_action_start_us = 12345678LL;
+
+  /* On a 0-user device with local physical origin, bypass executes and clears pending state */
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
+  TEST_ASSERT_TRUE(sdf_services_try_bootstrap_admin_action(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL, SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL));
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+  TEST_ASSERT_EQUAL(0, sdf_services_state()->pending_admin_action_start_us);
+}
+
+static sdf_services_admin_action_t s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+static void *s_test_bootstrap_cb_ctx = NULL;
+
+static void test_bootstrap_action_cb(void *ctx, sdf_services_admin_action_t action) {
+  s_test_bootstrap_cb_ctx = ctx;
+  s_test_bootstrap_cb_action = action;
+}
+
+void test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_test_bootstrap_cb_ctx = NULL;
+  sdf_services_state()->config.admin_action_cb = test_bootstrap_action_cb;
+  sdf_services_state()->config.admin_action_ctx = (void *)0xABCD;
+
+  /* On a 0-user device, button dispatch for a non-ENROLL action (e.g. BLE_PAIRING_WINDOW or FACTORY_RESET)
+   * immediately invokes admin_action_cb and leaves no pending admin action set. */
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, s_test_bootstrap_cb_action);
+  TEST_ASSERT_EQUAL_PTR((void *)0xABCD, s_test_bootstrap_cb_ctx);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+
+  /* Also test FACTORY_RESET */
+  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_test_bootstrap_cb_ctx = NULL;
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET, s_test_bootstrap_cb_action);
+  TEST_ASSERT_EQUAL_PTR((void *)0xABCD, s_test_bootstrap_cb_ctx);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+}
+
+void test_button_dispatch_claimed_device_sets_pending_action(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
+
+  /* Claimed device: bypass is rejected for local physical origin */
+  TEST_ASSERT_FALSE(sdf_services_try_bootstrap_admin_action(
+      SDF_SERVICES_ADMIN_ACTION_ENROLL, SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL));
+
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_ENROLL);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_ENROLL,
+                    sdf_services_state()->pending_admin_action);
+}
+
+void test_button_single_click_resolves_to_enroll_on_unclaimed_device(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_ENROLL, sdf_button_resolve_single_click_action());
+}
+
+void test_button_single_click_resolves_to_nuki_pair_on_claimed_incomplete_device(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
+  sdf_storage_nuki_clear();
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE, sdf_services_get_setup_state());
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR, sdf_button_resolve_single_click_action());
+}
+
+void test_button_single_click_resolves_to_enroll_on_claimed_complete_device(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
+  uint8_t key[32] = {0x42};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(12345, key));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE, sdf_services_get_setup_state());
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_ENROLL, sdf_button_resolve_single_click_action());
+  sdf_storage_nuki_clear();
+}
+
+void test_button_dispatch_factory_reset_on_claimed_device_sets_pending_action(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
+
+  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET,
+                     sdf_services_state()->pending_admin_action);
+}
+
+void test_button_press_dropped_under_backpressure_leaves_no_state(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state()->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  sdf_services_state()->pending_admin_action_start_us = 0;
+
+  /* If a button press is dropped (e.g. emit fails / queue full), no pending
+   * action is set, no LED is pulsed, and nothing executes. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+  TEST_ASSERT_EQUAL(0, sdf_services_state()->pending_admin_action_start_us);
+}
+
 /* Enrolled-user cache: boot-race regression + dispatch-gate coverage
  * (cache-enrolled-user-state). */
 
@@ -660,4 +825,18 @@ void test_persist_enrolled_users_locked_fails_after_exhausting_retries(void) {
    * (not persistent) failure doesn't cause a false failure report. */
   test_sdf_storage_set_enrolled_users_save_fail_count(2);
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_persist_enrolled_users_locked());
+}
+
+void test_button_init_deinit_stop_start_cycle(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_button_init());
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_button_deinit());
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_button_init());
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_button_deinit());
+}
+
+void test_task_wake_helpers_safe_when_idle(void) {
+  /* Task wake helpers can be called anytime (e.g. during stop_tasks or admin action request) */
+  sdf_enroll_task_wake();
+  sdf_admin_task_wake();
 }

@@ -212,3 +212,22 @@ esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event)
 
     return ESP_OK;
 }
+
+esp_err_t sdf_event_router_emit_nonblocking(const sdf_event_router_event_t *event)
+{
+    if (event == NULL || !s_state.initialized) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (event->priority == SDF_EVENT_ROUTER_PRIO_CRITICAL) {
+        sdf_event_router_dispatch_sync(event);
+    } else {
+        BaseType_t ok = xQueueSend(s_state.queue, event, 0);
+        if (ok != pdTRUE) {
+            ESP_LOGW(TAG, "Event queue full (non-blocking), dropping event type=%d", (int)event->type);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    return ESP_OK;
+}

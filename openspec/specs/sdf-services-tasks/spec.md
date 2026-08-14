@@ -1,8 +1,8 @@
 # Spec: sdf_services Task Architecture
 
-## Overview
+## Purpose
 
-Split the monolithic `sdf_services_task` into 4 focused FreeRTOS tasks communicating via the event router. Each task handles one responsibility with appropriate priority.
+Split the monolithic `sdf_services_task` into focused FreeRTOS tasks communicating via the event router. Each task handles one responsibility with appropriate priority.
 
 ## Event Types (Extended sdf_common.h)
 
@@ -388,7 +388,7 @@ Total stack: ~15KB (vs 8KB single task)
 - [ ] Memory usage < 20KB total task stacks
 - [ ] Power management: tasks suspend/resume on events
 
-## User Capacity and Buffer Optimization
+## Requirements
 
 ### Requirement: User Capacity
 The fingerprint sensor SHALL support User IDs from `1` to `10`. When a new user is enrolled locally, the firmware SHALL automatically assign the lowest available User ID. If all User IDs are occupied, the LED SHALL flash **red** and enrollment SHALL be rejected.
@@ -607,9 +607,208 @@ The button task SHALL NOT bind any gesture to `SDF_SERVICES_ADMIN_ACTION_ENROLL_
 - **AND** `pending_admin_action` state is unaffected
 
 ### Requirement: Simplified Pre-Enrollment Bootstrap Branch
-On an unclaimed device (zero enrolled users), the button task's immediate-execution bootstrap path SHALL treat only `SDF_SERVICES_ADMIN_ACTION_ENROLL` as eligible for unauthenticated immediate execution. `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` SHALL NOT reach this path, since it is no longer bound to any button gesture.
+On an unclaimed device (zero enrolled users), the admin-action authorization path's immediate-execution bootstrap branch SHALL route `SDF_SERVICES_ADMIN_ACTION_ENROLL` directly into local enrollment, and SHALL route every other button-reachable action into the configured admin-action execution callback. `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` SHALL NOT reach this path at all, since it is no longer bound to any button gesture.
 
 #### Scenario: Unclaimed device, single-click still enrolls immediately
 - **WHEN** a single-click occurs
 - **AND** the device has zero enrolled users
 - **THEN** the system starts enrollment immediately, without requiring admin authorization
+
+#### Scenario: Unclaimed device, a non-enroll button action executes immediately
+- **WHEN** a button gesture bound to an admin action other than `SDF_SERVICES_ADMIN_ACTION_ENROLL` occurs
+- **AND** the device has zero enrolled users
+- **THEN** the action is executed immediately via the admin-action execution callback, without admin-fingerprint authorization
+- **AND** no pending admin action is left set
+
+#### Scenario: Admin-only action cannot reach the bootstrap branch
+- **WHEN** the device has zero enrolled users
+- **THEN** `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` is not reachable by any button gesture and therefore never enters the bootstrap branch
+
+### Requirement: Unauthenticated Bootstrap Bypass Is Restricted To Local Physical Origin
+The zero-enrolled-users bootstrap bypass — executing an admin action without admin-fingerprint authorization because no admin exists to give it — SHALL be granted only to requests originating from a physical interaction with the device. A remotely-originated admin action request SHALL NOT be granted the bypass, regardless of how many users are enrolled.
+
+#### Scenario: Local physical request on an unclaimed device
+- **WHEN** an admin action is requested by physical interaction with the device
+- **AND** the device has zero enrolled users
+- **THEN** the action executes immediately without admin-fingerprint authorization
+
+#### Scenario: Remote request on an unclaimed device
+- **WHEN** an admin action is requested remotely
+- **AND** the device has zero enrolled users
+- **THEN** the request SHALL NOT execute without authorization
+- **AND** it follows the ordinary admin-fingerprint pending-action flow, which cannot be satisfied while no admin exists
+
+#### Scenario: Local physical request on a claimed device
+- **WHEN** an admin action is requested by physical interaction with the device
+- **AND** the device has at least one enrolled user
+- **THEN** the bypass does not apply and the request follows the ordinary admin-fingerprint pending-action flow
+
+### Requirement: Bootstrap Bypass Decision Is Single-Sited
+The decision of whether a given admin action request may execute without admin-fingerprint authorization SHALL be made in one place, consulted by every path that can set or execute an admin action, rather than being reimplemented per request path.
+
+#### Scenario: A new request path is introduced
+- **WHEN** a new path for requesting an admin action is added
+- **THEN** it obtains its authorization decision from the same single decision point as every existing path
+- **AND** it cannot grant the bypass without passing an explicit request origin to that decision point
+
+#### Scenario: Bypass is taken
+- **WHEN** the single decision point grants the bootstrap bypass
+- **THEN** any previously pending admin action state is cleared before the action executes, so the bypassed action does not leave a stale pending action behind
+
+### Requirement: Pending Admin Action LED Indication Is Path-Independent
+When an admin action becomes pending (awaiting admin-fingerprint authorization), the system SHALL produce the LED indication assigned to that action, and that indication SHALL be identical regardless of which request path caused the action to become pending (physical button gesture, event-router admin-action request, or direct authenticated request).
+
+#### Scenario: Same action, different origin, same indication
+- **WHEN** a given admin action becomes pending via one request path
+- **AND** the same admin action later becomes pending via a different request path
+- **THEN** the LED indication is the same in both cases
+
+#### Scenario: BLE Companion pairing window becomes pending
+- **WHEN** `SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW` becomes the pending admin action
+- **THEN** the system produces its assigned LED indication, on every path that can set it pending
+
+#### Scenario: Action with no assigned indication
+- **WHEN** an admin action that has no assigned LED indication becomes pending
+- **THEN** the system produces no LED indication for it, and does not fall back to another action's indication
+
+### Requirement: Pending Admin Action LED Mapping Is Complete
+The system SHALL define an LED indication for every admin action that can be set pending, so that the device never enters an awaiting-admin-fingerprint state without user-visible feedback that it is waiting.
+
+#### Scenario: Every settable pending action has feedback
+- **WHEN** any admin action is set as `pending_admin_action`
+- **THEN** the user receives an LED indication that the device is awaiting admin authorization
+
+### Requirement: Button Handling Requires No Dedicated Task
+Button press detection, classification, and dispatch SHALL be driven entirely by the button driver's own scan mechanism and its registered callbacks. The system SHALL NOT run a dedicated FreeRTOS task for button handling, and SHALL NOT consume a task stack, event queue, or event-router subscription for that purpose.
+
+#### Scenario: No periodic button task wakeup
+- **WHEN** the system is idle with no button press in progress
+- **THEN** no button-related task wakes periodically, because no button task exists
+
+#### Scenario: Press still detected and dispatched
+- **WHEN** the button is physically pressed
+- **THEN** the press is classified (single/double/long) and the corresponding action is dispatched, with the same resulting behavior as before the task was removed
+
+#### Scenario: Button lifecycle follows service start/stop
+- **WHEN** `sdf_services_start_tasks()` succeeds and later `sdf_services_stop_tasks()` is called
+- **THEN** button handling is initialized on start and torn down on stop
+- **AND** a subsequent start reinitializes button handling, so a stop/start cycle leaves the button functional
+
+### Requirement: Enrollment Button Scan Quiesces When Idle
+The enrollment button's GPIO scan SHALL stop running on a periodic timer once no press is in progress, and SHALL resume automatically on the next GPIO interrupt for that button, rather than scanning continuously regardless of press state.
+
+#### Scenario: No press in progress
+- **WHEN** the enrollment button has not been pressed and no debounce/press sequence is in progress
+- **THEN** periodic scanning stops until the next physical press
+
+#### Scenario: Press interrupts idle scanning
+- **WHEN** the button is physically pressed while scanning is stopped
+- **THEN** scanning resumes and the press is detected and classified normally (single/double/long-press)
+
+### Requirement: Idle Service Task Loops Use Bounded Blocking Waits
+When they have no work pending and no deadline sooner than their wait cap, `sdf_enroll_task` and `sdf_admin_task` SHALL block waiting for incoming events rather than run a fixed-interval poll, waking only as often as required to service any task watchdog registration they hold.
+
+#### Scenario: No enrollment activity pending
+- **WHEN** `sdf_enrollment_sm_is_active()` is false and no relevant event has arrived
+- **THEN** `sdf_enroll_task` remains blocked, waking at most at its watchdog-safe cadence rather than on a fixed short poll interval
+
+#### Scenario: No admin action pending
+- **WHEN** no admin action is pending and no relevant event has arrived
+- **THEN** `sdf_admin_task` remains blocked, waking at most at its wait cap rather than on a fixed short poll interval
+
+#### Scenario: Idle tasks do not cap the automatic light-sleep window
+- **WHEN** the system is idle with no enrollment active and no admin action pending
+- **THEN** no service task in this capability wakes on a sub-second fixed interval
+
+### Requirement: Pending Admin Action Timeout Is Deadline-Driven
+`sdf_admin_task` SHALL detect expiry of the pending-admin-action timeout by waiting until that timeout's deadline, rather than by re-checking it on a fixed short interval. The timeout duration itself SHALL be unchanged; only the granularity with which expiry is noticed may loosen, bounded by the task's wait cap.
+
+#### Scenario: An admin action is pending
+- **WHEN** an admin action is pending
+- **THEN** `sdf_admin_task`'s wait targets that action's expiry deadline, clamped to its wait cap
+
+#### Scenario: Pending action expires
+- **WHEN** the pending-admin-action timeout elapses
+- **THEN** the action is cleared, the timeout indication is produced, and the action-complete notification is emitted, as before this change
+
+#### Scenario: Pending action is authorized before expiry
+- **WHEN** a pending action is authorized before its deadline
+- **THEN** no timeout occurs and the task returns to its idle blocking wait
+
+### Requirement: Setting A Pending Admin Action Wakes The Admin Task
+Because a pending admin action can be set by callers that publish no event, setting `pending_admin_action` SHALL cause `sdf_admin_task` to re-evaluate its wait, so that the action's timeout countdown begins at the deadline it was actually set for rather than at the task's next scheduled wake.
+
+#### Scenario: Pending action set by a non-publishing caller
+- **WHEN** a pending admin action is set by a caller that emits no event
+- **THEN** `sdf_admin_task` wakes and recomputes its wait against the new deadline
+
+#### Scenario: Pending action set while the task is in a long idle wait
+- **WHEN** a pending admin action is set while `sdf_admin_task` is blocked on its full wait cap
+- **THEN** the task does not wait out the remaining cap before beginning to track the new deadline
+
+### Requirement: Active Enrollment Retries On A State-Driven Cadence
+While an enrollment is active, `sdf_enroll_task` SHALL retry the current step at a cadence driven by that step's own retry policy, rather than by an unconditional fixed-interval poll that also runs while idle.
+
+#### Scenario: Step requires a retry
+- **WHEN** the enrollment state machine reports a retryable step result
+- **THEN** the next attempt for that step occurs on the step's own retry cadence, not on the idle-loop's poll interval
+
+#### Scenario: Enrollment becomes idle again
+- **WHEN** an enrollment completes or fails
+- **THEN** `sdf_enroll_task` returns to the bounded blocking wait behavior of an idle task
+
+### Requirement: Shutdown Signal Is Pushed, Not Polled
+`sdf_services_stop_tasks()` SHALL deliver the stop request to every task whose loop wait was lengthened by this change — `sdf_enroll_task` and `sdf_admin_task` — in a way that wakes the task immediately, rather than requiring it to observe `stop_requested` only at its next periodic poll.
+
+#### Scenario: Stop requested while the enroll task is idle and blocked
+- **WHEN** `sdf_services_stop_tasks()` is called while `sdf_enroll_task` is blocked waiting for events
+- **THEN** the task wakes immediately, unwinds, and clears its task handle without waiting for a periodic timeout to elapse
+
+#### Scenario: Stop requested while the admin task is idle and blocked
+- **WHEN** `sdf_services_stop_tasks()` is called while `sdf_admin_task` is blocked waiting for events
+- **THEN** the task wakes immediately, unwinds, and clears its task handle without waiting for a periodic timeout to elapse
+
+#### Scenario: Stop signal is lost
+- **WHEN** the pushed stop signal cannot be delivered to a task
+- **THEN** the task still observes `stop_requested` at its next wait-cap expiry, so shutdown completes within the existing overall stop budget
+
+### Requirement: Button Press Detection Performs Only Bounded Non-Blocking Work
+The code invoked directly by the button driver's press-detection mechanism SHALL perform only bounded, non-blocking work. It SHALL NOT acquire a contended lock, SHALL NOT perform persistent-storage reads or writes, SHALL NOT perform peripheral I/O, and SHALL NOT execute an admin action.
+
+#### Scenario: Single-click detected
+- **WHEN** a single-click is detected
+- **THEN** the press-detection path records the gesture and returns without reading persisted state to decide what the gesture means
+
+#### Scenario: Long-press triggers a factory reset
+- **WHEN** a long-press bound to a factory reset is detected on a device where that action executes immediately
+- **THEN** the erase, fingerprint-template deletion, and reboot sequence does not run in the press-detection path
+- **AND** the press-detection path returns promptly so other periodic driver work is not delayed
+
+#### Scenario: Services lock is held by another task
+- **WHEN** a button press is detected while another task holds the services lock
+- **THEN** the press-detection path does not block waiting for that lock
+
+### Requirement: Button Gestures Are Delivered As Events
+A detected button gesture SHALL be published as an event describing the gesture, and SHALL be consumed by a task that performs the resolution, authorization, and execution associated with it. The published event SHALL identify the gesture, not a pre-resolved admin action.
+
+#### Scenario: Gesture published and consumed
+- **WHEN** a bound button gesture is detected
+- **THEN** an event identifying that gesture is published
+- **AND** a consuming task resolves it to an admin action and applies the existing authorization flow
+
+#### Scenario: Resolution depends on persisted state
+- **WHEN** the action a gesture maps to depends on persisted device state
+- **THEN** that persisted state is read by the consuming task, not by the press-detection path
+
+### Requirement: Button Press Publication Drops Under Backpressure
+Publishing a button gesture event SHALL NOT block the press-detection path. If the event cannot be accepted for delivery immediately, the press SHALL be dropped and the drop recorded, rather than the publisher waiting for capacity.
+
+#### Scenario: Event delivery capacity is exhausted
+- **WHEN** a button gesture is detected and the event delivery mechanism cannot accept the event immediately
+- **THEN** the press is dropped without the press-detection path waiting
+- **AND** the drop is recorded
+
+#### Scenario: Dropped press leaves no partial state
+- **WHEN** a button press is dropped due to backpressure
+- **THEN** no admin action is set pending, no LED indication is produced, and no action is executed
+- **AND** a subsequent press is handled normally once capacity is available

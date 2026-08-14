@@ -37,6 +37,7 @@
 #define SDF_POWER_LOCK_WAIT_MS 250u
 #define SDF_POWER_CHECKIN_INTERVAL_MIN_MS 1000u
 #define SDF_POWER_CHECKIN_INTERVAL_MAX_MS 600000u
+#define SDF_POWER_IDLE_WAIT_CAP_MS 1000u
 
 static const char *TAG = "sdf_power";
 
@@ -117,12 +118,7 @@ static void sdf_power_push_battery_percent(uint8_t battery_percent) {
   sdf_event_router_emit(&evt);
 }
 
-static bool sdf_power_busy_now(const sdf_power_manager_config_t *config) {
-  if (config == NULL || config->busy_cb == NULL) {
-    return false;
-  }
-  return config->busy_cb(config->busy_ctx);
-}
+
 
 static void sdf_power_notify_wakeup(const sdf_power_manager_config_t *config,
                                     sdf_power_wake_reason_t reason) {
@@ -141,13 +137,7 @@ static void sdf_power_notify_wakeup(const sdf_power_manager_config_t *config,
   sdf_event_router_emit(&evt);
 }
 
-static esp_err_t sdf_power_configure_fingerprint_wakeup(gpio_num_t wake_gpio) {
-  if (!sdf_power_gpio_valid(wake_gpio)) {
-    return ESP_OK;
-  }
 
-  return sdf_platform_sleep_enable_gpio_wakeup_light(wake_gpio, 1);
-}
 
 static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *config) {
   if (config == NULL || !config->enable_light_sleep) {
@@ -213,16 +203,39 @@ static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *c
   return sleep_err;
 }
 
-static void sdf_power_sleep_once(const sdf_power_manager_config_t *config) {
-  if (config == NULL || !config->enable_light_sleep) {
-    return;
-  }
 
-  sdf_power_enter_light_sleep(config);
+
+static uint32_t sdf_power_compute_stay_awake_wait_ms(int64_t now_us,
+                                                     int64_t last_activity_us,
+                                                     uint32_t idle_before_sleep_ms,
+                                                     int64_t wake_guard_until_us,
+                                                     int64_t next_battery_report_us,
+                                                     uint32_t wait_cap_ms) {
+  int64_t idle_deadline_us = last_activity_us + ((int64_t)idle_before_sleep_ms * 1000LL);
+  int64_t idle_rem_ms = (idle_deadline_us > now_us) ? (idle_deadline_us - now_us) / 1000LL : 0;
+  int64_t guard_rem_ms = (wake_guard_until_us > now_us) ? (wake_guard_until_us - now_us) / 1000LL : 0;
+  int64_t batt_rem_ms = (next_battery_report_us > now_us) ? (next_battery_report_us - now_us) / 1000LL : 0;
+
+  int64_t wait_ms = (int64_t)wait_cap_ms;
+  if (idle_rem_ms < wait_ms) {
+    wait_ms = idle_rem_ms;
+  }
+  if (guard_rem_ms < wait_ms) {
+    wait_ms = guard_rem_ms;
+  }
+  if (batt_rem_ms < wait_ms) {
+    wait_ms = batt_rem_ms;
+  }
+  if (wait_ms < 0) {
+    wait_ms = 0;
+  }
+  return (uint32_t)wait_ms;
 }
 
 static void sdf_power_task(void *arg) {
   (void)arg;
+
+  s_state.task = xTaskGetCurrentTaskHandle();
 
 #ifndef CONFIG_IDF_TARGET_LINUX
   esp_task_wdt_add(NULL);
@@ -333,7 +346,13 @@ static void sdf_power_task(void *arg) {
       sdf_platform_power_enter_deep();
     }
 
-    vTaskDelay(pdMS_TO_TICKS(config_snapshot.loop_interval_ms));
+    if (decision == SDF_POWER_POLICY_DECISION_STAY_AWAKE) {
+      uint32_t wait_ms = sdf_power_compute_stay_awake_wait_ms(
+          now_us, sdf_power_policy_get_last_activity_us(),
+          config_snapshot.idle_before_sleep_ms, wake_guard_until_us,
+          next_battery_report_us, SDF_POWER_IDLE_WAIT_CAP_MS);
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(wait_ms));
+    }
   }
 }
 
@@ -493,6 +512,10 @@ void sdf_power_mark_activity(void) {
    * sdf_power_policy_get_last_activity_us()) actually observes real
    * activity events instead of the call being a no-op. */
   sdf_power_policy_mark_activity();
+
+  if (s_state.task != NULL) {
+    xTaskNotifyGive(s_state.task);
+  }
 }
 
 esp_err_t sdf_power_set_checkin_interval_ms(uint32_t checkin_interval_ms) {
@@ -726,5 +749,18 @@ void test_sdf_power_set_base_checkin_interval_ms(uint32_t interval_ms) {
  * full power manager. */
 void test_sdf_power_set_battery_percent_raw(uint8_t battery_percent) {
   s_state.battery_percent = battery_percent;
+}
+
+uint32_t test_sdf_power_compute_stay_awake_wait_ms(int64_t now_us,
+                                                   int64_t last_activity_us,
+                                                   uint32_t idle_before_sleep_ms,
+                                                   int64_t wake_guard_until_us,
+                                                   int64_t next_battery_report_us,
+                                                   uint32_t wait_cap_ms) {
+  return sdf_power_compute_stay_awake_wait_ms(now_us, last_activity_us,
+                                              idle_before_sleep_ms,
+                                              wake_guard_until_us,
+                                              next_battery_report_us,
+                                              wait_cap_ms);
 }
 #endif

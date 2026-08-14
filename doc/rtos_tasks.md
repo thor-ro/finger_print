@@ -10,20 +10,19 @@
 
 | Task | Priority | Stack | Core | Trigger | Comm | Owner |
 |------|----------|-------|------|---------|------|-------|
-| sdf_power | 4 (NORMAL) | 4 KB | 0 | Timer (250ms) | Events | sdf_power |
+| sdf_power | 4 (NORMAL) | 4 KB | 0 | Deadline-computed (≤1s cap) + Activity Wake | Events + Direct Call | sdf_power |
 | sdf_zigbee | 5 (HIGH) | 8 KB | 0 | ESP-ZB queue | Callbacks + Events | sdf_protocol_zigbee |
 | sdf_match | 5 (HIGH) | 6 KB | 0 | Timer (400ms) | Events | sdf_services |
-| sdf_enroll | 4 (NORMAL) | 4 KB | 0 | Event-driven | Events | sdf_services |
-| sdf_admin | 5 (HIGH) | 4 KB | 0 | Event-driven | Events | sdf_services |
-| sdf_button | 4 (NORMAL) | 3 KB | 0 | GPIO ISR | Events | sdf_services |
+| sdf_enroll | 4 (NORMAL) | 4 KB | 0 | Event-driven (≤1s cap idle, 200ms retry timer active) | Events | sdf_services |
+| sdf_admin | 5 (HIGH) | 4 KB | 0 | Deadline-computed (≤1s cap) + Event-driven | Events | sdf_services |
 | sdf_ota (future) | 3 (LOW) | 8 KB | 0 | Event-driven | Events | sdf_ota |
 
-**Total Stack RAM:** ~37 KB + overhead
+**Total Stack RAM:** ~34 KB + overhead
 
 **Priority Levels (FreeRTOS 0-6):**
 - CRITICAL = 6 (reserved for future immediate-response)
 - HIGH = 5 (lock actions, Zigbee commands, admin auth)
-- NORMAL = 4 (power mgmt, enrollment, button)
+- NORMAL = 4 (power mgmt, enrollment)
 - LOW = 3 (OTA, telemetry)
 
 ---
@@ -32,12 +31,12 @@
 
 ### 2.1 sdf_power_task
 
-**File:** `firmware/components/sdf_power/src/sdf_power.c:178`  
+**File:** `firmware/components/sdf_power/src/sdf_power.c`  
 **Entry:** `sdf_power_task()`  
 **Priority:** 4 (NORMAL)  
 **Stack:** 4096 bytes  
 **Core:** 0  
-**Loop Interval:** 250ms (config: `CONFIG_SDF_POWER_LOOP_INTERVAL_MS`)
+**Loop Interval:** Deadline-computed (min of idle/wake-guard/battery deadlines, capped at 1s; activity notification wakes early)
 
 **Responsibilities:**
 - Sleep/wake decisions based on activity, battery, wake guards
@@ -177,11 +176,11 @@ void sdf_protocol_zigbee_set_command_handler(sdf_zigbee_command_handler_t handle
 
 ### 2.4 sdf_enroll_task
 
-**Entry:** `sdf_enroll_task()` (new — from `refactor-services-task`)  
+**Entry:** `sdf_enroll_task()` (from `refactor-services-task`, quiesced by `quiesce-poll-loops-light-sleep`)  
 **Priority:** 4 (NORMAL)  
 **Stack:** 4096 bytes  
 **Core:** 0  
-**Trigger:** Event-driven (enrollment start + step results)
+**Trigger:** Event-driven (bounded 1s cap when idle; 200ms `esp_timer` retry timer when active)
 
 **Responsibilities:**
 - Execute enrollment steps via `fp_enroll_step()`
@@ -222,11 +221,11 @@ void sdf_protocol_zigbee_set_command_handler(sdf_zigbee_command_handler_t handle
 
 ### 2.5 sdf_admin_task
 
-**Entry:** `sdf_admin_task()` (new — from `refactor-services-task`)  
+**Entry:** `sdf_admin_task()` (from `refactor-services-task`, quiesced by `quiesce-poll-loops-light-sleep`)  
 **Priority:** 5 (HIGH) — must preempt match for admin actions  
 **Stack:** 4096 bytes  
 **Core:** 0  
-**Trigger:** Event-driven (admin request + biometric match)
+**Trigger:** Deadline-computed wait (targets 10s pending-action timeout, capped at 1s; event/push wakes early)
 
 **Responsibilities:**
 - Wait for admin fingerprint match (`permission == 3`)
@@ -262,49 +261,17 @@ void sdf_protocol_zigbee_set_command_handler(sdf_zigbee_command_handler_t handle
 | Auth timeout | 10s | `CONFIG_SDF_SVC_ADMIN_TIMEOUT_MS` |
 | Stack size | 4096 | `CONFIG_SDF_SVC_ADMIN_TASK_STACK` |
 
-**Watchdog:** Task watchdog timeout: 15s (> auth timeout)
+**Watchdog:** None (task is not watchdog-registered; 1s wait cap ensures prompt shutdown/timeout evaluation)
 
 ---
 
-### 2.6 sdf_button_task
+### 2.6 Button Handling (Taskless)
 
-**Entry:** `sdf_button_task()` (new — from `refactor-services-task`)  
-**Priority:** 4 (NORMAL)  
-**Stack:** 3072 bytes  
-**Core:** 0  
-**Trigger:** GPIO ISR (GPIO 14) + software timer (debounce)
-
-**Responsibilities:**
-- GPIO ISR for enrollment button (GPIO 14, active low)
-- Debounce (50ms config: `CONFIG_SDF_SVC_BUTTON_DEBOUNCE_MS`)
-- Multi-press detection (single/double/triple/long)
-- Map to admin actions: ENROLL, NUKI_PAIR, ZB_JOIN, FACTORY_RESET, PERM_CHANGE
-- Emit `SDF_EVT_ADMIN_ACTION_REQUEST` with action type
-
-**Events Consumed:** None (ISR-driven)
-
-**Events Emitted:**
-- `SDF_EVT_ADMIN_ACTION_REQUEST` — action type
-- `SDF_EVT_BUTTON_PRESS` — press type (single/double/triple/long)
-
-**Press Mapping:**
-| Press | Action | Description |
-|-------|--------|-------------|
-| Single | ENROLL | Start enrollment |
-| Double | NUKI_PAIR | Initiate Nuki pairing |
-| Triple | ZB_JOIN | Permit Zigbee join |
-| Long (≥1s) | FACTORY_RESET | Factory reset device |
-| Quad | PERM_CHANGE | Change user permission |
-
-**Configuration:**
-| Parameter | Default | Config Key |
-|-----------|---------|------------|
-| Debounce | 50ms | `CONFIG_SDF_SVC_BUTTON_DEBOUNCE_MS` |
-| Long press threshold | 1000ms | `CONFIG_SDF_SVC_BUTTON_LONG_PRESS_MS` |
-| Multi-press window | 500ms | `CONFIG_SDF_SVC_BUTTON_MULTI_WINDOW_MS` |
-| Stack size | 3072 | `CONFIG_SDF_SVC_BUTTON_TASK_STACK` |
-
-**Watchdog:** Task watchdog timeout: 5s
+Button handling is **taskless** as of `quiesce-poll-loops-light-sleep`:
+- Enrollment button is scanned by `iot_button`'s internal scan mechanism with `enable_power_save = true` (quiesces when idle).
+- Gestures (single-click, double-click, long-press-8s) emit `SDF_EVENT_ROUTER_BUTTON_PRESS` non-blocking to `sdf_admin_task` (per `dispatch-admin-actions-off-esp-timer`).
+- Initialized via `sdf_button_init()` and torn down via `sdf_button_deinit()` inside `sdf_services_start_tasks()` / `sdf_services_stop_tasks()`.
+- Consumes 0 KB task stack, 0 FreeRTOS tasks, and 0 task watchdog entries.
 
 ---
 
@@ -449,18 +416,16 @@ typedef enum {
 | sdf_match | 6 KB | 1 KB | 1.5 KB |
 | sdf_enroll | 4 KB | 512 B | 1 KB |
 | sdf_admin | 4 KB | 512 B | 1 KB |
-| sdf_button | 3 KB | 384 B | 768 B |
 
 ### 5.2 Watchdog Assignments
 
 | Task | Timeout | Type |
 |------|---------|------|
-| sdf_power | 5s | Task WDT (2× loop) |
+| sdf_power | 5s | Task WDT |
 | sdf_zigbee | 10s | Task WDT |
 | sdf_match | 2s | Task WDT (5× poll) |
 | sdf_enroll | 30s | Task WDT |
-| sdf_admin | 15s | Task WDT |
-| sdf_button | 5s | Task WDT |
+| sdf_admin | None | Not registered (1s wait cap) |
 | sdf_ota | 60s | Task WDT |
 
 **Bootloader WDT:** 90s (enabled via `CONFIG_BOOTLOADER_WDT_ENABLE`)

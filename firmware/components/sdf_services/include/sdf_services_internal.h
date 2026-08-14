@@ -25,7 +25,6 @@ typedef struct {
   TaskHandle_t match_task;
   TaskHandle_t enroll_task;
   TaskHandle_t admin_task;
-  TaskHandle_t button_task;
   /* Set by sdf_services_stop_tasks() and polled (under s_state.lock) by
    * each task's own main loop so tasks exit and clean up (unsubscribe from
    * the event router, self-delete) cooperatively instead of being killed
@@ -67,10 +66,6 @@ typedef struct {
   uint8_t request_web_password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
   uint8_t request_web_permission;
   int64_t web_reg_auth_start_us;
-
-#ifndef CONFIG_IDF_TARGET_LINUX
-  button_handle_t btn_handle;
-#endif
 } sdf_services_state_t;
 
 sdf_services_state_t *sdf_services_state(void);
@@ -79,6 +74,11 @@ const char *sdf_services_fingerprint_result_name(
 void sdf_services_run_enrollment_step(void);
 void sdf_services_start_pending_enrollment_if_any(void);
 
+typedef enum {
+  SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL = 0,
+  SDF_SERVICES_ADMIN_ORIGIN_REMOTE,
+} sdf_services_admin_origin_t;
+
 /* Shared internal functions (moved from static) */
 esp_err_t sdf_services_fingerprint_result_to_err(sdf_fingerprint_op_result_t result);
 bool sdf_services_try_claim_admin_action(const sdf_fingerprint_match_t *match);
@@ -86,16 +86,25 @@ void sdf_services_complete_permission_change(esp_err_t result);
 void sdf_services_execute_admin_action(sdf_services_admin_action_t action,
                                        sdf_services_admin_action_cb action_cb,
                                        void *action_ctx);
+void sdf_services_pulse_pending_action_led(sdf_services_admin_action_t action);
+bool sdf_services_try_bootstrap_admin_action(sdf_services_admin_action_t action,
+                                             sdf_services_admin_origin_t origin);
 
-/* New task declarations */
+/* Task declarations */
 void sdf_match_task(void *arg);
 void sdf_enroll_task(void *arg);
 void sdf_admin_task(void *arg);
-void sdf_button_task(void *arg);
+void sdf_enroll_task_wake(void);
+void sdf_admin_task_wake(void);
+
+/* Button handling */
+esp_err_t sdf_button_init(void);
+esp_err_t sdf_button_deinit(void);
 
 /* Button gesture -> admin action dispatch, exposed (moved from static) so
  * host (linux target) unit tests can drive it directly without the real
  * iot_button GPIO plumbing - see test_sdf_services.c. */
+sdf_services_admin_action_t sdf_button_resolve_single_click_action(void);
 void sdf_button_dispatch_action(sdf_services_admin_action_t action);
 
 /* Task start/stop */
