@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "esp_err.h"
 #include "sdf_common.h"
+#include "sdf_event_router_capacity.h"
 
 typedef enum {
     /* Internal sentinel for breaking task queue wait (e.g. on shutdown/action notify) */
@@ -48,6 +49,22 @@ typedef enum {
     SDF_EVENT_ROUTER_TYPE_COUNT
 } sdf_event_router_type_t;
 
+/**
+ * @brief Event priority levels.
+ *
+ * NOTE: Priority values are ordered such that numerical comparison
+ * evaluates importance:
+ *   SDF_EVENT_ROUTER_PRIO_CRITICAL (0) is the highest importance.
+ *   SDF_EVENT_ROUTER_PRIO_LOW (3) is the lowest importance.
+ *
+ * In subscriptions, `min_prio` represents the LOWEST importance (highest numerical value)
+ * accepted by the subscriber. The router filter checks `min_prio >= event->priority`.
+ * Therefore:
+ *   - Subscribing with SDF_EVENT_ROUTER_PRIO_LOW (3) accepts ALL events (CRITICAL, HIGH, NORMAL, LOW).
+ *   - Subscribing with SDF_EVENT_ROUTER_PRIO_NORMAL (2) accepts CRITICAL, HIGH, and NORMAL events.
+ *   - Subscribing with SDF_EVENT_ROUTER_PRIO_HIGH (1) accepts CRITICAL and HIGH events.
+ *   - Subscribing with SDF_EVENT_ROUTER_PRIO_CRITICAL (0) accepts ONLY CRITICAL events.
+ */
 typedef enum {
     SDF_EVENT_ROUTER_PRIO_CRITICAL = 0,
     SDF_EVENT_ROUTER_PRIO_HIGH = 1,
@@ -180,13 +197,52 @@ typedef struct {
 
 typedef void (*sdf_event_router_cb)(void *ctx, const sdf_event_router_event_t *event);
 
-typedef struct sdf_event_router_subscriber sdf_event_router_subscriber_t;
-
+/**
+ * @brief Initialize event router queue and subscriber table.
+ *
+ * Safe to call multiple times (idempotent). Does NOT start dispatch task.
+ */
 esp_err_t sdf_event_router_init(void);
-esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type, sdf_event_router_priority_t min_prio,
-                                     sdf_event_router_cb cb, void *ctx, sdf_event_router_subscriber_t **handle);
-esp_err_t sdf_event_router_unsubscribe(sdf_event_router_subscriber_t *handle);
+
+/**
+ * @brief Register a permanent event subscriber.
+ *
+ * Must be called after sdf_event_router_init() and before sdf_event_router_start().
+ * Returns ESP_ERR_INVALID_STATE if called after start().
+ * Returns ESP_ERR_NO_MEM if pool capacity is exhausted.
+ */
+esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type,
+                                     sdf_event_router_priority_t min_prio,
+                                     sdf_event_router_cb cb,
+                                     void *ctx);
+
+/**
+ * @brief Start the event router dispatch task and freeze subscriber table.
+ *
+ * After start(), no further subscriptions are permitted.
+ * Safe to call multiple times (subsequent calls return ESP_OK).
+ * Fails if any subscription registration was rejected due to capacity.
+ */
+esp_err_t sdf_event_router_start(void);
+
+/**
+ * @brief Emit an event through the router.
+ *
+ * CRITICAL priority events are dispatched synchronously on caller context.
+ * Other priorities are queued for asynchronous dispatch by the router task.
+ */
 esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event);
+
+/**
+ * @brief Emit an event non-blockingly (drops if queue is full).
+ */
 esp_err_t sdf_event_router_emit_nonblocking(const sdf_event_router_event_t *event);
+
+#ifdef CONFIG_IDF_TARGET_LINUX
+/**
+ * @brief Reset router state for unit testing (host test target only).
+ */
+void sdf_event_router_reset_for_test(void);
+#endif
 
 #endif /* SDF_EVENT_ROUTER_H */

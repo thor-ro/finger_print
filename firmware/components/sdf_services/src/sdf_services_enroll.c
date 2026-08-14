@@ -26,9 +26,6 @@ static const char *TAG = "sdf_services_enroll";
 
 typedef struct {
     QueueHandle_t event_queue;
-    sdf_event_router_subscriber_t *sub_start;
-    sdf_event_router_subscriber_t *sub_power_wake;
-    sdf_event_router_subscriber_t *sub_power_sleep;
     esp_timer_handle_t retry_timer;
     bool suspended;
 } sdf_enroll_task_state_t;
@@ -62,12 +59,14 @@ static void sdf_enroll_task_event_cb(void *ctx, const sdf_event_router_event_t *
     }
 }
 
-static void sdf_enroll_task_init_subscriptions(sdf_enroll_task_state_t *state) {
-    state->event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+void sdf_enroll_task_init_subscriptions(void) {
+    if (s_enroll_state.event_queue == NULL) {
+        s_enroll_state.event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+    }
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_START,
                                SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_enroll_task_event_cb, state, &state->sub_start);
+                               sdf_enroll_task_event_cb, &s_enroll_state);
 
     /* min_prio is the *lowest* importance this subscriber accepts (the
      * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
@@ -75,30 +74,19 @@ static void sdf_enroll_task_init_subscriptions(sdf_enroll_task_state_t *state) {
      * both out. Use LOW to accept every priority for these two types. */
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
                                SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_enroll_task_event_cb, state, &state->sub_power_wake);
+                               sdf_enroll_task_event_cb, &s_enroll_state);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
                                SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_enroll_task_event_cb, state, &state->sub_power_sleep);
+                               sdf_enroll_task_event_cb, &s_enroll_state);
 
-    esp_timer_create_args_t timer_args = {
-        .callback = sdf_enroll_retry_timer_cb,
-        .name = "enroll_retry",
-    };
-    esp_timer_create(&timer_args, &state->retry_timer);
-}
-
-static void sdf_enroll_task_deinit_subscriptions(sdf_enroll_task_state_t *state) {
-    if (state->retry_timer) {
-        esp_timer_stop(state->retry_timer);
-        esp_timer_delete(state->retry_timer);
-        state->retry_timer = NULL;
+    if (s_enroll_state.retry_timer == NULL) {
+        esp_timer_create_args_t timer_args = {
+            .callback = sdf_enroll_retry_timer_cb,
+            .name = "enroll_retry",
+        };
+        esp_timer_create(&timer_args, &s_enroll_state.retry_timer);
     }
-    if (state->sub_start) sdf_event_router_unsubscribe(state->sub_start);
-    if (state->sub_power_wake) sdf_event_router_unsubscribe(state->sub_power_wake);
-    if (state->sub_power_sleep) sdf_event_router_unsubscribe(state->sub_power_sleep);
-    if (state->event_queue) vQueueDelete(state->event_queue);
-    state->event_queue = NULL;
 }
 
 static void sdf_enroll_task_emit_complete(uint16_t user_id, uint8_t permission) {
@@ -265,8 +253,6 @@ void sdf_enroll_task(void *arg) {
     esp_task_wdt_add(NULL);
 #endif
 
-    sdf_enroll_task_init_subscriptions(&s_enroll_state);
-
     /* Wait for initialization to complete */
     while (!sdf_services_is_ready()) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
@@ -338,8 +324,15 @@ void sdf_enroll_task(void *arg) {
     }
 
     /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
-     * cleanly instead of being killed from outside. */
-    sdf_enroll_task_deinit_subscriptions(&s_enroll_state);
+     * cleanly instead of being killed from outside. Subscriptions remain in
+     * place for the lifetime of the boot; clearing event_queue causes any
+     * post-exit callback invocations to discard events safely. */
+    if (s_enroll_state.retry_timer) {
+        esp_timer_stop(s_enroll_state.retry_timer);
+        esp_timer_delete(s_enroll_state.retry_timer);
+        s_enroll_state.retry_timer = NULL;
+    }
+    s_enroll_state.event_queue = NULL;
 #ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_delete(NULL);
 #endif

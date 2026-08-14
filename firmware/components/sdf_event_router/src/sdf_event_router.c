@@ -11,29 +11,26 @@
 #define SDF_EVENT_ROUTER_TASK_NAME "sdf_evt_router"
 #define SDF_EVENT_ROUTER_TASK_STACK 3072
 #define SDF_EVENT_ROUTER_TASK_PRIORITY 5
-#define SDF_EVENT_ROUTER_LOCK_WAIT_MS 100u
-/* Upper bound on subscribers dispatched for a single event. This is a
- * fan-out cap for the dispatch snapshot below, not a global subscriber
- * limit - comfortably above the handful of tasks that subscribe to any one
- * event type today. */
-#define SDF_EVENT_ROUTER_MAX_DISPATCH 16u
 
 static const char *TAG = "sdf_event_router";
 
-struct sdf_event_router_subscriber {
-    sdf_event_router_type_t type;
-    sdf_event_router_priority_t min_prio;
+typedef struct {
+    uint8_t type;
+    uint8_t min_prio;
     sdf_event_router_cb cb;
     void *ctx;
-    struct sdf_event_router_subscriber *next;
-};
+    uint8_t next;
+} sdf_event_router_slot_t;
 
-struct sdf_event_router_state {
+static struct {
     QueueHandle_t queue;
     TaskHandle_t task;
     bool initialized;
-    sdf_event_router_subscriber_t *subscribers_by_type[SDF_EVENT_ROUTER_TYPE_COUNT];
-    SemaphoreHandle_t lock;
+    bool started;
+    uint8_t pool_count;
+    uint32_t rejected_registrations;
+    uint8_t head_by_type[SDF_EVENT_ROUTER_TYPE_COUNT];
+    sdf_event_router_slot_t pool[SDF_EVENT_ROUTER_SUBSCRIBER_CAPACITY];
 } s_state;
 
 static void sdf_event_router_dispatch_sync(const sdf_event_router_event_t *event)
@@ -43,46 +40,19 @@ static void sdf_event_router_dispatch_sync(const sdf_event_router_event_t *event
         return;
     }
 
-    /* Snapshot matching (cb, ctx) pairs by value while holding the lock,
-     * then invoke them after releasing it. sdf_event_router_unsubscribe()
-     * frees subscriber nodes under this same lock, so walking the linked
-     * list itself outside the lock (the previous implementation) risked a
-     * use-after-free if a subscriber unsubscribed mid-dispatch. Copying the
-     * plain cb/ctx values means the callbacks stay safe to invoke even if
-     * the node they came from is freed the instant we unlock. */
-    sdf_event_router_cb cbs[SDF_EVENT_ROUTER_MAX_DISPATCH];
-    void *ctxs[SDF_EVENT_ROUTER_MAX_DISPATCH];
-    size_t n = 0;
-
-    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_EVENT_ROUTER_LOCK_WAIT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "Dispatch lock timeout, dropping event type=%d", (int)event->type);
-        return;
-    }
-
-    sdf_event_router_subscriber_t *sub = s_state.subscribers_by_type[event->type];
-    while (sub != NULL) {
-        if (sub->min_prio >= event->priority && sub->cb != NULL) {
-            if (n < SDF_EVENT_ROUTER_MAX_DISPATCH) {
-                cbs[n] = sub->cb;
-                ctxs[n] = sub->ctx;
-                n++;
-            } else {
-                ESP_LOGW(TAG, "Dispatch fan-out cap reached for type=%d", (int)event->type);
-                break;
-            }
+    uint8_t idx = s_state.head_by_type[event->type];
+    while (idx != SDF_EVENT_ROUTER_SLOT_NONE && idx < SDF_EVENT_ROUTER_SUBSCRIBER_CAPACITY) {
+        const sdf_event_router_slot_t *slot = &s_state.pool[idx];
+        if (slot->min_prio >= event->priority && slot->cb != NULL) {
+            slot->cb(slot->ctx, event);
         }
-        sub = sub->next;
-    }
-
-    xSemaphoreGive(s_state.lock);
-
-    for (size_t i = 0; i < n; i++) {
-        cbs[i](ctxs[i], event);
+        idx = slot->next;
     }
 }
 
 static void sdf_event_router_task(void *arg)
 {
+    (void)arg;
     sdf_event_router_event_t event;
 
     while (true) {
@@ -99,99 +69,88 @@ esp_err_t sdf_event_router_init(void)
     }
 
     memset(&s_state, 0, sizeof(s_state));
-
-    s_state.lock = xSemaphoreCreateMutex();
-    if (s_state.lock == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
+    memset(s_state.head_by_type, SDF_EVENT_ROUTER_SLOT_NONE, sizeof(s_state.head_by_type));
 
     uint32_t queue_depth = sdf_config_get()->event_router_queue_depth;
     s_state.queue = xQueueCreate(queue_depth, sizeof(sdf_event_router_event_t));
     if (s_state.queue == NULL) {
-        vSemaphoreDelete(s_state.lock);
         return ESP_ERR_NO_MEM;
     }
 
-    BaseType_t task_ok = xTaskCreate(sdf_event_router_task,
-                                    SDF_EVENT_ROUTER_TASK_NAME,
-                                    SDF_EVENT_ROUTER_TASK_STACK,
-                                    NULL,
-                                    SDF_EVENT_ROUTER_TASK_PRIORITY,
-                                    &s_state.task);
-    if (task_ok != pdPASS) {
-        vQueueDelete(s_state.queue);
-        vSemaphoreDelete(s_state.lock);
-        return ESP_FAIL;
-    }
-
     s_state.initialized = true;
-    ESP_LOGI(TAG, "Event router initialized (queue depth=%d)", queue_depth);
+    ESP_LOGI(TAG, "Event router initialized (queue depth=%u, capacity=%u)",
+             (unsigned)queue_depth, (unsigned)SDF_EVENT_ROUTER_SUBSCRIBER_CAPACITY);
     return ESP_OK;
 }
 
 esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type,
                                      sdf_event_router_priority_t min_prio,
                                      sdf_event_router_cb cb,
-                                     void *ctx,
-                                     sdf_event_router_subscriber_t **handle)
+                                     void *ctx)
 {
-    if (cb == NULL || handle == NULL || type == SDF_EVENT_ROUTER_INTERNAL_WAKE || type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
+    if (cb == NULL || type == SDF_EVENT_ROUTER_INTERNAL_WAKE || type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    sdf_event_router_subscriber_t *sub = calloc(1, sizeof(*sub));
-    if (sub == NULL) {
+    if (!s_state.initialized || s_state.started) {
+        ESP_LOGE(TAG, "Cannot subscribe: router %s",
+                 !s_state.initialized ? "not initialized" : "already started");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_state.pool_count >= SDF_EVENT_ROUTER_SUBSCRIBER_CAPACITY) {
+        s_state.rejected_registrations++;
+        ESP_LOGE(TAG, "Subscriber pool exhausted (capacity=%u, rejected=%u)",
+                 (unsigned)SDF_EVENT_ROUTER_SUBSCRIBER_CAPACITY,
+                 (unsigned)s_state.rejected_registrations);
         return ESP_ERR_NO_MEM;
     }
 
-    sub->type = type;
-    sub->min_prio = min_prio;
-    sub->cb = cb;
-    sub->ctx = ctx;
-    sub->next = NULL;
+    uint8_t slot_idx = s_state.pool_count++;
+    sdf_event_router_slot_t *slot = &s_state.pool[slot_idx];
+    slot->type = (uint8_t)type;
+    slot->min_prio = (uint8_t)min_prio;
+    slot->cb = cb;
+    slot->ctx = ctx;
+    slot->next = s_state.head_by_type[type];
+    s_state.head_by_type[type] = slot_idx;
 
-    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_EVENT_ROUTER_LOCK_WAIT_MS)) == pdTRUE) {
-        sub->next = s_state.subscribers_by_type[sub->type];
-        s_state.subscribers_by_type[sub->type] = sub;
-        xSemaphoreGive(s_state.lock);
-    } else {
-        free(sub);
-        return ESP_ERR_TIMEOUT;
-    }
-
-    *handle = sub;
     return ESP_OK;
 }
 
-esp_err_t sdf_event_router_unsubscribe(sdf_event_router_subscriber_t *handle)
+esp_err_t sdf_event_router_start(void)
 {
-    if (handle == NULL) {
-        return ESP_ERR_INVALID_ARG;
+    if (!s_state.initialized) {
+        ESP_LOGE(TAG, "Cannot start router before init");
+        return ESP_ERR_INVALID_STATE;
     }
 
-    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_EVENT_ROUTER_LOCK_WAIT_MS)) == pdTRUE) {
-        sdf_event_router_subscriber_t *prev = NULL;
-        sdf_event_router_subscriber_t *sub = s_state.subscribers_by_type[handle->type];
-
-        while (sub != NULL) {
-            if (sub == handle) {
-                if (prev == NULL) {
-                    s_state.subscribers_by_type[handle->type] = sub->next;
-                } else {
-                    prev->next = sub->next;
-                }
-                free(sub);
-                xSemaphoreGive(s_state.lock);
-                return ESP_OK;
-            }
-            prev = sub;
-            sub = sub->next;
-        }
-        xSemaphoreGive(s_state.lock);
-        return ESP_ERR_NOT_FOUND;
+    if (s_state.started) {
+        return ESP_OK;
     }
 
-    return ESP_ERR_TIMEOUT;
+    if (s_state.rejected_registrations > 0) {
+        ESP_LOGE(TAG, "Cannot start router: %u registrations were rejected due to capacity",
+                 (unsigned)s_state.rejected_registrations);
+        return ESP_FAIL;
+    }
+
+    BaseType_t task_ok = xTaskCreate(sdf_event_router_task,
+                                     SDF_EVENT_ROUTER_TASK_NAME,
+                                     SDF_EVENT_ROUTER_TASK_STACK,
+                                     NULL,
+                                     SDF_EVENT_ROUTER_TASK_PRIORITY,
+                                     &s_state.task);
+    if (task_ok != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create event router task");
+        return ESP_FAIL;
+    }
+
+    s_state.started = true;
+    ESP_LOGI(TAG, "Event router started: %u/%u subscribers registered",
+             (unsigned)s_state.pool_count,
+             (unsigned)SDF_EVENT_ROUTER_SUBSCRIBER_CAPACITY);
+    return ESP_OK;
 }
 
 esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event)
@@ -235,3 +194,19 @@ esp_err_t sdf_event_router_emit_nonblocking(const sdf_event_router_event_t *even
 
     return ESP_OK;
 }
+
+#ifdef CONFIG_IDF_TARGET_LINUX
+void sdf_event_router_reset_for_test(void)
+{
+    if (s_state.task != NULL) {
+        vTaskDelete(s_state.task);
+        s_state.task = NULL;
+    }
+    if (s_state.queue != NULL) {
+        vQueueDelete(s_state.queue);
+        s_state.queue = NULL;
+    }
+    memset(&s_state, 0, sizeof(s_state));
+    memset(s_state.head_by_type, SDF_EVENT_ROUTER_SLOT_NONE, sizeof(s_state.head_by_type));
+}
+#endif

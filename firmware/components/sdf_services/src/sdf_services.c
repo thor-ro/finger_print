@@ -677,15 +677,20 @@ esp_err_t sdf_services_stop_tasks(void) {
     sdf_enroll_task_wake();
     sdf_admin_task_wake();
 
-    /* Each task polls stop_requested (see sdf_match_task / sdf_enroll_task /
-     * sdf_admin_task) and exits on its own -
-     * unsubscribing from the event router and self-deleting - instead of
-     * being killed from outside via vTaskDelete(). Killing a task from
-     * outside can leave s_state.lock permanently held if the victim
-     * happened to be inside a critical section (or, for match/enroll, mid
-     * the ~12s blocking fingerprint UART call) at the moment of deletion.
-     * Poll for all three to clear their handles, bounded generously enough
-     * to cover that worst-case 12s UART timeout. */
+    /* Subscriptions registered by service tasks (match, admin, enroll) are
+     * permanent for the lifetime of the boot and cannot be unregistered.
+     * If this uncalled shutdown path is ever revived, callbacks will
+     * continue to be invoked by the event router but will discard events
+     * safely because event_queue is set to NULL on exit.
+     *
+     * Each task polls stop_requested (see sdf_match_task / sdf_enroll_task /
+     * sdf_admin_task) and exits on its own - clearing event_queue and
+     * self-deleting - instead of being killed from outside via vTaskDelete().
+     * Killing a task from outside can leave s_state.lock permanently held if
+     * the victim happened to be inside a critical section (or, for
+     * match/enroll, mid the ~12s blocking fingerprint UART call) at the moment
+     * of deletion. Poll for all three to clear their handles, bounded
+     * generously enough to cover that worst-case 12s UART timeout. */
     const int poll_interval_ms = 50;
     const int max_wait_ms = 13000;
     int waited_ms = 0;
@@ -805,6 +810,11 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
     s_state.enrolled_user_bmp = 0;
     memset(s_state.enrolled_perm_packed, 0, sizeof(s_state.enrolled_perm_packed));
   }
+  /* Register event-router subscriptions for service tasks during service init
+   * after shared queues are created and before tasks are created and started. */
+  sdf_match_task_init_subscriptions();
+  sdf_admin_task_init_subscriptions();
+  sdf_enroll_task_init_subscriptions();
   xSemaphoreGive(s_state.lock);
 
 sdf_drivers_config_t drivers_config = {

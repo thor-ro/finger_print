@@ -28,10 +28,6 @@ static const char *TAG = "sdf_services_admin";
 
 typedef struct {
     QueueHandle_t event_queue;
-    sdf_event_router_subscriber_t *sub_action_req;
-    sdf_event_router_subscriber_t *sub_button_press;
-    sdf_event_router_subscriber_t *sub_power_wake;
-    sdf_event_router_subscriber_t *sub_power_sleep;
     bool suspended;
 } sdf_admin_task_state_t;
 
@@ -54,16 +50,18 @@ static void sdf_admin_task_event_cb(void *ctx, const sdf_event_router_event_t *e
     }
 }
 
-static void sdf_admin_task_init_subscriptions(sdf_admin_task_state_t *state) {
-    state->event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+void sdf_admin_task_init_subscriptions(void) {
+    if (s_admin_state.event_queue == NULL) {
+        s_admin_state.event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+    }
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST,
                                SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_admin_task_event_cb, state, &state->sub_action_req);
+                               sdf_admin_task_event_cb, &s_admin_state);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_BUTTON_PRESS,
                                SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_admin_task_event_cb, state, &state->sub_button_press);
+                               sdf_admin_task_event_cb, &s_admin_state);
 
     /* Deliberately not subscribed to SDF_EVENT_ROUTER_BIOMETRIC_MATCH here:
      * sdf_match_task claims/authorizes any pending admin action itself
@@ -84,20 +82,11 @@ static void sdf_admin_task_init_subscriptions(sdf_admin_task_state_t *state) {
      * both out. Use LOW to accept every priority for these two types. */
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
                                SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_admin_task_event_cb, state, &state->sub_power_wake);
+                               sdf_admin_task_event_cb, &s_admin_state);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
                                SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_admin_task_event_cb, state, &state->sub_power_sleep);
-}
-
-static void sdf_admin_task_deinit_subscriptions(sdf_admin_task_state_t *state) {
-    if (state->sub_action_req) sdf_event_router_unsubscribe(state->sub_action_req);
-    if (state->sub_button_press) sdf_event_router_unsubscribe(state->sub_button_press);
-    if (state->sub_power_wake) sdf_event_router_unsubscribe(state->sub_power_wake);
-    if (state->sub_power_sleep) sdf_event_router_unsubscribe(state->sub_power_sleep);
-    if (state->event_queue) vQueueDelete(state->event_queue);
-    state->event_queue = NULL;
+                               sdf_admin_task_event_cb, &s_admin_state);
 }
 
 static void sdf_admin_task_emit_action_complete(sdf_services_admin_action_t action,
@@ -178,8 +167,6 @@ void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
 void sdf_admin_task(void *arg) {
     (void)arg;
     sdf_services_state_t *s = sdf_services_state();
-
-    sdf_admin_task_init_subscriptions(&s_admin_state);
 
     while (true) {
         {
@@ -286,8 +273,10 @@ void sdf_admin_task(void *arg) {
     }
 
     /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
-     * cleanly instead of being killed from outside. */
-    sdf_admin_task_deinit_subscriptions(&s_admin_state);
+     * cleanly instead of being killed from outside. Subscriptions remain in
+     * place for the lifetime of the boot; clearing event_queue causes any
+     * post-exit callback invocations to discard events safely. */
+    s_admin_state.event_queue = NULL;
     {
         SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
         if (guard.acquired == pdTRUE) {

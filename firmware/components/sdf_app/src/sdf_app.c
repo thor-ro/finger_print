@@ -1696,80 +1696,74 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
 
   // Subscribe to events
-  sdf_event_router_subscriber_t *subs[10];
-  size_t subs_count = 0;
-
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
-                                        SDF_EVENT_ROUTER_PRIO_HIGH,
-                                        sdf_app_on_event, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_HIGH,
+                                   sdf_app_on_event, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to biometric match: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
+  /* SECURITY_LOCKOUT is emitted with PRIO_CRITICAL when lockout is entered,
+   * and PRIO_NORMAL when lockout expires/clears. Because min_prio is evaluated
+   * as min_prio >= event->priority (where CRITICAL=0, HIGH=1, NORMAL=2, LOW=3),
+   * subscribing with PRIO_NORMAL admits BOTH critical (0 <= 2) and normal (2 <= 2)
+   * events, ensuring the lockout-cleared event is delivered so the alarm clears. */
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
-                                        SDF_EVENT_ROUTER_PRIO_CRITICAL,
-                                        sdf_app_on_event, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                   sdf_app_on_event, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to security lockout: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,
-                                        SDF_EVENT_ROUTER_PRIO_HIGH,
-                                        sdf_app_on_event, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_HIGH,
+                                   sdf_app_on_event, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to biometric match failed: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
-                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                        sdf_app_on_event, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                   sdf_app_on_event, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment step: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
-                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                        sdf_app_on_event, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                   sdf_app_on_event, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_FAILED,
-                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                        sdf_app_on_event, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                   sdf_app_on_event, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_AUDIT,
-                                        SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                        sdf_app_on_event, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                   sdf_app_on_event, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to audit: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
-                                        SDF_EVENT_ROUTER_PRIO_HIGH,
-                                        sdf_app_on_web_reg_auth_result, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_HIGH,
+                                   sdf_app_on_web_reg_auth_result, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to web reg auth result: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
   /* WEB_REG_AUTH_RESULT above is only ever emitted on success (see
    * sdf_services_execute_admin_action()); if the admin fingerprint auth
@@ -1779,24 +1773,13 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
    * pending forever (no notify ever sent) and s_state.web_reg_auth_pending
    * latched true server-side, blocking any future web reg auth request. */
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
-                                        SDF_EVENT_ROUTER_PRIO_HIGH,
-                                        sdf_app_on_admin_action_complete, NULL, &subs[subs_count]);
+                                   SDF_EVENT_ROUTER_PRIO_HIGH,
+                                   sdf_app_on_admin_action_complete, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to admin action complete: %s", esp_err_to_name(err));
-    goto sub_cleanup;
+    return err;
   }
-  subs_count++;
 
-  goto sub_done;
-
-sub_cleanup:
-  while (subs_count > 0) {
-    subs_count--;
-    sdf_event_router_unsubscribe(subs[subs_count]);
-  }
-  return err;
-
-sub_done:
   /* Tracks the first subsystem-init failure below so the function can
    * return an honest status while still attempting to bring up every
    * other subsystem (a partially-working door lock beats a hard abort). */
@@ -1831,6 +1814,15 @@ sub_done:
     if (degraded_err == ESP_OK) {
       degraded_err = err;
     }
+  }
+
+  /* Start event router dispatch task and freeze the subscriber table.
+   * All 21 subscriptions (app: 9, match: 3, admin: 4, enroll: 3, ble: 2)
+   * must be registered before this point. No further subscribers may register. */
+  err = sdf_event_router_start();
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to start event router: %s", esp_err_to_name(err));
+    return err;
   }
 
   if (sdf_protocol_zigbee_is_enabled()) {

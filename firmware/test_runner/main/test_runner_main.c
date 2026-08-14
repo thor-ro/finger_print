@@ -177,12 +177,20 @@ extern void test_task_wake_helpers_safe_when_idle(void);
 /* Event Router tests */
 extern void test_sdf_event_router_init_returns_ok(void);
 extern void test_sdf_event_router_init_idempotent(void);
+extern void test_sdf_event_router_start_before_init_fails(void);
+extern void test_sdf_event_router_start_idempotent(void);
 extern void test_sdf_event_router_subscribe_and_emit(void);
-extern void test_sdf_event_router_subscribe_rejects_invalid_type(void);
-extern void test_sdf_event_router_unsubscribe(void);
-extern void test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type(void);
+extern void test_sdf_event_router_subscribe_after_start_fails(void);
+extern void test_sdf_event_router_subscribe_rejects_invalid_type_and_sentinels(void);
+extern void test_sdf_event_router_subscribe_pool_exhaustion_fails_start(void);
+extern void test_sdf_event_router_multiple_subscribers_invoked_no_truncation(void);
+extern void test_sdf_event_router_min_prio_filter_semantics(void);
+extern void test_sdf_event_router_reentrant_critical_emit_no_deadlock(void);
+extern void test_sdf_event_router_security_lockout_pair_delivered(void);
+extern void test_sdf_event_router_emit_before_start_delivered_after_start(void);
 extern void test_sdf_event_router_emit_nonblocking_delivers(void);
 extern void test_sdf_event_router_emit_nonblocking_null_args(void);
+extern void test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type(void);
 extern void test_sdf_event_router_emit_nonblocking_rejects_internal_wake_and_invalid_type(void);
 extern void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero(void);
 
@@ -500,12 +508,20 @@ void app_main(void) {
   /* Event Router tests */
   RUN_TEST(test_sdf_event_router_init_returns_ok);
   RUN_TEST(test_sdf_event_router_init_idempotent);
+  RUN_TEST(test_sdf_event_router_start_before_init_fails);
+  RUN_TEST(test_sdf_event_router_start_idempotent);
   RUN_TEST(test_sdf_event_router_subscribe_and_emit);
-  RUN_TEST(test_sdf_event_router_subscribe_rejects_invalid_type);
-  RUN_TEST(test_sdf_event_router_unsubscribe);
-  RUN_TEST(test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type);
+  RUN_TEST(test_sdf_event_router_subscribe_after_start_fails);
+  RUN_TEST(test_sdf_event_router_subscribe_rejects_invalid_type_and_sentinels);
+  RUN_TEST(test_sdf_event_router_subscribe_pool_exhaustion_fails_start);
+  RUN_TEST(test_sdf_event_router_multiple_subscribers_invoked_no_truncation);
+  RUN_TEST(test_sdf_event_router_min_prio_filter_semantics);
+  RUN_TEST(test_sdf_event_router_reentrant_critical_emit_no_deadlock);
+  RUN_TEST(test_sdf_event_router_security_lockout_pair_delivered);
+  RUN_TEST(test_sdf_event_router_emit_before_start_delivered_after_start);
   RUN_TEST(test_sdf_event_router_emit_nonblocking_delivers);
   RUN_TEST(test_sdf_event_router_emit_nonblocking_null_args);
+  RUN_TEST(test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type);
   RUN_TEST(test_sdf_event_router_emit_nonblocking_rejects_internal_wake_and_invalid_type);
   RUN_TEST(test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero);
 

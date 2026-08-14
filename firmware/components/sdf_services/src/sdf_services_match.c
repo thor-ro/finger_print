@@ -26,9 +26,6 @@ static const char *TAG = "sdf_services_match";
 
 typedef struct {
     QueueHandle_t event_queue;
-    sdf_event_router_subscriber_t *sub_match_req;
-    sdf_event_router_subscriber_t *sub_power_wake;
-    sdf_event_router_subscriber_t *sub_power_sleep;
     TaskHandle_t task_handle;
     bool suspended;
     bool pending_match_request;
@@ -44,13 +41,13 @@ static void sdf_match_task_event_cb(void *ctx, const sdf_event_router_event_t *e
     }
 }
 
-static void sdf_match_task_init_subscriptions(sdf_match_task_state_t *state) {
+void sdf_match_task_init_subscriptions(void) {
     sdf_services_state_t *s = sdf_services_state();
-    state->event_queue = s->match_task_queue;
+    s_match_state.event_queue = s->match_task_queue;
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST,
                                SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_match_task_event_cb, state, &state->sub_match_req);
+                               sdf_match_task_event_cb, &s_match_state);
 
     /* min_prio is the *lowest* importance this subscriber accepts (the
      * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
@@ -58,19 +55,11 @@ static void sdf_match_task_init_subscriptions(sdf_match_task_state_t *state) {
      * both out. Use LOW to accept every priority for these two types. */
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
                                SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_match_task_event_cb, state, &state->sub_power_wake);
+                               sdf_match_task_event_cb, &s_match_state);
 
     sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
                                SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_match_task_event_cb, state, &state->sub_power_sleep);
-}
-
-static void sdf_match_task_deinit_subscriptions(sdf_match_task_state_t *state) {
-    if (state->sub_match_req) sdf_event_router_unsubscribe(state->sub_match_req);
-    if (state->sub_power_wake) sdf_event_router_unsubscribe(state->sub_power_wake);
-    if (state->sub_power_sleep) sdf_event_router_unsubscribe(state->sub_power_sleep);
-    /* Don't delete queue - it's shared and managed by sdf_services */
-    state->event_queue = NULL;
+                               sdf_match_task_event_cb, &s_match_state);
 }
 
 static void sdf_match_emit_lockout_cleared(void) {
@@ -242,7 +231,6 @@ void sdf_match_task(void *arg) {
     (void)arg;
     sdf_services_state_t *s = sdf_services_state();
 
-    sdf_match_task_init_subscriptions(&s_match_state);
     s_match_state.task_handle = xTaskGetCurrentTaskHandle();
 
     /* Initial probe and user query on startup */
@@ -379,8 +367,10 @@ void sdf_match_task(void *arg) {
     }
 
     /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
-     * cleanly instead of being killed from outside. */
-    sdf_match_task_deinit_subscriptions(&s_match_state);
+     * cleanly instead of being killed from outside. Subscriptions remain in
+     * place for the lifetime of the boot; clearing event_queue causes any
+     * post-exit callback invocations to discard events safely. */
+    s_match_state.event_queue = NULL;
 #ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_delete(NULL);
 #endif

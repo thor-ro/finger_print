@@ -116,8 +116,7 @@ static uint16_t s_config_val_handle = 0;
 static uint16_t s_enroll_val_handle = 0;
 static uint16_t s_ota_val_handle = 0;
 
-static sdf_event_router_subscriber_t *s_enrollment_sub = NULL;
-static sdf_event_router_subscriber_t *s_enrollment_failed_sub = NULL;
+
 
 /* One-shot timeout for the Admin-Fingerprint-Gated Device Pairing Window
  * (see sdf_ble_companion_open_pairing_window()). Armed when the window
@@ -1220,19 +1219,19 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Subscribe to enrollment events
+    // Subscribe to enrollment events (permanent for the lifetime of the boot)
     err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
-                                      SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                      sdf_ble_companion_enrollment_complete_handler,
-                                      NULL, &s_enrollment_sub);
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     sdf_ble_companion_enrollment_complete_handler,
+                                     NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
     }
 
     err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_FAILED,
-                                      SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                      sdf_ble_companion_enrollment_failed_handler,
-                                      NULL, &s_enrollment_failed_sub);
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     sdf_ble_companion_enrollment_failed_handler,
+                                     NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
     }
@@ -1274,14 +1273,10 @@ esp_err_t sdf_ble_companion_deinit(void) {
         }
     }
 
-    if (s_enrollment_sub) {
-        sdf_event_router_unsubscribe(s_enrollment_sub);
-        s_enrollment_sub = NULL;
-    }
-    if (s_enrollment_failed_sub) {
-        sdf_event_router_unsubscribe(s_enrollment_failed_sub);
-        s_enrollment_failed_sub = NULL;
-    }
+    /* Subscriptions registered with the event router are permanent for the
+     * lifetime of the boot and cannot be unregistered. If this uncalled
+     * deinit path is ever revived, callbacks will continue to be invoked by
+     * the event router but will exit safely because s_initialized is false. */
 
     // Stop and delete the pairing-window timeout timer
     if (s_pairing_window_timer) {

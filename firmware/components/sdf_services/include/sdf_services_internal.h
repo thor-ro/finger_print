@@ -26,8 +26,8 @@ typedef struct {
   TaskHandle_t enroll_task;
   TaskHandle_t admin_task;
   /* Set by sdf_services_stop_tasks() and polled (under s_state.lock) by
-   * each task's own main loop so tasks exit and clean up (unsubscribe from
-   * the event router, self-delete) cooperatively instead of being killed
+   * each task's own main loop so tasks exit and clean up (clearing their
+   * queues and self-deleting) cooperatively instead of being killed
    * from outside via vTaskDelete() - which could leave s_state.lock
    * permanently held if the victim task happened to be inside a critical
    * section at the moment of deletion. */
@@ -91,6 +91,9 @@ void sdf_enroll_task(void *arg);
 void sdf_admin_task(void *arg);
 void sdf_enroll_task_wake(void);
 void sdf_admin_task_wake(void);
+void sdf_match_task_init_subscriptions(void);
+void sdf_admin_task_init_subscriptions(void);
+void sdf_enroll_task_init_subscriptions(void);
 
 /* Button handling */
 esp_err_t sdf_button_init(void);

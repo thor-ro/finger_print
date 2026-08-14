@@ -656,7 +656,7 @@ The `sdf_event_router` component provides a central event bus that decouples com
 - **Event types**: Biometric match/fail, Zigbee commands, BLE lock actions, Power sleep/wake, Security lockout, Admin actions, Enrollment steps
 - **Priority levels**: CRITICAL (security), HIGH (lock actions), NORMAL (enrollment), LOW (telemetry)
 - **Dispatch modes**: Synchronous (CRITICAL), Asynchronous via FreeRTOS queue (other priorities)
-- **Subscription**: Component-level with event type and minimum priority filters
+- **Subscription**: Component-level with event type and minimum priority filters, backed by a static capacity pool frozen at `sdf_event_router_start()` with lock-free dispatch
 - **Audit logging**: All events automatically logged when `CONFIG_SDF_EVENT_ROUTER_ENABLE_AUDIT` is enabled
 
 ### Migration from Callbacks
