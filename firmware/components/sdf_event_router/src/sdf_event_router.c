@@ -38,7 +38,7 @@ struct sdf_event_router_state {
 
 static void sdf_event_router_dispatch_sync(const sdf_event_router_event_t *event)
 {
-    if (event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
+    if (event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE || event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         ESP_LOGE(TAG, "Dropping event with invalid type %d", (int)event->type);
         return;
     }
@@ -135,7 +135,7 @@ esp_err_t sdf_event_router_subscribe(sdf_event_router_type_t type,
                                      void *ctx,
                                      sdf_event_router_subscriber_t **handle)
 {
-    if (cb == NULL || handle == NULL || type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
+    if (cb == NULL || handle == NULL || type == SDF_EVENT_ROUTER_INTERNAL_WAKE || type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -196,7 +196,9 @@ esp_err_t sdf_event_router_unsubscribe(sdf_event_router_subscriber_t *handle)
 
 esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event)
 {
-    if (event == NULL || !s_state.initialized) {
+    if (event == NULL || !s_state.initialized ||
+        event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE ||
+        event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -215,7 +217,9 @@ esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event)
 
 esp_err_t sdf_event_router_emit_nonblocking(const sdf_event_router_event_t *event)
 {
-    if (event == NULL || !s_state.initialized) {
+    if (event == NULL || !s_state.initialized ||
+        event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE ||
+        event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         return ESP_ERR_INVALID_ARG;
     }
 

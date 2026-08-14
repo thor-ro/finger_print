@@ -159,6 +159,7 @@ extern void test_button_dispatch_ble_pairing_window_sets_pending_action(void);
 extern void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending(void);
 extern void test_pulse_pending_action_led_covers_all_actions(void);
 extern void test_request_admin_action_ble_pairing_window_sets_pending_action(void);
+extern void test_bootstrap_bypass_rejected_for_unspecified_origin_on_zero_user_device(void);
 extern void test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device(void);
 extern void test_bootstrap_bypass_clears_existing_pending_action_before_execution(void);
 extern void test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action(void);
@@ -179,8 +180,10 @@ extern void test_sdf_event_router_init_idempotent(void);
 extern void test_sdf_event_router_subscribe_and_emit(void);
 extern void test_sdf_event_router_subscribe_rejects_invalid_type(void);
 extern void test_sdf_event_router_unsubscribe(void);
+extern void test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type(void);
 extern void test_sdf_event_router_emit_nonblocking_delivers(void);
 extern void test_sdf_event_router_emit_nonblocking_null_args(void);
+extern void test_sdf_event_router_emit_nonblocking_rejects_internal_wake_and_invalid_type(void);
 extern void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero(void);
 
 /* Tasks tests */
@@ -479,6 +482,7 @@ void app_main(void) {
   RUN_TEST(test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending);
   RUN_TEST(test_pulse_pending_action_led_covers_all_actions);
   RUN_TEST(test_request_admin_action_ble_pairing_window_sets_pending_action);
+  RUN_TEST(test_bootstrap_bypass_rejected_for_unspecified_origin_on_zero_user_device);
   RUN_TEST(test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device);
   RUN_TEST(test_bootstrap_bypass_clears_existing_pending_action_before_execution);
   RUN_TEST(test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action);
@@ -499,8 +503,10 @@ void app_main(void) {
   RUN_TEST(test_sdf_event_router_subscribe_and_emit);
   RUN_TEST(test_sdf_event_router_subscribe_rejects_invalid_type);
   RUN_TEST(test_sdf_event_router_unsubscribe);
+  RUN_TEST(test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type);
   RUN_TEST(test_sdf_event_router_emit_nonblocking_delivers);
   RUN_TEST(test_sdf_event_router_emit_nonblocking_null_args);
+  RUN_TEST(test_sdf_event_router_emit_nonblocking_rejects_internal_wake_and_invalid_type);
   RUN_TEST(test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero);
 
   /* Tasks tests */

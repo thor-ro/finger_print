@@ -59,6 +59,12 @@ void test_sdf_event_router_subscribe_rejects_invalid_type(void) {
                                                test_event_handler, NULL, &handle);
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
     TEST_ASSERT_NULL(handle);
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_INTERNAL_WAKE,
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     test_event_handler, NULL, &handle);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+    TEST_ASSERT_NULL(handle);
 }
 
 void test_sdf_event_router_unsubscribe(void) {
@@ -125,6 +131,34 @@ void test_sdf_event_router_emit_nonblocking_delivers(void) {
 
 void test_sdf_event_router_emit_nonblocking_null_args(void) {
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_event_router_emit_nonblocking(NULL));
+}
+
+void test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type(void) {
+    sdf_event_router_event_t wake_event = {
+        .type = SDF_EVENT_ROUTER_INTERNAL_WAKE,
+        .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+    };
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_event_router_emit(&wake_event));
+
+    sdf_event_router_event_t invalid_event = {
+        .type = SDF_EVENT_ROUTER_TYPE_COUNT,
+        .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+    };
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_event_router_emit(&invalid_event));
+}
+
+void test_sdf_event_router_emit_nonblocking_rejects_internal_wake_and_invalid_type(void) {
+    sdf_event_router_event_t wake_event = {
+        .type = SDF_EVENT_ROUTER_INTERNAL_WAKE,
+        .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+    };
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_event_router_emit_nonblocking(&wake_event));
+
+    sdf_event_router_event_t invalid_event = {
+        .type = SDF_EVENT_ROUTER_TYPE_COUNT,
+        .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+    };
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_event_router_emit_nonblocking(&invalid_event));
 }
 
 void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero(void) {

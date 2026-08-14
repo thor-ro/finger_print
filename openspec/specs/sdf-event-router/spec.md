@@ -17,7 +17,7 @@ Specifies the public API contract for `sdf_event_router` — the pub/sub compone
 - **THEN** it returns `ESP_OK` without creating new queue, task, or lock resources
 
 ### Requirement: Subscribe validates arguments and registers by event type
-`sdf_event_router_subscribe()` SHALL reject a `NULL` callback or `NULL` handle output pointer, SHALL reject a `type` outside the valid `sdf_event_router_type_t` range, and SHALL otherwise register the subscriber against that type so it is included in future dispatch for events of that type.
+`sdf_event_router_subscribe()` SHALL reject a `NULL` callback or `NULL` handle output pointer, SHALL reject `SDF_EVENT_ROUTER_INTERNAL_WAKE` as an internal queue-only sentinel, SHALL reject a `type` outside the valid `sdf_event_router_type_t` range, and SHALL otherwise register the subscriber against that type so it is included in future dispatch for events of that type.
 
 #### Scenario: NULL callback is rejected
 - **WHEN** `sdf_event_router_subscribe()` is called with `cb == NULL`
@@ -25,6 +25,10 @@ Specifies the public API contract for `sdf_event_router` — the pub/sub compone
 
 #### Scenario: NULL handle output is rejected
 - **WHEN** `sdf_event_router_subscribe()` is called with `handle == NULL`
+- **THEN** it returns `ESP_ERR_INVALID_ARG` and does not register a subscriber
+
+#### Scenario: Internal wake sentinel is rejected
+- **WHEN** `sdf_event_router_subscribe()` is called with `type == SDF_EVENT_ROUTER_INTERNAL_WAKE`
 - **THEN** it returns `ESP_ERR_INVALID_ARG` and does not register a subscriber
 
 #### Scenario: Out-of-range event type is rejected
@@ -51,7 +55,7 @@ Specifies the public API contract for `sdf_event_router` — the pub/sub compone
 - **THEN** it returns `ESP_ERR_INVALID_ARG`
 
 ### Requirement: Emit routes by priority through a single dispatch path
-`sdf_event_router_emit()` SHALL dispatch `SDF_EVENT_ROUTER_PRIO_CRITICAL` events synchronously on the caller's context, and SHALL queue all other events for asynchronous dispatch by the router task. This is the router's one and only emit entry point — there SHALL NOT be a second function offering different or unspecified semantics for the same operation.
+`sdf_event_router_emit()` SHALL validate event pointer, initialization state, and event type (rejecting `SDF_EVENT_ROUTER_INTERNAL_WAKE` and out-of-range types with `ESP_ERR_INVALID_ARG`), SHALL dispatch `SDF_EVENT_ROUTER_PRIO_CRITICAL` events synchronously on the caller's context, and SHALL queue all other events for asynchronous dispatch by the router task. This is the router's one and only emit entry point — there SHALL NOT be a second function offering different or unspecified semantics for the same operation.
 
 #### Scenario: Critical event dispatches synchronously
 - **WHEN** `sdf_event_router_emit()` is called with a `PRIO_CRITICAL` event
@@ -69,9 +73,13 @@ Specifies the public API contract for `sdf_event_router` — the pub/sub compone
 - **WHEN** `sdf_event_router_emit()` is called before `sdf_event_router_init()` has completed successfully
 - **THEN** it returns `ESP_ERR_INVALID_ARG`
 
-### Requirement: Dispatch validates event type before indexing subscribers
-The router's internal dispatch path SHALL validate `event->type < SDF_EVENT_ROUTER_TYPE_COUNT` before using it to index the subscriber table, for any event reaching dispatch regardless of entry point.
+#### Scenario: Internal wake or invalid type emit is rejected
+- **WHEN** `sdf_event_router_emit()` is called with `event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE` or `event->type >= SDF_EVENT_ROUTER_TYPE_COUNT`
+- **THEN** it returns `ESP_ERR_INVALID_ARG`
 
-#### Scenario: Out-of-range type is dropped, not dispatched
-- **WHEN** an event with `type >= SDF_EVENT_ROUTER_TYPE_COUNT` reaches dispatch
+### Requirement: Dispatch validates event type before indexing subscribers
+The router's internal dispatch path SHALL validate `event->type != SDF_EVENT_ROUTER_INTERNAL_WAKE && event->type < SDF_EVENT_ROUTER_TYPE_COUNT` before using it to index the subscriber table, for any event reaching dispatch regardless of entry point.
+
+#### Scenario: Out-of-range or internal wake type is dropped, not dispatched
+- **WHEN** an event with `event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE` or `type >= SDF_EVENT_ROUTER_TYPE_COUNT` reaches dispatch
 - **THEN** it is logged and dropped without indexing the subscriber table and without invoking any callback

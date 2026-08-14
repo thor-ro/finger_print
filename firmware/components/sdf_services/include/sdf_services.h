@@ -34,8 +34,9 @@ typedef enum {
 } sdf_services_admin_action_t;
 
 typedef enum {
-  SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL = 0,
+  SDF_SERVICES_ADMIN_ORIGIN_UNSPECIFIED = 0,
   SDF_SERVICES_ADMIN_ORIGIN_REMOTE = 1,
+  SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL = 2,
 } sdf_services_admin_origin_t;
 
 /* Device setup progress, derived from existing persisted state

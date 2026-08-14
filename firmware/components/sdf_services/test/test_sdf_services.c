@@ -513,6 +513,17 @@ void test_request_admin_action_ble_pairing_window_sets_pending_action(void) {
                     sdf_services_state()->pending_admin_action);
 }
 
+void test_bootstrap_bypass_rejected_for_unspecified_origin_on_zero_user_device(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state()->initialized = true;
+
+  /* Helper explicitly rejects unspecified origin (0) on zero-user device */
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
+  TEST_ASSERT_FALSE(sdf_services_try_bootstrap_admin_action(
+      SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, SDF_SERVICES_ADMIN_ORIGIN_UNSPECIFIED));
+}
+
 void test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
