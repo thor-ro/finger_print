@@ -126,3 +126,16 @@ void test_sdf_event_router_emit_nonblocking_delivers(void) {
 void test_sdf_event_router_emit_nonblocking_null_args(void) {
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_event_router_emit_nonblocking(NULL));
 }
+
+void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero(void) {
+    /* Verify SDF_EVENT_ROUTER_INTERNAL_WAKE is value 0 so zero-initialized events map to wake sentinel */
+    TEST_ASSERT_EQUAL(0, SDF_EVENT_ROUTER_INTERNAL_WAKE);
+
+    /* Verify SDF_EVENT_ROUTER_BIOMETRIC_MATCH is non-zero so zero-init cannot forge a match */
+    TEST_ASSERT_NOT_EQUAL(0, SDF_EVENT_ROUTER_BIOMETRIC_MATCH);
+
+    /* Verify zero-initialized event has type SDF_EVENT_ROUTER_INTERNAL_WAKE */
+    sdf_event_router_event_t zero_evt = {0};
+    TEST_ASSERT_EQUAL(SDF_EVENT_ROUTER_INTERNAL_WAKE, zero_evt.type);
+    TEST_ASSERT_NOT_EQUAL(SDF_EVENT_ROUTER_BIOMETRIC_MATCH, zero_evt.type);
+}

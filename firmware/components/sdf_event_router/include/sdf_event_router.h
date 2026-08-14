@@ -7,6 +7,9 @@
 #include "sdf_common.h"
 
 typedef enum {
+    /* Internal sentinel for breaking task queue wait (e.g. on shutdown/action notify) */
+    SDF_EVENT_ROUTER_INTERNAL_WAKE = 0,
+
     SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
     SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,
     SDF_EVENT_ROUTER_ZIGBEE_COMMAND,

@@ -39,7 +39,9 @@ static sdf_admin_task_state_t s_admin_state = {0};
 
 void sdf_admin_task_wake(void) {
     if (s_admin_state.event_queue != NULL) {
-        sdf_event_router_event_t evt = {0};
+        sdf_event_router_event_t evt = {
+            .type = SDF_EVENT_ROUTER_INTERNAL_WAKE,
+        };
         xQueueSend(s_admin_state.event_queue, &evt, 0);
     }
 }
@@ -240,6 +242,10 @@ void sdf_admin_task(void *arg) {
                 case SDF_EVENT_ROUTER_POWER_SLEEP:
                     ESP_LOGI(TAG, "Sleep event - suspending admin task");
                     s_admin_state.suspended = true;
+                    break;
+
+                case SDF_EVENT_ROUTER_INTERNAL_WAKE:
+                    /* Internal wake sentinel to break queue block */
                     break;
 
                 default:

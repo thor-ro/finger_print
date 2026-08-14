@@ -179,6 +179,7 @@ extern void test_sdf_event_router_subscribe_rejects_invalid_type(void);
 extern void test_sdf_event_router_unsubscribe(void);
 extern void test_sdf_event_router_emit_nonblocking_delivers(void);
 extern void test_sdf_event_router_emit_nonblocking_null_args(void);
+extern void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero(void);
 
 /* Tasks tests */
 extern void test_sdf_power_wakeup_reason_mapping(void);
@@ -496,6 +497,7 @@ void app_main(void) {
   RUN_TEST(test_sdf_event_router_unsubscribe);
   RUN_TEST(test_sdf_event_router_emit_nonblocking_delivers);
   RUN_TEST(test_sdf_event_router_emit_nonblocking_null_args);
+  RUN_TEST(test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero);
 
   /* Tasks tests */
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);

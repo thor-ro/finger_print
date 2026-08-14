@@ -37,7 +37,9 @@ static sdf_enroll_task_state_t s_enroll_state = {0};
 
 void sdf_enroll_task_wake(void) {
     if (s_enroll_state.event_queue != NULL) {
-        sdf_event_router_event_t evt = {0};
+        sdf_event_router_event_t evt = {
+            .type = SDF_EVENT_ROUTER_INTERNAL_WAKE,
+        };
         xQueueSend(s_enroll_state.event_queue, &evt, 0);
     }
 }
@@ -319,6 +321,10 @@ void sdf_enroll_task(void *arg) {
                     if (!s_enroll_state.suspended) {
                         sdf_services_run_enrollment_step();
                     }
+                    break;
+
+                case SDF_EVENT_ROUTER_INTERNAL_WAKE:
+                    /* Internal wake sentinel to break queue block */
                     break;
 
                 default:
