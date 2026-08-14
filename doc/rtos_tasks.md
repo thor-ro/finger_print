@@ -337,7 +337,6 @@ Button handling is **taskless** as of `quiesce-poll-loops-light-sleep`:
 | sdf_match | 16 | Drop oldest (new match more relevant) |
 | sdf_enroll | 8 | Block (enrollment is sequential) |
 | sdf_admin | 8 | Drop (user will retry) |
-| sdf_button | 4 | Drop (debounce handles burst) |
 | sdf_zigbee | 32 | Block (ESP-ZB internal) |
 | sdf_power | 8 | Drop (periodic) |
 

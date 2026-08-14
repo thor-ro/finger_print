@@ -254,7 +254,7 @@ rectangle "sdf_services" {
 
 **Admin Auth Cycle:** Runs in dedicated `sdf_admin_task` (prio 5). After button press, waits for fingerprint match with `permission == 3`. On match, claims pending action and executes. On non-admin match, flashes red.
 
-**Button Handler:** Runs in dedicated `sdf_button_task` (prio 4). GPIO ISR + software debounce. Detects multi-press (single/double/triple/long). Maps to admin actions.
+**Button Handler:** Taskless driver (`iot_button` with power-save). GPIO interrupt wakes timer debounce, detecting gestures (single/double/triple/long). Emits `BUTTON_PRESS` events to `sdf_admin_task` to map to admin actions.
 
 **Security Manager:** Tracks failed attempts within configurable window (default: 5 in 60s). Triggers lockout (default: 120s) and emits Zigbee alarm bits.
 
@@ -322,10 +322,9 @@ The following table documents the canonical FreeRTOS task architecture for SDF v
 | sdf_match | 5 (HIGH) | 6 KB | 0 | 400ms poll | Events | sdf_services |
 | sdf_enroll | 4 (NORMAL) | 4 KB | 0 | Event-driven | Events | sdf_services |
 | sdf_admin | 5 (HIGH) | 4 KB | 0 | Event-driven | Events | sdf_services |
-| sdf_button | 4 (NORMAL) | 3 KB | 0 | GPIO ISR | Events | sdf_services |
 | sdf_ota (future) | 3 (LOW) | 8 KB | 0 | Event-driven | Events | sdf_ota |
 
-**Total RAM (stacks):** ~37 KB + overhead
+**Total RAM (stacks):** ~34 KB + overhead
 
 **Priority Mapping:**
 - CRITICAL (6): `SECURITY_LOCKOUT_ENTERED`, `BIOMETRIC_MATCH` (admin)
@@ -337,7 +336,6 @@ The following table documents the canonical FreeRTOS task architecture for SDF v
 - sdf_match: 16 (drop oldest)
 - sdf_enroll: 8 (block)
 - sdf_admin: 8 (drop)
-- sdf_button: 4 (drop)
 - sdf_zigbee: 32 (block)
 - sdf_power: 8 (drop)
 

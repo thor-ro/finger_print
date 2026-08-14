@@ -47,6 +47,7 @@ Out of scope:
 **Execution Model**
 * FreeRTOS tasks with event router for inter-task communication.
 * Interrupt-driven wake from sensor `WAKE` pin and periodic Zigbee check-ins.
+* Taskless button handling via `iot_button` with power-save debounce and event dispatch to `sdf_admin_task`.
 * On-demand BLE sessions (radio gated by power manager).
 
 **Primary Tasks**
@@ -55,7 +56,6 @@ Out of scope:
 * `sdf_match_task` (prio 5, 6KB) — fingerprint 1:N match polling (400ms), sensor power mgmt, lockout tracking.
 * `sdf_enroll_task` (prio 4, 4KB) — enrollment step execution, retry logic, LED feedback.
 * `sdf_admin_task` (prio 5, 4KB) — admin auth (10s timeout), action execution (pair/join/reset/perm).
-* `sdf_button_task` (prio 4, 3KB) — GPIO ISR (GPIO 14), debounce, multi-press → admin actions.
 * `sdf_ota_task` (prio 3, 8KB, future) — OTA download, verify, commit, rollback.
 * `nimble_host` — BLE host stack (NimBLE, managed by ESP-IDF, stack/prio via menuconfig).
 

@@ -324,7 +324,7 @@ void sdf_match_task(void *arg) {
 #endif
 
         sdf_event_router_event_t event;
-        /* Bounded wait (matches sdf_enroll_task/sdf_button_task) so the loop
+        /* Bounded wait (matches sdf_enroll_task) so the loop
          * always comes back around to esp_task_wdt_reset() above even when
          * idle. A 15s TWDT is configured in sdf_app_init; blocking here
          * forever with portMAX_DELAY would starve the reset and panic the
