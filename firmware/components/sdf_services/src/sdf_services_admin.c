@@ -32,7 +32,6 @@ typedef struct {
     sdf_event_router_subscriber_t *sub_button_press;
     sdf_event_router_subscriber_t *sub_power_wake;
     sdf_event_router_subscriber_t *sub_power_sleep;
-    TaskHandle_t task_handle;
     bool suspended;
 } sdf_admin_task_state_t;
 
@@ -42,9 +41,6 @@ void sdf_admin_task_wake(void) {
     if (s_admin_state.event_queue != NULL) {
         sdf_event_router_event_t evt = {0};
         xQueueSend(s_admin_state.event_queue, &evt, 0);
-    }
-    if (s_admin_state.task_handle != NULL) {
-        xTaskNotifyGive(s_admin_state.task_handle);
     }
 }
 
@@ -178,7 +174,6 @@ void sdf_admin_task(void *arg) {
     sdf_services_state_t *s = sdf_services_state();
 
     sdf_admin_task_init_subscriptions(&s_admin_state);
-    s_admin_state.task_handle = xTaskGetCurrentTaskHandle();
 
     while (true) {
         {
@@ -205,8 +200,6 @@ void sdf_admin_task(void *arg) {
             }
             xSemaphoreGive(s->lock);
         }
-
-        ulTaskNotifyTake(pdTRUE, 0);
 
         sdf_event_router_event_t event;
         if (xQueueReceive(s_admin_state.event_queue, &event, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {

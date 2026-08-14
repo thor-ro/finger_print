@@ -29,7 +29,6 @@ typedef struct {
     sdf_event_router_subscriber_t *sub_start;
     sdf_event_router_subscriber_t *sub_power_wake;
     sdf_event_router_subscriber_t *sub_power_sleep;
-    TaskHandle_t task_handle;
     esp_timer_handle_t retry_timer;
     bool suspended;
 } sdf_enroll_task_state_t;
@@ -40,9 +39,6 @@ void sdf_enroll_task_wake(void) {
     if (s_enroll_state.event_queue != NULL) {
         sdf_event_router_event_t evt = {0};
         xQueueSend(s_enroll_state.event_queue, &evt, 0);
-    }
-    if (s_enroll_state.task_handle != NULL) {
-        xTaskNotifyGive(s_enroll_state.task_handle);
     }
 }
 
@@ -268,7 +264,6 @@ void sdf_enroll_task(void *arg) {
 #endif
 
     sdf_enroll_task_init_subscriptions(&s_enroll_state);
-    s_enroll_state.task_handle = xTaskGetCurrentTaskHandle();
 
     /* Wait for initialization to complete */
     while (!sdf_services_is_ready()) {
