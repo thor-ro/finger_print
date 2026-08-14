@@ -588,6 +588,45 @@ void test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending
                     sdf_services_state()->pending_admin_action);
 }
 
+void test_dispatch_admin_action_remote_origin_on_zero_user_device_sets_pending_action(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_test_bootstrap_cb_ctx = NULL;
+  sdf_services_state()->config.admin_action_cb = test_bootstrap_action_cb;
+  sdf_services_state()->config.admin_action_ctx = (void *)0xABCD;
+
+  /* On a 0-user device, remote origin must NOT bypass authorization; it sets pending action */
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
+  sdf_services_dispatch_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
+                                     SDF_SERVICES_ADMIN_ORIGIN_REMOTE);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE, s_test_bootstrap_cb_action);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
+                    sdf_services_state()->pending_admin_action);
+}
+
+void test_dispatch_admin_action_local_physical_origin_on_zero_user_device_bypasses_authorization(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_test_bootstrap_cb_ctx = NULL;
+  sdf_services_state()->config.admin_action_cb = test_bootstrap_action_cb;
+  sdf_services_state()->config.admin_action_ctx = (void *)0xABCD;
+
+  /* On a 0-user device, local physical origin bypasses authorization immediately */
+  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
+  sdf_services_dispatch_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
+                                     SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, s_test_bootstrap_cb_action);
+  TEST_ASSERT_EQUAL_PTR((void *)0xABCD, s_test_bootstrap_cb_ctx);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+}
+
 void test_button_dispatch_claimed_device_sets_pending_action(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());

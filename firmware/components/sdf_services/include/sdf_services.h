@@ -33,6 +33,11 @@ typedef enum {
   SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW = 9,
 } sdf_services_admin_action_t;
 
+typedef enum {
+  SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL = 0,
+  SDF_SERVICES_ADMIN_ORIGIN_REMOTE = 1,
+} sdf_services_admin_origin_t;
+
 /* Device setup progress, derived from existing persisted state
  * (sdf_services_enrolled_user_count(), sdf_storage_nuki_load()) rather than a
  * dedicated flag. See the "State-Dependent Single-Click Setup Action"

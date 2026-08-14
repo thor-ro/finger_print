@@ -129,23 +129,23 @@ sdf_services_admin_action_t sdf_button_resolve_single_click_action(void) {
 }
 
 /**
- * @brief Shared dispatch body for a resolved admin action, regardless of
- * whether the action was fixed at registration time (double-click, holds)
- * or resolved dynamically at press time (single-click).
+ * @brief Shared dispatch body for a resolved admin action, parameterized by
+ * request origin (local physical vs remote).
  *
- * Consults sdf_services_try_bootstrap_admin_action() passing local-physical
- * origin to determine whether the action can bypass admin-fingerprint authorization
- * (e.g. on an unclaimed device with 0 enrolled users). If not bypassed, sets the
- * pending admin action and pulses the pending action LED awaiting admin fingerprint.
+ * Consults sdf_services_try_bootstrap_admin_action() passing the specified origin
+ * to determine whether the action can bypass admin-fingerprint authorization
+ * (e.g. on an unclaimed device with 0 enrolled users from local physical interaction).
+ * If not bypassed, sets the pending admin action and pulses the pending action LED
+ * awaiting admin fingerprint.
  *
  * Not static: declared in sdf_services_internal.h so it can be driven
- * directly by host (linux target) unit tests without the real iot_button
- * GPIO plumbing - see test_sdf_services.c.
+ * directly by host (linux target) unit tests - see test_sdf_services.c.
  */
-void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
-    ESP_LOGI(TAG, "Admin action dispatch: action=%d", (int)action);
+void sdf_services_dispatch_admin_action(sdf_services_admin_action_t action,
+                                        sdf_services_admin_origin_t origin) {
+    ESP_LOGI(TAG, "Admin action dispatch: action=%d origin=%d", (int)action, (int)origin);
 
-    if (sdf_services_try_bootstrap_admin_action(action, SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL)) {
+    if (sdf_services_try_bootstrap_admin_action(action, origin)) {
         return;
     }
 
@@ -169,6 +169,10 @@ void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
     }
 
     xSemaphoreGive(s->lock);
+}
+
+void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
+    sdf_services_dispatch_admin_action(action, SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL);
 }
 
 void sdf_admin_task(void *arg) {
@@ -229,8 +233,12 @@ void sdf_admin_task(void *arg) {
                 }
 
                 case SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST: {
-                    ESP_LOGI(TAG, "Admin action request: %u", (unsigned)event.payload.admin.action);
-                    sdf_button_dispatch_action((sdf_services_admin_action_t)event.payload.admin.action);
+                    ESP_LOGI(TAG, "Admin action request: %u (origin %u)",
+                             (unsigned)event.payload.admin.action,
+                             (unsigned)event.payload.admin.origin);
+                    sdf_services_dispatch_admin_action(
+                        (sdf_services_admin_action_t)event.payload.admin.action,
+                        (sdf_services_admin_origin_t)event.payload.admin.origin);
                     break;
                 }
 

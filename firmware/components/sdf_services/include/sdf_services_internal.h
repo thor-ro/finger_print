@@ -74,11 +74,6 @@ const char *sdf_services_fingerprint_result_name(
 void sdf_services_run_enrollment_step(void);
 void sdf_services_start_pending_enrollment_if_any(void);
 
-typedef enum {
-  SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL = 0,
-  SDF_SERVICES_ADMIN_ORIGIN_REMOTE,
-} sdf_services_admin_origin_t;
-
 /* Shared internal functions (moved from static) */
 esp_err_t sdf_services_fingerprint_result_to_err(sdf_fingerprint_op_result_t result);
 bool sdf_services_try_claim_admin_action(const sdf_fingerprint_match_t *match);
@@ -101,11 +96,12 @@ void sdf_admin_task_wake(void);
 esp_err_t sdf_button_init(void);
 esp_err_t sdf_button_deinit(void);
 
-/* Button gesture -> admin action dispatch, exposed (moved from static) so
- * host (linux target) unit tests can drive it directly without the real
- * iot_button GPIO plumbing - see test_sdf_services.c. */
+/* Admin action dispatch, exposed so host (linux target) unit tests can drive it
+ * directly without real hardware - see test_sdf_services.c. */
 sdf_services_admin_action_t sdf_button_resolve_single_click_action(void);
 void sdf_button_dispatch_action(sdf_services_admin_action_t action);
+void sdf_services_dispatch_admin_action(sdf_services_admin_action_t action,
+                                        sdf_services_admin_origin_t origin);
 
 /* Task start/stop */
 esp_err_t sdf_services_start_tasks(void);

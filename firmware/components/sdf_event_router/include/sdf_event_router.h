@@ -84,6 +84,7 @@ typedef struct {
 
 typedef struct {
     uint8_t action;
+    uint8_t origin;
 } sdf_event_router_admin_payload_t;
 
 typedef struct {

@@ -88,6 +88,12 @@ typedef struct {
     esp_err_t result;
 } sdf_event_router_admin_action_complete_payload_t;
 
+// Admin action request
+typedef struct {
+    uint8_t action;
+    uint8_t origin;
+} sdf_event_router_admin_payload_t;
+
 // Button press
 typedef struct {
     uint8_t press_type;  // 1=single, 2=double, 3=triple, 4=long_3s, 5=long_8s
