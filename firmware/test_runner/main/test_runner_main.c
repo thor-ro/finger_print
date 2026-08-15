@@ -173,6 +173,7 @@ extern void test_button_dispatch_factory_reset_on_claimed_device_sets_pending_ac
 extern void test_button_press_dropped_under_backpressure_leaves_no_state(void);
 extern void test_button_init_deinit_stop_start_cycle(void);
 extern void test_task_wake_helpers_safe_when_idle(void);
+extern void test_sdf_services_start_stop_start_tasks_cycle(void);
 
 /* Event Router tests */
 extern void test_sdf_event_router_init_returns_ok(void);
@@ -504,6 +505,7 @@ void app_main(void) {
   RUN_TEST(test_button_press_dropped_under_backpressure_leaves_no_state);
   RUN_TEST(test_button_init_deinit_stop_start_cycle);
   RUN_TEST(test_task_wake_helpers_safe_when_idle);
+  RUN_TEST(test_sdf_services_start_stop_start_tasks_cycle);
 
   /* Event Router tests */
   RUN_TEST(test_sdf_event_router_init_returns_ok);

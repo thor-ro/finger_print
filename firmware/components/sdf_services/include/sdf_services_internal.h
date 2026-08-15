@@ -91,9 +91,15 @@ void sdf_enroll_task(void *arg);
 void sdf_admin_task(void *arg);
 void sdf_enroll_task_wake(void);
 void sdf_admin_task_wake(void);
-void sdf_match_task_init_subscriptions(void);
-void sdf_admin_task_init_subscriptions(void);
-void sdf_enroll_task_init_subscriptions(void);
+esp_err_t sdf_match_task_init_subscriptions(void);
+esp_err_t sdf_admin_task_init_subscriptions(void);
+esp_err_t sdf_enroll_task_init_subscriptions(void);
+esp_err_t sdf_match_task_init_queue(void);
+void sdf_match_task_deinit_queue(void);
+esp_err_t sdf_admin_task_init_queue(void);
+void sdf_admin_task_deinit_queue(void);
+esp_err_t sdf_enroll_task_init_queue(void);
+void sdf_enroll_task_deinit_queue(void);
 
 /* Button handling */
 esp_err_t sdf_button_init(void);

@@ -588,7 +588,6 @@ void sdf_services_get_default_config(sdf_services_config_t *config) {
   config->enrollment_btn_gpio = (gpio_num_t)sdf_cfg->enrollment_btn_gpio;
   config->ws2812_led_gpio = (gpio_num_t)sdf_cfg->ws2812_led_gpio;
   config->battery_adc_pin = sdf_cfg->battery_adc_pin;
-
 }
 
 /* New task start/stop functions */
@@ -599,16 +598,21 @@ esp_err_t sdf_services_start_tasks(void) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    /* Create match task queue for ISR to wake the task. sdf_services_init()
-     * already creates this queue, so only create it here if it's somehow
-     * missing (e.g. this is called outside the normal init path) -
-     * unconditionally recreating it would leak the previous queue handle. */
-    if (s->match_task_queue == NULL) {
-        s->match_task_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
-        if (s->match_task_queue == NULL) {
-            ESP_LOGE(TAG, "Failed to create match task queue");
-            return ESP_FAIL;
-        }
+    /* Initialize task queues idempotently */
+    esp_err_t err = sdf_match_task_init_queue();
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = sdf_enroll_task_init_queue();
+    if (err != ESP_OK) {
+        sdf_match_task_deinit_queue();
+        return err;
+    }
+    err = sdf_admin_task_init_queue();
+    if (err != ESP_OK) {
+        sdf_match_task_deinit_queue();
+        sdf_enroll_task_deinit_queue();
+        return err;
     }
 
     /* Create match task */
@@ -617,6 +621,9 @@ esp_err_t sdf_services_start_tasks(void) {
                                      SDF_MATCH_TASK_PRIORITY, &s->match_task);
     if (task_ok != pdPASS) {
         ESP_LOGE(TAG, "Failed to create match task");
+        sdf_match_task_deinit_queue();
+        sdf_enroll_task_deinit_queue();
+        sdf_admin_task_deinit_queue();
         return ESP_FAIL;
     }
 
@@ -628,6 +635,9 @@ esp_err_t sdf_services_start_tasks(void) {
         ESP_LOGE(TAG, "Failed to create enroll task");
         vTaskDelete(s->match_task);
         s->match_task = NULL;
+        sdf_match_task_deinit_queue();
+        sdf_enroll_task_deinit_queue();
+        sdf_admin_task_deinit_queue();
         return ESP_FAIL;
     }
 
@@ -641,6 +651,9 @@ esp_err_t sdf_services_start_tasks(void) {
         vTaskDelete(s->enroll_task);
         s->match_task = NULL;
         s->enroll_task = NULL;
+        sdf_match_task_deinit_queue();
+        sdf_enroll_task_deinit_queue();
+        sdf_admin_task_deinit_queue();
         return ESP_FAIL;
     }
 
@@ -684,7 +697,7 @@ esp_err_t sdf_services_stop_tasks(void) {
      * safely because event_queue is set to NULL on exit.
      *
      * Each task polls stop_requested (see sdf_match_task / sdf_enroll_task /
-     * sdf_admin_task) and exits on its own - clearing event_queue and
+     * sdf_admin_task) and exits on its own - deinitializing its queue and
      * self-deleting - instead of being killed from outside via vTaskDelete().
      * Killing a task from outside can leave s_state.lock permanently held if
      * the victim happened to be inside a critical section (or, for
@@ -698,8 +711,8 @@ esp_err_t sdf_services_stop_tasks(void) {
     while (waited_ms < max_wait_ms) {
         {
             /* Scoped so the lock is released before vTaskDelay() below -
-             * holding it across the delay would needlessly block every
-             * other s_state.lock user for the whole polling window. */
+              * holding it across the delay would needlessly block every
+              * other s_state.lock user for the whole polling window. */
             SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
             all_stopped = (guard.acquired == pdTRUE) && s->match_task == NULL &&
                           s->enroll_task == NULL && s->admin_task == NULL;
@@ -731,10 +744,11 @@ esp_err_t sdf_services_stop_tasks(void) {
         }
     }
 
-    if (s->match_task_queue) {
-        vQueueDelete(s->match_task_queue);
-        s->match_task_queue = NULL;
-    }
+    /* Ensure queues are cleaned up in case tasks were force-deleted or
+     * did not run their cooperative deinit */
+    sdf_match_task_deinit_queue();
+    sdf_enroll_task_deinit_queue();
+    sdf_admin_task_deinit_queue();
 
     if (s->lock != NULL) {
         SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
@@ -748,6 +762,19 @@ esp_err_t sdf_services_stop_tasks(void) {
 }
 
 
+/* sdf_services_init() has to publish initialized=true before it calls
+ * sdf_services_start_tasks(), because start_tasks() gates on
+ * sdf_services_is_ready(). Every failure path after that point must roll the
+ * flag back, or a failed init leaves is_ready() reporting a live module that
+ * has no drivers and no tasks. */
+static void sdf_services_mark_uninitialized(void) {
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
+      pdTRUE) {
+    s_state.initialized = false;
+    xSemaphoreGive(s_state.lock);
+  }
+}
+
 esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   if (config == NULL || config->match_poll_interval_ms == 0 ||
       config->match_cooldown_ms == 0 || config->failed_attempt_threshold == 0 ||
@@ -760,9 +787,8 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
     s_state.lock = xSemaphoreCreateMutex();
     s_state.wake_sem = xSemaphoreCreateBinary();
     s_state.admin_action_done_sem = xSemaphoreCreateBinary();
-    s_state.match_task_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
     if (s_state.lock == NULL || s_state.wake_sem == NULL ||
-        s_state.admin_action_done_sem == NULL || s_state.match_task_queue == NULL) {
+        s_state.admin_action_done_sem == NULL) {
       return ESP_ERR_NO_MEM;
     }
   }
@@ -811,30 +837,49 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
     memset(s_state.enrolled_perm_packed, 0, sizeof(s_state.enrolled_perm_packed));
   }
   /* Register event-router subscriptions for service tasks during service init
-   * after shared queues are created and before tasks are created and started. */
-  sdf_match_task_init_subscriptions();
-  sdf_admin_task_init_subscriptions();
-  sdf_enroll_task_init_subscriptions();
+   * before tasks are created and started. Propagate any registration error. */
+  esp_err_t sub_err = sdf_match_task_init_subscriptions();
+  if (sub_err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize match subscriptions: %s", esp_err_to_name(sub_err));
+    xSemaphoreGive(s_state.lock);
+    return sub_err;
+  }
+  sub_err = sdf_admin_task_init_subscriptions();
+  if (sub_err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize admin subscriptions: %s", esp_err_to_name(sub_err));
+    xSemaphoreGive(s_state.lock);
+    return sub_err;
+  }
+  sub_err = sdf_enroll_task_init_subscriptions();
+  if (sub_err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to initialize enroll subscriptions: %s", esp_err_to_name(sub_err));
+    xSemaphoreGive(s_state.lock);
+    return sub_err;
+  }
+
+  s_state.initialized = true;
   xSemaphoreGive(s_state.lock);
 
-sdf_drivers_config_t drivers_config = {
-       .fingerprint = s_state.config.fingerprint,
-       .led = {
-           .gpio_num = config->ws2812_led_gpio,
-       },
-       .battery_adc_pin = config->battery_adc_pin,
-       .fp_wake_gpio = config->wake_gpio,
-   };
+  sdf_drivers_config_t drivers_config = {
+      .fingerprint = s_state.config.fingerprint,
+      .led = {
+          .gpio_num = config->ws2812_led_gpio,
+      },
+      .battery_adc_pin = config->battery_adc_pin,
+      .fp_wake_gpio = config->wake_gpio,
+  };
 
   esp_err_t err = sdf_drivers_init(&drivers_config);
   if (err != ESP_OK) {
+    sdf_services_mark_uninitialized();
     return err;
   }
 
-  /* Start new tasks instead of legacy single task */
+  /* Start new tasks */
   err = sdf_services_start_tasks();
   if (err != ESP_OK) {
     sdf_drivers_deinit();
+    sdf_services_mark_uninitialized();
     return err;
   }
 
@@ -853,7 +898,6 @@ sdf_drivers_config_t drivers_config = {
 
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
       pdTRUE) {
-    s_state.initialized = true;
     if (s_state.enroll_task != NULL) {
       xTaskNotifyGive(s_state.enroll_task);
     }

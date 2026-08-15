@@ -41,25 +41,60 @@ static void sdf_match_task_event_cb(void *ctx, const sdf_event_router_event_t *e
     }
 }
 
-void sdf_match_task_init_subscriptions(void) {
+esp_err_t sdf_match_task_init_queue(void) {
     sdf_services_state_t *s = sdf_services_state();
-    s_match_state.event_queue = s->match_task_queue;
+    if (s_match_state.event_queue == NULL) {
+        if (s->match_task_queue == NULL) {
+            s->match_task_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+            if (s->match_task_queue == NULL) {
+                ESP_LOGE(TAG, "Failed to create match task queue");
+                return ESP_ERR_NO_MEM;
+            }
+        }
+        s_match_state.event_queue = s->match_task_queue;
+    }
+    return ESP_OK;
+}
 
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST,
-                               SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_match_task_event_cb, &s_match_state);
+void sdf_match_task_deinit_queue(void) {
+    sdf_services_state_t *s = sdf_services_state();
+    s_match_state.event_queue = NULL;
+    /* Clear the shared handle before deleting it: sdf_services_stop_tasks()
+     * also calls this after force-deleting a task that may already be partway
+     * through its own cooperative deinit, and a check-then-delete would let
+     * both contexts reach vQueueDelete() on the same handle. */
+    QueueHandle_t q = s->match_task_queue;
+    s->match_task_queue = NULL;
+    if (q != NULL) {
+        vQueueDelete(q);
+    }
+}
+
+esp_err_t sdf_match_task_init_subscriptions(void) {
+    esp_err_t err;
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST,
+                                     SDF_EVENT_ROUTER_PRIO_HIGH,
+                                     sdf_match_task_event_cb, &s_match_state);
+    if (err != ESP_OK) {
+        return err;
+    }
 
     /* min_prio is the *lowest* importance this subscriber accepts (the
      * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
      * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
      * both out. Use LOW to accept every priority for these two types. */
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
-                               SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_match_task_event_cb, &s_match_state);
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
+                                     SDF_EVENT_ROUTER_PRIO_LOW,
+                                     sdf_match_task_event_cb, &s_match_state);
+    if (err != ESP_OK) {
+        return err;
+    }
 
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
-                               SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_match_task_event_cb, &s_match_state);
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
+                                     SDF_EVENT_ROUTER_PRIO_LOW,
+                                     sdf_match_task_event_cb, &s_match_state);
+    return err;
 }
 
 static void sdf_match_emit_lockout_cleared(void) {
@@ -370,7 +405,7 @@ void sdf_match_task(void *arg) {
      * cleanly instead of being killed from outside. Subscriptions remain in
      * place for the lifetime of the boot; clearing event_queue causes any
      * post-exit callback invocations to discard events safely. */
-    s_match_state.event_queue = NULL;
+    sdf_match_task_deinit_queue();
 #ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_delete(NULL);
 #endif

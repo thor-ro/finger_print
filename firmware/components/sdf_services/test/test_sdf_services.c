@@ -6,6 +6,7 @@
 
 #include "sdf_services.h"
 #include "sdf_services_internal.h"
+#include "sdf_event_router.h"
 
 /* Test-only fault injector for sdf_storage_enrolled_users_save(), compiled
  * into sdf_storage only when SDF_STORAGE_TESTING is defined (see
@@ -26,6 +27,7 @@ extern void test_sdf_storage_set_enrolled_users_save_fail_count(uint32_t count);
  * test doesn't depend on some other suite happening to have initialized
  * services first. Idempotent, so safe to call from both tests below. */
 static void ensure_services_initialized(void) {
+  sdf_event_router_init();
   sdf_services_config_t cfg;
   sdf_services_get_default_config(&cfg);
   sdf_services_init(&cfg);
@@ -714,6 +716,7 @@ void test_button_press_dropped_under_backpressure_leaves_no_state(void) {
  * which is only safe for tests that don't care whether init() actually ran
  * the load. */
 void test_sdf_services_init_loads_enrolled_users_cache_before_return(void) {
+  sdf_event_router_init();
   esp_err_t nvs_err = nvs_flash_init();
   if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
       nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -889,4 +892,35 @@ void test_task_wake_helpers_safe_when_idle(void) {
   /* Task wake helpers can be called anytime (e.g. during stop_tasks or admin action request) */
   sdf_enroll_task_wake();
   sdf_admin_task_wake();
+}
+
+void test_sdf_services_start_stop_start_tasks_cycle(void) {
+  ensure_services_initialized();
+  esp_err_t err = sdf_services_stop_tasks();
+  TEST_ASSERT_EQUAL(ESP_OK, err);
+  TEST_ASSERT_NULL(sdf_services_state()->match_task);
+  TEST_ASSERT_NULL(sdf_services_state()->enroll_task);
+  TEST_ASSERT_NULL(sdf_services_state()->admin_task);
+
+  err = sdf_services_start_tasks();
+  TEST_ASSERT_EQUAL(ESP_OK, err);
+  TEST_ASSERT_NOT_NULL(sdf_services_state()->match_task);
+  TEST_ASSERT_NOT_NULL(sdf_services_state()->enroll_task);
+  TEST_ASSERT_NOT_NULL(sdf_services_state()->admin_task);
+
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  err = sdf_services_stop_tasks();
+  TEST_ASSERT_EQUAL(ESP_OK, err);
+  TEST_ASSERT_NULL(sdf_services_state()->match_task);
+  TEST_ASSERT_NULL(sdf_services_state()->enroll_task);
+  TEST_ASSERT_NULL(sdf_services_state()->admin_task);
+
+  err = sdf_services_start_tasks();
+  TEST_ASSERT_EQUAL(ESP_OK, err);
+  TEST_ASSERT_NOT_NULL(sdf_services_state()->match_task);
+  TEST_ASSERT_NOT_NULL(sdf_services_state()->enroll_task);
+  TEST_ASSERT_NOT_NULL(sdf_services_state()->admin_task);
+
+  vTaskDelay(pdMS_TO_TICKS(50));
 }

@@ -50,18 +50,41 @@ static void sdf_admin_task_event_cb(void *ctx, const sdf_event_router_event_t *e
     }
 }
 
-void sdf_admin_task_init_subscriptions(void) {
+esp_err_t sdf_admin_task_init_queue(void) {
     if (s_admin_state.event_queue == NULL) {
         s_admin_state.event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+        if (s_admin_state.event_queue == NULL) {
+            ESP_LOGE(TAG, "Failed to create admin task queue");
+            return ESP_ERR_NO_MEM;
+        }
+    }
+    return ESP_OK;
+}
+
+void sdf_admin_task_deinit_queue(void) {
+    if (s_admin_state.event_queue != NULL) {
+        QueueHandle_t q = s_admin_state.event_queue;
+        s_admin_state.event_queue = NULL;
+        vQueueDelete(q);
+    }
+}
+
+esp_err_t sdf_admin_task_init_subscriptions(void) {
+    esp_err_t err;
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST,
+                                     SDF_EVENT_ROUTER_PRIO_HIGH,
+                                     sdf_admin_task_event_cb, &s_admin_state);
+    if (err != ESP_OK) {
+        return err;
     }
 
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST,
-                               SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_admin_task_event_cb, &s_admin_state);
-
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_BUTTON_PRESS,
-                               SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_admin_task_event_cb, &s_admin_state);
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BUTTON_PRESS,
+                                     SDF_EVENT_ROUTER_PRIO_HIGH,
+                                     sdf_admin_task_event_cb, &s_admin_state);
+    if (err != ESP_OK) {
+        return err;
+    }
 
     /* Deliberately not subscribed to SDF_EVENT_ROUTER_BIOMETRIC_MATCH here:
      * sdf_match_task claims/authorizes any pending admin action itself
@@ -80,13 +103,17 @@ void sdf_admin_task_init_subscriptions(void) {
      * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
      * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
      * both out. Use LOW to accept every priority for these two types. */
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
-                               SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_admin_task_event_cb, &s_admin_state);
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
+                                     SDF_EVENT_ROUTER_PRIO_LOW,
+                                     sdf_admin_task_event_cb, &s_admin_state);
+    if (err != ESP_OK) {
+        return err;
+    }
 
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
-                               SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_admin_task_event_cb, &s_admin_state);
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
+                                     SDF_EVENT_ROUTER_PRIO_LOW,
+                                     sdf_admin_task_event_cb, &s_admin_state);
+    return err;
 }
 
 static void sdf_admin_task_emit_action_complete(sdf_services_admin_action_t action,
@@ -276,7 +303,7 @@ void sdf_admin_task(void *arg) {
      * cleanly instead of being killed from outside. Subscriptions remain in
      * place for the lifetime of the boot; clearing event_queue causes any
      * post-exit callback invocations to discard events safely. */
-    s_admin_state.event_queue = NULL;
+    sdf_admin_task_deinit_queue();
     {
         SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
         if (guard.acquired == pdTRUE) {

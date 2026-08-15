@@ -59,34 +59,66 @@ static void sdf_enroll_task_event_cb(void *ctx, const sdf_event_router_event_t *
     }
 }
 
-void sdf_enroll_task_init_subscriptions(void) {
+esp_err_t sdf_enroll_task_init_queue(void) {
     if (s_enroll_state.event_queue == NULL) {
         s_enroll_state.event_queue = xQueueCreate(10, sizeof(sdf_event_router_event_t));
+        if (s_enroll_state.event_queue == NULL) {
+            ESP_LOGE(TAG, "Failed to create enroll task queue");
+            return ESP_ERR_NO_MEM;
+        }
     }
-
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_START,
-                               SDF_EVENT_ROUTER_PRIO_HIGH,
-                               sdf_enroll_task_event_cb, &s_enroll_state);
-
-    /* min_prio is the *lowest* importance this subscriber accepts (the
-     * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
-     * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
-     * both out. Use LOW to accept every priority for these two types. */
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
-                               SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_enroll_task_event_cb, &s_enroll_state);
-
-    sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
-                               SDF_EVENT_ROUTER_PRIO_LOW,
-                               sdf_enroll_task_event_cb, &s_enroll_state);
 
     if (s_enroll_state.retry_timer == NULL) {
         esp_timer_create_args_t timer_args = {
             .callback = sdf_enroll_retry_timer_cb,
             .name = "enroll_retry",
         };
-        esp_timer_create(&timer_args, &s_enroll_state.retry_timer);
+        esp_err_t err = esp_timer_create(&timer_args, &s_enroll_state.retry_timer);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to create enroll retry timer: %s", esp_err_to_name(err));
+        }
     }
+    return ESP_OK;
+}
+
+void sdf_enroll_task_deinit_queue(void) {
+    if (s_enroll_state.retry_timer != NULL) {
+        esp_timer_stop(s_enroll_state.retry_timer);
+        esp_timer_delete(s_enroll_state.retry_timer);
+        s_enroll_state.retry_timer = NULL;
+    }
+    if (s_enroll_state.event_queue != NULL) {
+        QueueHandle_t q = s_enroll_state.event_queue;
+        s_enroll_state.event_queue = NULL;
+        vQueueDelete(q);
+    }
+}
+
+esp_err_t sdf_enroll_task_init_subscriptions(void) {
+    esp_err_t err;
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_START,
+                                     SDF_EVENT_ROUTER_PRIO_HIGH,
+                                     sdf_enroll_task_event_cb, &s_enroll_state);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    /* min_prio is the *lowest* importance this subscriber accepts (the
+     * filter is sub->min_prio >= event->priority); POWER_WAKE is emitted at
+     * NORMAL and POWER_SLEEP at LOW, so CRITICAL here would silently filter
+     * both out. Use LOW to accept every priority for these two types. */
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_WAKE,
+                                     SDF_EVENT_ROUTER_PRIO_LOW,
+                                     sdf_enroll_task_event_cb, &s_enroll_state);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_POWER_SLEEP,
+                                     SDF_EVENT_ROUTER_PRIO_LOW,
+                                     sdf_enroll_task_event_cb, &s_enroll_state);
+    return err;
 }
 
 static void sdf_enroll_task_emit_complete(uint16_t user_id, uint8_t permission) {
@@ -327,12 +359,7 @@ void sdf_enroll_task(void *arg) {
      * cleanly instead of being killed from outside. Subscriptions remain in
      * place for the lifetime of the boot; clearing event_queue causes any
      * post-exit callback invocations to discard events safely. */
-    if (s_enroll_state.retry_timer) {
-        esp_timer_stop(s_enroll_state.retry_timer);
-        esp_timer_delete(s_enroll_state.retry_timer);
-        s_enroll_state.retry_timer = NULL;
-    }
-    s_enroll_state.event_queue = NULL;
+    sdf_enroll_task_deinit_queue();
 #ifndef CONFIG_IDF_TARGET_LINUX
     esp_task_wdt_delete(NULL);
 #endif
