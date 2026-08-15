@@ -1,5 +1,6 @@
 #include "sdf_protocol_zigbee.h"
 
+#include <inttypes.h>
 #include <stdbool.h>
 #include <string.h>
 
@@ -39,6 +40,15 @@
 #define SDF_ZIGBEE_CHECKIN_INTERVAL_MIN_MS 1000U
 #define SDF_ZIGBEE_CHECKIN_INTERVAL_MAX_MS 600000U
 #define SDF_ZIGBEE_PRIMARY_CHANNEL_MASK ESP_ZB_TRANSCEIVER_ALL_CHANNELS_MASK
+
+/* Network steering retry backoff. A lock that is out of range of its
+ * coordinator fails steering indefinitely, and each attempt is a full
+ * all-channel active scan - the most expensive thing the radio does. Retrying
+ * at a flat 1 s is what a mains-powered device can afford; on battery it is a
+ * drain with no upper bound. Back off geometrically to a ceiling so an
+ * unreachable network costs one scan per minute instead of sixty. */
+#define SDF_ZIGBEE_STEERING_RETRY_MIN_MS 1000U
+#define SDF_ZIGBEE_STEERING_RETRY_MAX_MS 60000U
 
 /* Kconfig defaults (overridden by sdkconfig when available) */
 #ifndef CONFIG_SDF_ZIGBEE_SLEEP_ENABLE
@@ -96,6 +106,26 @@ static void sdf_zigbee_start_commissioning_cb(uint8_t mode_mask) {
   }
 }
 
+/* Both accessed only from the Zigbee stack task - the signal handler and the
+ * scheduler alarm callback both run there - so no lock is needed. */
+static uint32_t s_steering_retry_delay_ms = SDF_ZIGBEE_STEERING_RETRY_MIN_MS;
+
+static void sdf_zigbee_reset_steering_backoff(void) {
+  s_steering_retry_delay_ms = SDF_ZIGBEE_STEERING_RETRY_MIN_MS;
+}
+
+/* Returns the delay to use for this retry, then advances the backoff. */
+static uint32_t sdf_zigbee_next_steering_delay_ms(void) {
+  uint32_t delay_ms = s_steering_retry_delay_ms;
+  if (s_steering_retry_delay_ms < SDF_ZIGBEE_STEERING_RETRY_MAX_MS) {
+    s_steering_retry_delay_ms *= 2;
+    if (s_steering_retry_delay_ms > SDF_ZIGBEE_STEERING_RETRY_MAX_MS) {
+      s_steering_retry_delay_ms = SDF_ZIGBEE_STEERING_RETRY_MAX_MS;
+    }
+  }
+  return delay_ms;
+}
+
 static void sdf_zigbee_set_network_joined(bool joined) {
   if (s_state.lock == NULL) {
     return;
@@ -125,15 +155,25 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
   case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
   case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
     if (err_status == ESP_OK) {
-      ESP_LOGI(TAG, "Device started in %s factory-reset mode",
-               esp_zb_bdb_is_factory_new() ? "" : "non");
+      ESP_LOGI(TAG, "Device started in%s factory-reset mode",
+               esp_zb_bdb_is_factory_new() ? "" : " non");
       if (esp_zb_bdb_is_factory_new()) {
         ESP_LOGI(TAG, "Start network steering");
+        sdf_zigbee_reset_steering_backoff();
         esp_zb_bdb_start_top_level_commissioning(
             ESP_ZB_BDB_MODE_NETWORK_STEERING);
+      } else {
+        /* Already commissioned onto a network before the reboot, so no
+         * steering happens and ESP_ZB_BDB_SIGNAL_STEERING never fires. This
+         * branch is the only place the rejoined state gets recorded - without
+         * it sdf_protocol_zigbee_is_ready() (which gates on network_joined)
+         * stays false for the rest of the boot and no lock state is ever
+         * reported upstream. */
         ESP_LOGI(TAG, "Device rebooted and using existing network");
-esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
-                                                     CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60);
+        sdf_zigbee_set_network_joined(true);
+        esp_zb_ota_upgrade_client_query_interval_set(
+            SDF_ZIGBEE_ENDPOINT,
+            CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60);
       }
     } else {
       ESP_LOGW(TAG, "Failed to initialize Zigbee stack (status=%s)",
@@ -155,15 +195,20 @@ esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
                extended_pan_id[1], extended_pan_id[0], esp_zb_get_pan_id(),
                esp_zb_get_current_channel(), esp_zb_get_short_address());
 
-esp_zb_ota_upgrade_client_query_interval_set(SDF_ZIGBEE_ENDPOINT,
-                                                     CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60);
+      sdf_zigbee_reset_steering_backoff();
+      esp_zb_ota_upgrade_client_query_interval_set(
+          SDF_ZIGBEE_ENDPOINT,
+          CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS * 60);
     } else {
       sdf_zigbee_set_network_joined(false);
-      ESP_LOGW(TAG, "Network steering failed (status=%s), scheduling retry",
-               esp_err_to_name(err_status));
+      uint32_t delay_ms = sdf_zigbee_next_steering_delay_ms();
+      ESP_LOGW(TAG,
+               "Network steering failed (status=%s), retrying in %" PRIu32
+               " ms",
+               esp_err_to_name(err_status), delay_ms);
       esp_zb_scheduler_alarm(
           (esp_zb_callback_t)sdf_zigbee_start_commissioning_cb,
-          ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
+          ESP_ZB_BDB_MODE_NETWORK_STEERING, delay_ms);
     }
     break;
 

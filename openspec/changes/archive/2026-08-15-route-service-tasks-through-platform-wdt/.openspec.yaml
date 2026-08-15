@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-08-15
+skip_specs: true
+goal: "One place owns the watchdog #ifndef, and a missing registration is
+  visible instead of silent"

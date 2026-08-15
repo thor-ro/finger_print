@@ -9,9 +9,6 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
-#ifndef CONFIG_IDF_TARGET_LINUX
-#include "esp_task_wdt.h"
-#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -271,16 +268,12 @@ void sdf_match_task(void *arg) {
     /* Initial probe and user query on startup */
     bool is_powered = true;
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_add(NULL);
-#endif
+    sdf_platform_time_wdt_add();
 
     /* Wait for initialization to complete */
     while (!sdf_services_is_ready()) {
         vTaskDelay(pdMS_TO_TICKS(10));
-#ifndef CONFIG_IDF_TARGET_LINUX
-        esp_task_wdt_reset();
-#endif
+        sdf_platform_time_wdt_reset();
     }
 
     /* Fast connectivity check. fp_probe() is a blocking UART round-trip; see
@@ -304,9 +297,7 @@ void sdf_match_task(void *arg) {
         xSemaphoreGive(s->lock);
     }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_reset();
-#endif
+    sdf_platform_time_wdt_reset();
 
     if (count > 0) {
         led_off();
@@ -342,13 +333,11 @@ void sdf_match_task(void *arg) {
             }
         }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-        esp_task_wdt_reset();
-#endif
+        sdf_platform_time_wdt_reset();
 
         sdf_event_router_event_t event;
         /* Bounded wait (matches sdf_enroll_task) so the loop
-         * always comes back around to esp_task_wdt_reset() above even when
+         * always comes back around to sdf_platform_time_wdt_reset() above even when
          * idle. A 15s TWDT is configured in sdf_app_init; blocking here
          * forever with portMAX_DELAY would starve the reset and panic the
          * device the first time no event arrives for 15s. It also bounds how
@@ -406,9 +395,7 @@ void sdf_match_task(void *arg) {
      * place for the lifetime of the boot; clearing event_queue causes any
      * post-exit callback invocations to discard events safely. */
     sdf_match_task_deinit_queue();
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_delete(NULL);
-#endif
+    sdf_platform_time_wdt_delete();
     {
         SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
         if (guard.acquired == pdTRUE) {

@@ -108,6 +108,8 @@ extern void test_sdf_power_crc16_ccitt_known_vector(void);
 extern void test_sdf_platform_sleep_retention_linux_noops(void);
 extern void test_sdf_platform_sleep_wakeup_from_linux_noops(void);
 extern void test_sdf_platform_nvs_security_status_defaults_and_erase_before_init(void);
+extern void test_sdf_platform_time_wdt_registration_lifecycle(void);
+extern void test_sdf_platform_time_wdt_not_found_one_shot_diagnostic(void);
 
 /* SDF Platform Power tests */
 extern void test_sdf_platform_power_enable_gpio_wake_delegates(void);
@@ -445,6 +447,8 @@ void app_main(void) {
   RUN_TEST(test_sdf_platform_sleep_retention_linux_noops);
   RUN_TEST(test_sdf_platform_sleep_wakeup_from_linux_noops);
   RUN_TEST(test_sdf_platform_nvs_security_status_defaults_and_erase_before_init);
+  RUN_TEST(test_sdf_platform_time_wdt_registration_lifecycle);
+  RUN_TEST(test_sdf_platform_time_wdt_not_found_one_shot_diagnostic);
 
   /* SDF Platform Power tests */
   RUN_TEST(test_sdf_platform_power_enable_gpio_wake_delegates);

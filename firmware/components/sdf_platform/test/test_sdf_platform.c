@@ -3,6 +3,9 @@
 #include "sdf_platform_gpio.h"
 #include "sdf_platform_nvs.h"
 #include "sdf_platform_sleep.h"
+#include "sdf_platform_time.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // -----------------------------------------------------------------------------
 // GPIO
@@ -152,3 +155,66 @@ void test_sdf_platform_nvs_security_status_defaults_and_erase_before_init(void) 
  * all kind of dependencies") - so this isn't a gap in sdf_platform, it's
  * the same upstream linux-target limitation as the sleep entry points
  * above, discovered empirically via a real build. See design.md Non-Goals. */
+
+// -----------------------------------------------------------------------------
+// Watchdog
+// -----------------------------------------------------------------------------
+
+typedef struct {
+  TaskHandle_t handle;
+  volatile bool done;
+} wdt_test_task_ctx_t;
+
+static void wdt_test_unregistered_task_fn(void *arg) {
+  wdt_test_task_ctx_t *ctx = (wdt_test_task_ctx_t *)arg;
+  ctx->handle = xTaskGetCurrentTaskHandle();
+  sdf_platform_time_wdt_reset();
+  ctx->done = true;
+  vTaskDelete(NULL);
+}
+
+void test_sdf_platform_time_wdt_registration_lifecycle(void) {
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_is_registered(NULL));
+  sdf_platform_time_wdt_add();
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(NULL));
+  sdf_platform_time_wdt_delete();
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_is_registered(NULL));
+}
+
+void test_sdf_platform_time_wdt_not_found_one_shot_diagnostic(void) {
+  sdf_platform_time_wdt_clear_warned_tasks();
+  TEST_ASSERT_EQUAL(0, sdf_platform_time_wdt_get_warning_count());
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_is_registered(NULL));
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_has_warned(NULL));
+
+  // Reset from unregistered task -> records diagnostic once, warning count becomes 1
+  sdf_platform_time_wdt_reset();
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_has_warned(NULL));
+  TEST_ASSERT_EQUAL(1, sdf_platform_time_wdt_get_warning_count());
+
+  // Second reset from same task -> does not re-warn, warning count remains 1
+  sdf_platform_time_wdt_reset();
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_has_warned(NULL));
+  TEST_ASSERT_EQUAL(1, sdf_platform_time_wdt_get_warning_count());
+
+  // Reset from a different unregistered task -> warned for that task, warning count becomes 2
+  wdt_test_task_ctx_t ctx = {0};
+  TaskHandle_t th = NULL;
+  BaseType_t ret = xTaskCreate(wdt_test_unregistered_task_fn, "wdt_test", 4096, &ctx, 5, &th);
+  TEST_ASSERT_EQUAL(pdPASS, ret);
+  while (!ctx.done) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_has_warned(ctx.handle));
+  TEST_ASSERT_EQUAL(2, sdf_platform_time_wdt_get_warning_count());
+
+  // Registered task resets without warning
+  sdf_platform_time_wdt_add();
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(NULL));
+  sdf_platform_time_wdt_reset();
+  TEST_ASSERT_EQUAL(2, sdf_platform_time_wdt_get_warning_count());
+  sdf_platform_time_wdt_delete();
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_is_registered(NULL));
+
+  sdf_platform_time_wdt_clear_warned_tasks();
+}

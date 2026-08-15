@@ -96,6 +96,11 @@ static SemaphoreHandle_t s_lock = NULL;
  * same as s_connections. */
 static sdf_ble_companion_bond_state_t s_bond_state;
 
+/* Guards sdf_ble_companion_seed_allow_list() so it runs once per s_bond_state
+ * lifetime. Cleared in sdf_ble_companion_init() alongside the
+ * sdf_ble_companion_bond_state_init() that resets the state it seeds. */
+static bool s_allow_list_seeded = false;
+
 /* Scratch buffer used by the GATT access callbacks below (sdf_ble_companion_*
  * _access) to snapshot a characteristic's value under s_lock so it can be
  * handed to a user callback (on_config_write/on_enroll_write/on_ota_write/
@@ -951,9 +956,70 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
     return 0;
 }
 
+/* Re-populates the allow list from NimBLE's own NVS-persisted bond store so a
+ * reboot doesn't strand every already-paired companion device behind the
+ * filtered-advertising default (see sdf_ble_companion_bond_state.h). Only
+ * allow-list *membership* is restored - failed-login counters intentionally
+ * start at zero every boot, they are never persisted to NVS (see design.md
+ * "Decisions").
+ *
+ * Runs from the host-sync hook rather than sdf_ble_companion_init(), because
+ * ble_store_util_bonded_peers() is a bond *store read*: it takes ble_hs_lock()
+ * and so needs a host that exists. sdf_ble_companion_init() runs before
+ * nimble_port_init() (sdf_app.c:1810 vs 1865), where ble_hs_mutex is still
+ * zero-initialized, and NimBLE gives no error return for that case - it
+ * dereferences the null handle and panics. Registering the GATT database
+ * before host start is fine and still happens in init(); reading host-owned
+ * state before host start is not. See fix-ble-bond-seed-init-order.
+ *
+ * Seeds once per s_bond_state lifetime: a NimBLE resync fires this hook
+ * again, and re-seeding there would let a controller reset resurrect a bond
+ * that the failed-login eviction path had since removed from the list. */
+static void sdf_ble_companion_seed_allow_list(void) {
+    if (s_allow_list_seeded) {
+        return;
+    }
+    s_allow_list_seeded = true;
+
+    ble_addr_t bonded[SDF_BLE_COMPANION_BOND_TABLE_MAX];
+    int num_peers = 0;
+    /* Called without s_lock held: this file's rule is that s_lock is never
+     * held across a NimBLE call (cf. sdf_ble_companion_push_allow_list()). */
+    int rc = ble_store_util_bonded_peers(bonded, &num_peers,
+                                          SDF_BLE_COMPANION_BOND_TABLE_MAX);
+    if (rc != 0) {
+        /* Unlike before the move, this branch is now genuinely reachable.
+         * An empty allow list means no companion can reconnect until the
+         * admin-gated pairing window is used - recoverable, unlike the boot
+         * loop that reading the store too early produced. */
+        ESP_LOGW(TAG, "ble_store_util_bonded_peers failed: %d; allow list left empty", rc);
+        return;
+    }
+
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "seed_allow_list: lock contention, allow list left empty");
+        return;
+    }
+    for (int i = 0; i < num_peers; i++) {
+        sdf_ble_companion_addr_t addr;
+        addr.type = bonded[i].type;
+        memcpy(addr.val, bonded[i].val, sizeof(addr.val));
+        sdf_ble_companion_bond_allow_list_add(&s_bond_state, &addr);
+    }
+    xSemaphoreGive(s_lock);
+
+    ESP_LOGI(TAG, "Seeded BLE Companion allow list with %d bonded peer(s)", num_peers);
+}
+
 static void sdf_ble_companion_on_host_sync(void *ctx) {
     (void)ctx;
     ESP_LOGI(TAG, "Shared NimBLE host synced");
+    /* Must precede restart_advertising(): that is what pushes the list into
+     * the controller's Filter Accept List via ble_gap_wl_set() and starts
+     * filtered advertising, so seeding after it would leave a window in which
+     * an already-bonded companion is refused its first post-reboot
+     * reconnect. */
+    sdf_ble_companion_seed_allow_list();
     sdf_ble_companion_restart_advertising();
 }
 
@@ -1166,34 +1232,12 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
 
     memset(s_connections, 0, sizeof(s_connections));
 
+    /* No NimBLE host call may appear between here and the
+     * sdf_nuki_ble_register_server_service() below: this function runs before
+     * nimble_port_init(). The allow list is seeded from the bond store later,
+     * once the host is up - see sdf_ble_companion_seed_allow_list(). */
     sdf_ble_companion_bond_state_init(&s_bond_state);
-    /* Re-populate the allow list from NimBLE's own NVS-persisted bond store
-     * so a reboot doesn't strand every already-paired companion device
-     * behind the new filtered-advertising default (see
-     * sdf_ble_companion_bond_state.h). Only allow-list *membership* is
-     * restored here - failed-login counters intentionally start at zero
-     * every boot, they are never persisted to NVS (see design.md
-     * "Decisions"). This assumes the NimBLE host/bond store is already
-     * initialized by this point, same assumption the rest of this function
-     * already makes about sdf_nuki_ble_register_server_service() below. */
-    {
-        ble_addr_t bonded[SDF_BLE_COMPANION_BOND_TABLE_MAX];
-        int num_peers = 0;
-        int rc = ble_store_util_bonded_peers(bonded, &num_peers,
-                                              SDF_BLE_COMPANION_BOND_TABLE_MAX);
-        if (rc == 0) {
-            for (int i = 0; i < num_peers; i++) {
-                sdf_ble_companion_addr_t addr;
-                addr.type = bonded[i].type;
-                memcpy(addr.val, bonded[i].val, sizeof(addr.val));
-                sdf_ble_companion_bond_allow_list_add(&s_bond_state, &addr);
-            }
-            ESP_LOGI(TAG, "Seeded BLE Companion allow list with %d bonded peer(s)",
-                     num_peers);
-        } else {
-            ESP_LOGW(TAG, "ble_store_util_bonded_peers failed: %d", rc);
-        }
-    }
+    s_allow_list_seeded = false;
 
     // Initialize the pairing-window timeout timer
     esp_timer_create_args_t timer_args = {

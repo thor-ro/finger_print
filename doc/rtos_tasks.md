@@ -261,7 +261,7 @@ void sdf_protocol_zigbee_set_command_handler(sdf_zigbee_command_handler_t handle
 | Auth timeout | 10s | `CONFIG_SDF_SVC_ADMIN_TIMEOUT_MS` |
 | Stack size | 4096 | `CONFIG_SDF_SVC_ADMIN_TASK_STACK` |
 
-**Watchdog:** None (task is not watchdog-registered; 1s wait cap ensures prompt shutdown/timeout evaluation)
+**Watchdog:** Task watchdog registered (15s TWDT; fed at loop top, bounded 1s wait cap)
 
 ---
 

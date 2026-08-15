@@ -20,9 +20,6 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
-#ifndef CONFIG_IDF_TARGET_LINUX
-#include "esp_task_wdt.h"
-#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"

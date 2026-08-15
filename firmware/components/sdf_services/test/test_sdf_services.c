@@ -7,6 +7,7 @@
 #include "sdf_services.h"
 #include "sdf_services_internal.h"
 #include "sdf_event_router.h"
+#include "sdf_platform_time.h"
 
 /* Test-only fault injector for sdf_storage_enrolled_users_save(), compiled
  * into sdf_storage only when SDF_STORAGE_TESTING is defined (see
@@ -910,11 +911,22 @@ void test_sdf_services_start_stop_start_tasks_cycle(void) {
 
   vTaskDelay(pdMS_TO_TICKS(50));
 
+  TaskHandle_t match_task_1 = sdf_services_state()->match_task;
+  TaskHandle_t enroll_task_1 = sdf_services_state()->enroll_task;
+  TaskHandle_t admin_task_1 = sdf_services_state()->admin_task;
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(match_task_1));
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(enroll_task_1));
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(admin_task_1));
+
   err = sdf_services_stop_tasks();
   TEST_ASSERT_EQUAL(ESP_OK, err);
   TEST_ASSERT_NULL(sdf_services_state()->match_task);
   TEST_ASSERT_NULL(sdf_services_state()->enroll_task);
   TEST_ASSERT_NULL(sdf_services_state()->admin_task);
+
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_is_registered(match_task_1));
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_is_registered(enroll_task_1));
+  TEST_ASSERT_FALSE(sdf_platform_time_wdt_is_registered(admin_task_1));
 
   err = sdf_services_start_tasks();
   TEST_ASSERT_EQUAL(ESP_OK, err);
@@ -923,4 +935,11 @@ void test_sdf_services_start_stop_start_tasks_cycle(void) {
   TEST_ASSERT_NOT_NULL(sdf_services_state()->admin_task);
 
   vTaskDelay(pdMS_TO_TICKS(50));
+
+  TaskHandle_t match_task_2 = sdf_services_state()->match_task;
+  TaskHandle_t enroll_task_2 = sdf_services_state()->enroll_task;
+  TaskHandle_t admin_task_2 = sdf_services_state()->admin_task;
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(match_task_2));
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(enroll_task_2));
+  TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(admin_task_2));
 }

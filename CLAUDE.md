@@ -137,3 +137,6 @@ rtk init --global       # Add RTK to ~/.claude/CLAUDE.md
 
 Overall average: **60-90% token reduction** on common development operations.
 <!-- /rtk-instructions -->
+
+## ESP Emulator
+Use installed ```esp-emu``` for verfication. https://github.com/espressif/esp-emulator

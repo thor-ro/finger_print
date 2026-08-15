@@ -9,7 +9,6 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
-#include "esp_task_wdt.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -281,16 +280,12 @@ void sdf_enroll_task(void *arg) {
     (void)arg;
     sdf_services_state_t *s = sdf_services_state();
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_add(NULL);
-#endif
+    sdf_platform_time_wdt_add();
 
     /* Wait for initialization to complete */
     while (!sdf_services_is_ready()) {
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
-#ifndef CONFIG_IDF_TARGET_LINUX
-        esp_task_wdt_reset();
-#endif
+        sdf_platform_time_wdt_reset();
     }
 
     while (true) {
@@ -350,9 +345,7 @@ void sdf_enroll_task(void *arg) {
             }
         }
 
-#ifndef CONFIG_IDF_TARGET_LINUX
-        esp_task_wdt_reset();
-#endif
+        sdf_platform_time_wdt_reset();
     }
 
     /* Cooperative shutdown requested via sdf_services_stop_tasks(): unwind
@@ -360,9 +353,7 @@ void sdf_enroll_task(void *arg) {
      * place for the lifetime of the boot; clearing event_queue causes any
      * post-exit callback invocations to discard events safely. */
     sdf_enroll_task_deinit_queue();
-#ifndef CONFIG_IDF_TARGET_LINUX
-    esp_task_wdt_delete(NULL);
-#endif
+    sdf_platform_time_wdt_delete();
     {
         SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
         if (guard.acquired == pdTRUE) {

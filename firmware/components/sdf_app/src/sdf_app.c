@@ -1635,9 +1635,24 @@ esp_err_t sdf_app_init(void) {
 
 
 #ifndef CONFIG_IDF_TARGET_LINUX
+  /* idle_core_mask is 0 deliberately: the idle tasks are NOT watched.
+   *
+   * esp-zigbee-lib runs an all-channel active scan inside
+   * zb_mac_logic_iteration() on the sdf_zigbee task (priority 5). On this
+   * unicore part that starves the priority-0 idle task for the whole scan,
+   * which on hardware measured as a continuous 15 s stretch and tripped the
+   * idle watchdog into a panic-reboot loop - while every task the firmware
+   * actually owns was healthy and feeding the watchdog on time. The stack is
+   * closed source, so the starvation cannot be fixed at the source.
+   *
+   * trigger_panic stays true: sdf-services-tasks requires that a wedged
+   * service task reboots the device, and each long-running task subscribes
+   * itself via sdf_platform_time_wdt_add(). Dropping the idle cores narrows
+   * the watchdog to those explicit subscribers, so a genuinely wedged task
+   * still panics while a busy radio scan no longer does. */
   esp_task_wdt_config_t twdt_config = {
       .timeout_ms = sdf_config_get()->wdt_timeout_ms,
-      .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
+      .idle_core_mask = 0,
       .trigger_panic = true,
   };
   esp_err_t twdt_err = esp_task_wdt_reconfigure(&twdt_config);

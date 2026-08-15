@@ -9,9 +9,6 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
-#ifndef CONFIG_IDF_TARGET_LINUX
-#include "esp_task_wdt.h"
-#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -195,7 +192,11 @@ void sdf_admin_task(void *arg) {
     (void)arg;
     sdf_services_state_t *s = sdf_services_state();
 
+    sdf_platform_time_wdt_add();
+
     while (true) {
+        sdf_platform_time_wdt_reset();
+
         {
             SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
             if (guard.acquired == pdTRUE && s->stop_requested) {
@@ -304,6 +305,7 @@ void sdf_admin_task(void *arg) {
      * place for the lifetime of the boot; clearing event_queue causes any
      * post-exit callback invocations to discard events safely. */
     sdf_admin_task_deinit_queue();
+    sdf_platform_time_wdt_delete();
     {
         SDF_LOCK_GUARD(guard, s->lock, SDF_SERVICES_LOCK_WAIT_MS);
         if (guard.acquired == pdTRUE) {

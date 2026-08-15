@@ -65,10 +65,27 @@ bool sdf_platform_time_is_timeout(int64_t start_us, uint32_t timeout_us);
 int64_t sdf_platform_time_elapsed_us(int64_t start_us);
 
 /**
+ * @brief Register the calling task with the task watchdog.
+ *
+ * Must be called on task entry before entering the main loop.
+ * On Linux, tracks registration for host test verification.
+ */
+void sdf_platform_time_wdt_add(void);
+
+/**
+ * @brief Deregister the calling task from the task watchdog.
+ *
+ * Must be called during cooperative task shutdown before task deletion.
+ * On Linux, removes registration for host test verification.
+ */
+void sdf_platform_time_wdt_delete(void);
+
+/**
  * @brief Reset task watchdog.
  *
  * Must be called periodically in long-running tasks.
- * No-op on Linux.
+ * On ESP32, resets the hardware task watchdog and logs a warning if the calling task is unregistered.
+ * On Linux, verifies task registration and logs a one-shot warning if unregistered.
  */
 void sdf_platform_time_wdt_reset(void);
 
@@ -78,6 +95,46 @@ void sdf_platform_time_wdt_reset(void);
  * @param timeout_ms Watchdog timeout in milliseconds.
  */
 void sdf_platform_time_wdt_feed(uint32_t timeout_ms);
+
+/**
+ * @brief Check if a task is registered with the task watchdog.
+ *
+ * Used by host tests to verify task watchdog registration.
+ * On hardware, always returns true.
+ *
+ * @param task_handle Task handle to check, or NULL for current task.
+ * @return true if registered, false otherwise.
+ */
+bool sdf_platform_time_wdt_is_registered(void *task_handle);
+
+/**
+ * @brief Check if a task has triggered an unregistered watchdog reset warning.
+ *
+ * Used by host tests to verify that unregistered watchdog resets trigger
+ * the one-shot diagnostic.
+ * On hardware, always returns false.
+ *
+ * @param task_handle Task handle to check, or NULL for current task.
+ * @return true if warned, false otherwise.
+ */
+bool sdf_platform_time_wdt_has_warned(void *task_handle);
+
+/**
+ * @brief Get total number of unregistered watchdog reset warnings emitted.
+ *
+ * Used by host tests to verify rate-limiting of the one-shot diagnostic.
+ * On hardware, always returns 0.
+ *
+ * @return Total warning count.
+ */
+uint32_t sdf_platform_time_wdt_get_warning_count(void);
+
+/**
+ * @brief Clear warned task tracking state.
+ *
+ * Used by host tests between test cases.
+ */
+void sdf_platform_time_wdt_clear_warned_tasks(void);
 
 #ifdef __cplusplus
 }
