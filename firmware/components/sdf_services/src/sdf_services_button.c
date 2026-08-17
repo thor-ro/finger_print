@@ -38,7 +38,7 @@ static void sdf_button_single_click_cb(void *arg, void *usr_data) {
             .press_duration_ms = 0,
         },
     };
-    sdf_event_router_emit_nonblocking(&evt);
+    sdf_event_router_emit(&evt, 0);
 }
 
 static void sdf_button_cb(void *arg, void *usr_data) {
@@ -57,7 +57,7 @@ static void sdf_button_cb(void *arg, void *usr_data) {
             .press_duration_ms = press_duration_ms,
         },
     };
-    sdf_event_router_emit_nonblocking(&evt);
+    sdf_event_router_emit(&evt, 0);
 }
 
 esp_err_t sdf_button_init(void) {

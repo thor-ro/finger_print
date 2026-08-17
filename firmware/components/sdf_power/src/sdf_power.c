@@ -115,7 +115,7 @@ static void sdf_power_push_battery_percent(uint8_t battery_percent) {
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
       .payload.power.remaining_ms = battery_percent,
   };
-  sdf_event_router_emit(&evt);
+  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 }
 
 
@@ -134,7 +134,7 @@ static void sdf_power_notify_wakeup(const sdf_power_manager_config_t *config,
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
       .payload.power.remaining_ms = 0,
   };
-  sdf_event_router_emit(&evt);
+  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 }
 
 
@@ -157,7 +157,7 @@ static esp_err_t sdf_power_enter_light_sleep(const sdf_power_manager_config_t *c
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
       .payload.power.remaining_ms = checkin_interval_ms,
   };
-  sdf_event_router_emit(&sleep_evt);
+  sdf_event_router_emit(&sleep_evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 
   sdf_platform_sleep_disable_all_wakeup_sources();
   /* sdf_platform_sleep_enable_timer_wakeup() takes milliseconds and does its
@@ -713,7 +713,7 @@ esp_err_t sdf_power_resume_from_deep_sleep(sdf_wake_source_t *src) {
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
       .payload.power.remaining_ms = 0,  // Would carry source info
   };
-  sdf_event_router_emit(&evt);
+  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 
   return ESP_OK;
 }

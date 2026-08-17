@@ -191,10 +191,16 @@ extern void test_sdf_event_router_min_prio_filter_semantics(void);
 extern void test_sdf_event_router_reentrant_critical_emit_no_deadlock(void);
 extern void test_sdf_event_router_security_lockout_pair_delivered(void);
 extern void test_sdf_event_router_emit_before_start_delivered_after_start(void);
-extern void test_sdf_event_router_emit_nonblocking_delivers(void);
-extern void test_sdf_event_router_emit_nonblocking_null_args(void);
+extern void test_sdf_event_router_emit_zero_timeout_delivers(void);
+extern void test_sdf_event_router_emit_zero_timeout_null_args(void);
 extern void test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type(void);
-extern void test_sdf_event_router_emit_nonblocking_rejects_internal_wake_and_invalid_type(void);
+extern void test_sdf_event_router_emit_zero_timeout_rejects_internal_wake_and_invalid_type(void);
+extern void test_sdf_event_router_critical_dispatched_on_router_task(void);
+extern void test_sdf_event_router_noncritical_dispatched_on_router_task(void);
+extern void test_sdf_event_router_critical_dispatched_ahead_of_queued_noncritical(void);
+extern void test_sdf_event_router_noncritical_dispatched_in_arrival_order(void);
+extern void test_sdf_event_router_critical_emit_before_start_delivered_after_start(void);
+extern void test_sdf_event_router_full_queue_drops_critical(void);
 extern void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero(void);
 
 /* Tasks tests */
@@ -535,10 +541,16 @@ void app_main(void) {
   RUN_TEST(test_sdf_event_router_reentrant_critical_emit_no_deadlock);
   RUN_TEST(test_sdf_event_router_security_lockout_pair_delivered);
   RUN_TEST(test_sdf_event_router_emit_before_start_delivered_after_start);
-  RUN_TEST(test_sdf_event_router_emit_nonblocking_delivers);
-  RUN_TEST(test_sdf_event_router_emit_nonblocking_null_args);
+  RUN_TEST(test_sdf_event_router_emit_zero_timeout_delivers);
+  RUN_TEST(test_sdf_event_router_emit_zero_timeout_null_args);
   RUN_TEST(test_sdf_event_router_emit_rejects_internal_wake_and_invalid_type);
-  RUN_TEST(test_sdf_event_router_emit_nonblocking_rejects_internal_wake_and_invalid_type);
+  RUN_TEST(test_sdf_event_router_emit_zero_timeout_rejects_internal_wake_and_invalid_type);
+  RUN_TEST(test_sdf_event_router_critical_dispatched_on_router_task);
+  RUN_TEST(test_sdf_event_router_noncritical_dispatched_on_router_task);
+  RUN_TEST(test_sdf_event_router_critical_dispatched_ahead_of_queued_noncritical);
+  RUN_TEST(test_sdf_event_router_noncritical_dispatched_in_arrival_order);
+  RUN_TEST(test_sdf_event_router_critical_emit_before_start_delivered_after_start);
+  RUN_TEST(test_sdf_event_router_full_queue_drops_critical);
   RUN_TEST(test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero);
 
   /* Tasks tests */

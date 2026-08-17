@@ -396,7 +396,7 @@ static int sdf_nuki_process_encrypted_custom(
       .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
       .payload.ble.action_result = SDF_NUKI_RESULT_OK,
   };
-  sdf_event_router_emit(&evt);
+  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 
   if (message_cb != NULL) {
     message_cb(message_ctx, &msg);

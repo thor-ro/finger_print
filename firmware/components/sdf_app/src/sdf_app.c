@@ -1257,7 +1257,7 @@ void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
       .payload.audit.status = status,
       .payload.audit.detail = detail,
   };
-  sdf_event_router_emit(&event);
+  sdf_event_router_emit(&event, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 }
 
 /* ---- Lock flow callbacks (bridge to app-level state) ---- */

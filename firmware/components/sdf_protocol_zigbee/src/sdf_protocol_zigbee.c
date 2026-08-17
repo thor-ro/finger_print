@@ -388,7 +388,7 @@ static esp_err_t sdf_zigbee_dispatch_command_event(
       .payload.zigbee.command_id = event->command,
       .payload.zigbee.user_id = event->programming_event.user_id,
   };
-  sdf_event_router_emit(&evt);
+  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 
   return cb(ctx, event);
 }

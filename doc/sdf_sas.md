@@ -377,11 +377,11 @@ participant "sdf_services" as SVC
 participant "sdf_event_router" as EVT
 participant "sdf_app" as APP
 
-SVC -> EVT : emit_async(BIOMETRIC_MATCH)
+SVC -> EVT : emit(BIOMETRIC_MATCH, timeout_ms)
 EVT -> EVT : queue event (HIGH prio)
-EVT -> EVT : process task dequeues
-EVT -> APP : sync callback\nBIOMETRIC_MATCH
-note right of EVT : CRITICAL events: sync dispatch\nHIGH/NORMAL/LOW: async queue
+EVT -> EVT : router task dequeues
+EVT -> APP : callback on router task\nBIOMETRIC_MATCH
+note right of EVT : All priorities are queued.\nCRITICAL goes to the front,\nHIGH/NORMAL/LOW to the back.\nCallbacks never run on the emitter.
 @enduml
 ```
 

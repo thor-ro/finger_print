@@ -121,7 +121,7 @@ static void sdf_admin_task_emit_action_complete(sdf_services_admin_action_t acti
         .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
         .payload.admin_action_complete = {.action = action, .result = result}
     };
-    sdf_event_router_emit(&evt);
+    sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 }
 
 /**

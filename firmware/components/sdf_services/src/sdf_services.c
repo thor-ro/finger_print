@@ -210,7 +210,7 @@ sdf_services_emit_enrollment_event(sdf_event_router_type_t type,
       .payload.enrollment.step = sm->completed_steps,
       .payload.enrollment.status = sm->state,
   };
-  sdf_event_router_emit(&evt);
+  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 }
 
 static void
@@ -469,7 +469,7 @@ void sdf_services_execute_admin_action(
         .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
         .payload.web_reg_auth_result.authorized = true,
     };
-    sdf_event_router_emit(&evt);
+    sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
     return;
   }
 

@@ -127,7 +127,7 @@ static void sdf_enroll_task_emit_complete(uint16_t user_id, uint8_t permission) 
         .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
         .payload.enrollment_complete = {.user_id = user_id, .permission = permission}
     };
-    sdf_event_router_emit(&evt);
+    sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
     ESP_LOGI(TAG, "Enrollment complete: user_id=%u permission=%u",
              (unsigned)user_id, (unsigned)permission);
 }
@@ -139,7 +139,7 @@ static void sdf_enroll_task_emit_failed(uint8_t step, int8_t error_code) {
         .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
         .payload.enrollment_failed = {.step = step, .error_code = error_code}
     };
-    sdf_event_router_emit(&evt);
+    sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
     ESP_LOGE(TAG, "Enrollment failed: step=%u error_code=%d", (unsigned)step, (int)error_code);
 }
 

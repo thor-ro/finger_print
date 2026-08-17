@@ -33,7 +33,7 @@ static struct {
     sdf_event_router_slot_t pool[SDF_EVENT_ROUTER_SUBSCRIBER_CAPACITY];
 } s_state;
 
-static void sdf_event_router_dispatch_sync(const sdf_event_router_event_t *event)
+static void sdf_event_router_dispatch(const sdf_event_router_event_t *event)
 {
     if (event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE || event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         ESP_LOGE(TAG, "Dropping event with invalid type %d", (int)event->type);
@@ -57,7 +57,7 @@ static void sdf_event_router_task(void *arg)
 
     while (true) {
         if (xQueueReceive(s_state.queue, &event, portMAX_DELAY) == pdTRUE) {
-            sdf_event_router_dispatch_sync(&event);
+            sdf_event_router_dispatch(&event);
         }
     }
 }
@@ -153,7 +153,8 @@ esp_err_t sdf_event_router_start(void)
     return ESP_OK;
 }
 
-esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event)
+esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event,
+                                uint32_t send_timeout_ms)
 {
     if (event == NULL || !s_state.initialized ||
         event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE ||
@@ -161,35 +162,18 @@ esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event)
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (event->priority == SDF_EVENT_ROUTER_PRIO_CRITICAL) {
-        sdf_event_router_dispatch_sync(event);
-    } else {
-        BaseType_t ok = xQueueSend(s_state.queue, event, pdMS_TO_TICKS(100));
-        if (ok != pdTRUE) {
-            ESP_LOGW(TAG, "Event queue full, dropping event");
-            return ESP_ERR_NO_MEM;
-        }
-    }
-
-    return ESP_OK;
-}
-
-esp_err_t sdf_event_router_emit_nonblocking(const sdf_event_router_event_t *event)
-{
-    if (event == NULL || !s_state.initialized ||
-        event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE ||
-        event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    if (event->priority == SDF_EVENT_ROUTER_PRIO_CRITICAL) {
-        sdf_event_router_dispatch_sync(event);
-    } else {
-        BaseType_t ok = xQueueSend(s_state.queue, event, 0);
-        if (ok != pdTRUE) {
-            ESP_LOGW(TAG, "Event queue full (non-blocking), dropping event type=%d", (int)event->type);
-            return ESP_ERR_NO_MEM;
-        }
+    /* Critical events jump the queue but still land on the router task, so no
+     * subscriber callback ever runs on the emitter's stack. Note this makes
+     * back-to-back critical emits dispatch in reverse order; today there is a
+     * single critical producer (lockout entered), so that is not reachable. */
+    TickType_t timeout = pdMS_TO_TICKS(send_timeout_ms);
+    BaseType_t ok = (event->priority == SDF_EVENT_ROUTER_PRIO_CRITICAL)
+                        ? xQueueSendToFront(s_state.queue, event, timeout)
+                        : xQueueSendToBack(s_state.queue, event, timeout);
+    if (ok != pdTRUE) {
+        ESP_LOGW(TAG, "Event queue full, dropping event type=%d prio=%d",
+                 (int)event->type, (int)event->priority);
+        return ESP_ERR_NO_MEM;
     }
 
     return ESP_OK;

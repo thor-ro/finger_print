@@ -197,6 +197,12 @@ typedef struct {
 
 typedef void (*sdf_event_router_cb)(void *ctx, const sdf_event_router_event_t *event);
 
+/* Send timeout used by emitters running on their own task, which can afford to
+ * wait briefly for queue space. Not a mandatory default: callers that must not
+ * block (esp_timer callbacks, anything holding a contended lock) pass 0
+ * instead, and callers with a stricter deadline should pass their own value. */
+#define SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS 100U
+
 /**
  * @brief Initialize event router queue and subscriber table.
  *
@@ -228,15 +234,23 @@ esp_err_t sdf_event_router_start(void);
 /**
  * @brief Emit an event through the router.
  *
- * CRITICAL priority events are dispatched synchronously on caller context.
- * Other priorities are queued for asynchronous dispatch by the router task.
+ * Every event is queued for dispatch by the router task, regardless of
+ * priority - subscriber callbacks never run on the caller's context, so an
+ * emitter never inherits a callback's stack usage or blocking behaviour.
+ * PRIO_CRITICAL events are placed at the front of the queue, ahead of events
+ * already waiting; all other priorities go to the back.
+ *
+ * @param event           Event to emit. Rejected with ESP_ERR_INVALID_ARG if
+ *                        NULL, if the router is not initialized, or if the
+ *                        type is SDF_EVENT_ROUTER_INTERNAL_WAKE or out of range.
+ * @param send_timeout_ms How long the caller may block waiting for queue space.
+ *                        Pass 0 to never block (required from contexts that
+ *                        must not sleep, e.g. esp_timer callbacks). Returns
+ *                        ESP_ERR_NO_MEM if the queue stays full for this long,
+ *                        at every priority including PRIO_CRITICAL.
  */
-esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event);
-
-/**
- * @brief Emit an event non-blockingly (drops if queue is full).
- */
-esp_err_t sdf_event_router_emit_nonblocking(const sdf_event_router_event_t *event);
+esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event,
+                                uint32_t send_timeout_ms);
 
 #ifdef CONFIG_IDF_TARGET_LINUX
 /**
