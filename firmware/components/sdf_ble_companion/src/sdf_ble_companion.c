@@ -1,5 +1,6 @@
 #include "sdf_ble_companion.h"
 #include "sdf_ble_companion_bond_state.h"
+#include "sdf_ble_companion_gatt_scratch.h"
 #include "sdf_storage.h"
 #include "sdf_event_router.h"
 #include "sdf_nuki_ble_transport.h"
@@ -27,7 +28,9 @@
 #define TAG "sdf_ble_companion"
 
 #define SDF_BLE_COMPANION_MAX_CONNECTIONS 3
-#define SDF_BLE_COMPANION_ATTR_MAX_LEN 512
+/* Derived from the staging module's capacity rather than restated, so the
+ * attribute-length guards here and the buffer they stage into cannot drift. */
+#define SDF_BLE_COMPANION_ATTR_MAX_LEN SDF_BLE_COMPANION_GATT_SCRATCH_LEN
 
 /* LOGIN (single-message, [cmd][username][password_hash]) is retired by the
  * challenge-response protocol below - opcode 0x01 is deliberately left
@@ -40,6 +43,22 @@
 #define SDF_BLE_COMPANION_AUTH_LOGIN_VERIFY 0x04
 #define SDF_BLE_COMPANION_AUTH_RESULT_PENDING 0x02
 #define SDF_BLE_COMPANION_AUTH_RESULT_OK 0x01
+
+/* Largest well-formed write the Auth characteristic accepts, over all four
+ * commands - REGISTER is the longest:
+ *
+ *   LOGOUT       [cmd]                                            = 1
+ *   LOGIN_INIT   [cmd][name_len][name]                            <= 2 + 31
+ *   LOGIN_VERIFY [cmd][response(32)]                              = 1 + 32
+ *   REGISTER     [cmd][name_len][name][password_hash(32)]         <= 2 + 31 + 32
+ *
+ * Usernames are NUL-terminated into a SDF_STORAGE_WEB_USER_NAME_MAX buffer
+ * and the branches below require name_len < that, so the longest username on
+ * the wire is NAME_MAX - 1. This is an outer bound checked before the
+ * payload is copied or its command byte dispatched on; each command still
+ * enforces its own exact length below. */
+#define SDF_BLE_COMPANION_AUTH_WRITE_MAX_LEN \
+    (2 + (SDF_STORAGE_WEB_USER_NAME_MAX - 1) + SDF_STORAGE_WEB_USER_HASH_LEN)
 
 /* LOGIN_INIT read-branch challenge payload: [salt(16)][iteration_count(4,
  * little-endian)][nonce(16)] = 36 bytes. See tasks.md 6.2. */
@@ -101,20 +120,14 @@ static sdf_ble_companion_bond_state_t s_bond_state;
  * sdf_ble_companion_bond_state_init() that resets the state it seeds. */
 static bool s_allow_list_seeded = false;
 
-/* Scratch buffer used by the GATT access callbacks below (sdf_ble_companion_*
- * _access) to snapshot a characteristic's value under s_lock so it can be
- * handed to a user callback (on_config_write/on_enroll_write/on_ota_write/
- * auth parsing) after the lock is released - callbacks must never run while
- * s_lock is held, since they may themselves call back into this component.
- * A 512-byte array used to live as a stack-local in each of these functions;
- * that's fine size-wise on its own, but they all run on the NimBLE host
- * task's stack (a single shared, size-constrained task - only one GATT
- * access callback ever executes at a time on it), and stacking a 512B
- * buffer plus the rest of each callback's locals plus the NimBLE host's own
- * call depth was eating into an already tight budget. Since access to this
- * buffer is inherently serialized by the host task (no reentrancy across
- * these callbacks), a single shared static buffer is safe. */
-static uint8_t s_gatt_scratch[SDF_BLE_COMPANION_ATTR_MAX_LEN];
+/* The buffer the Config/Enrollment/OTA writes stage into - so a payload can
+ * outlive the s_lock release and be handed to a user callback, without the
+ * 512-byte stack frames on the NimBLE host task that were audit finding A14
+ * - now lives in sdf_ble_companion_gatt_scratch.c behind an acquire/release
+ * pair, rather than as a static array in scope of this whole file. Ownership
+ * is checked there instead of resting on a comment asserting that the host
+ * task serialises every user. Only sdf_ble_companion_stage_write() below
+ * touches it; the notify_* paths, which run on other tasks, must not. */
 
 static uint16_t s_auth_val_handle = 0;
 static uint16_t s_config_val_handle = 0;
@@ -296,8 +309,23 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
     } else if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
-        if (len >= 2 && len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            uint8_t *buf = s_gatt_scratch;
+        /* Floor of 1, not 2: LOGOUT carries no operands and is exactly one
+         * byte. The LOGIN_INIT and REGISTER branches read buf[1] as a
+         * username length *before* validating len against it, so at len == 1
+         * that byte is past what os_mbuf_copydata() wrote - hence the
+         * zero-initialisation below, which makes it a deterministic 0 that
+         * their `username_len == 0` check rejects. Both would reject a
+         * 1-byte write regardless (len != 2 + username_len can't hold at
+         * len == 1), but not off an uninitialised read.
+         *
+         * The payload goes on the stack rather than through the shared GATT
+         * staging buffer: nothing here reads buf after s_lock is given (the
+         * post-lock on_auth_req call receives username_copy and
+         * password_hash, both stack locals), so auth needs no storage that
+         * outlives the lock. At AUTH_WRITE_MAX_LEN bytes this is nothing
+         * like the 512-byte frame that made A14 a finding. */
+        if (len >= 1 && len <= SDF_BLE_COMPANION_AUTH_WRITE_MAX_LEN) {
+            uint8_t buf[SDF_BLE_COMPANION_AUTH_WRITE_MAX_LEN] = {0};
             os_mbuf_copydata(om, 0, len, buf);
             uint8_t cmd = buf[0];
             if (cmd == SDF_BLE_COMPANION_AUTH_LOGIN_INIT) {
@@ -482,6 +510,13 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 }
                 return 0;
             } else if (cmd == SDF_BLE_COMPANION_AUTH_LOGOUT) {
+                /* No operands: reject any trailing bytes before touching
+                 * connection state, so a padded LOGOUT does not log the
+                 * connection out. */
+                if (len != 1) {
+                    xSemaphoreGive(s_lock);
+                    return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+                }
                 conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
                 conn->auth_pending = false;
                 memset(conn->username, 0, sizeof(conn->username));
@@ -530,6 +565,103 @@ static bool sdf_ble_companion_parse_admin_action_request(
     }
     cJSON_Delete(root);
     return matched;
+}
+
+/* Post-staging dispatch for a characteristic write. Runs with s_lock
+ * released, `data` (len bytes) pointing at the staged payload and `cb` a
+ * snapshot of s_callbacks taken under the lock. Returns the ATT status. */
+typedef int (*sdf_ble_companion_staged_dispatch_fn)(
+    uint16_t conn_handle, const sdf_ble_companion_callbacks_t *cb,
+    const uint8_t *data, size_t len);
+
+/* The one place in this component that acquires and releases GATT write
+ * staging. Called with s_lock held; always gives it back.
+ *
+ * The Config, Enrollment and OTA writes are the same sequence - mirror the
+ * payload into the connection's read-back buffer, stage a copy that survives
+ * the lock release, snapshot the callbacks, unlock, dispatch, unstage - and
+ * differ only in the dispatch. Keeping the acquire/release pair inside a
+ * single-exit helper is what makes "staging is never leaked" checkable by
+ * eye: a missed release is permanent, refusing every later staged write
+ * until reboot. */
+static int sdf_ble_companion_stage_write(struct os_mbuf *om, size_t len,
+                                          uint16_t conn_handle,
+                                          uint8_t *mirror, uint16_t *mirror_len,
+                                          sdf_ble_companion_staged_dispatch_fn dispatch) {
+    uint8_t *staged = sdf_ble_companion_gatt_scratch_acquire();
+    if (!staged) {
+        /* Already logged and counted as a contract violation by the staging
+         * module. Fail just this write, leaving connection state untouched
+         * and the dispatch uncalled. */
+        xSemaphoreGive(s_lock);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    /* Mirror while still locked: it is connection state, which a concurrent
+     * disconnect memsets. The READ_CHR paths serve it back from there. */
+    os_mbuf_copydata(om, 0, len, mirror);
+    *mirror_len = (uint16_t)len;
+    memcpy(staged, mirror, len);
+    sdf_ble_companion_callbacks_t cb = s_callbacks;
+    xSemaphoreGive(s_lock);
+
+    int rc = dispatch(conn_handle, &cb, staged, len);
+    sdf_ble_companion_gatt_scratch_release();
+    return rc;
+}
+
+static int sdf_ble_companion_dispatch_config_write(
+    uint16_t conn_handle, const sdf_ble_companion_callbacks_t *cb,
+    const uint8_t *data, size_t len) {
+    sdf_services_admin_action_t requested_action;
+    if (sdf_ble_companion_parse_admin_action_request(data, len, &requested_action)) {
+        /* NUKI_REPAIR is only reachable once initial Nuki setup is already
+         * complete - initial pairing happens via the physical button flow,
+         * not this trigger. Rejected synchronously (no pending state
+         * entered), matching how an unauthenticated write is already
+         * rejected synchronously by the caller. ENROLL_ADMIN/ZB_JOIN have no
+         * equivalent precondition: an authenticated companion session
+         * already implies an Admin fingerprint exists (it had to authorize
+         * this session's own WEB_REG_AUTH), so there's no "not set up yet"
+         * state to guard against for those two. */
+        if (requested_action == SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR &&
+            sdf_services_get_setup_state() != SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE) {
+            return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+        }
+        if (cb->on_admin_action_request) {
+            cb->on_admin_action_request(cb->ctx, requested_action, conn_handle);
+        }
+        return 0;
+    }
+
+    if (cb->on_config_write) {
+        cb->on_config_write(cb->ctx, data, len);
+    }
+    return 0;
+}
+
+static int sdf_ble_companion_dispatch_enroll_write(
+    uint16_t conn_handle, const sdf_ble_companion_callbacks_t *cb,
+    const uint8_t *data, size_t len) {
+    (void)conn_handle;
+    if (cb->on_enroll_write) {
+        cb->on_enroll_write(cb->ctx, data, len);
+    }
+    return 0;
+}
+
+static int sdf_ble_companion_dispatch_ota_write(
+    uint16_t conn_handle, const sdf_ble_companion_callbacks_t *cb,
+    const uint8_t *data, size_t len) {
+    /* Unlike the other characteristics, a malformed/out-of-protocol OTA
+     * write must be rejected at the GATT layer (non-zero ATT error, no
+     * notify) rather than silently accepted - the failed write itself is the
+     * client's synchronous signal per the BLE OTA chunked-transfer wire
+     * format. */
+    if (cb->on_ota_write && !cb->on_ota_write(cb->ctx, conn_handle, data, len)) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    return 0;
 }
 
 static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_handle,
@@ -597,43 +729,9 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            os_mbuf_copydata(om, 0, len, conn->config_value);
-            conn->config_value_len = len;
-            void (*on_config)(void *, const uint8_t *, size_t) = s_callbacks.on_config_write;
-            sdf_ble_companion_admin_action_request_cb on_admin_action =
-                s_callbacks.on_admin_action_request;
-            void *cb_ctx = s_callbacks.ctx;
-            uint8_t *tmp = s_gatt_scratch;
-            memcpy(tmp, conn->config_value, len);
-            xSemaphoreGive(s_lock);
-
-            sdf_services_admin_action_t requested_action;
-            if (sdf_ble_companion_parse_admin_action_request(tmp, len, &requested_action)) {
-                /* NUKI_REPAIR is only reachable once initial Nuki setup is
-                 * already complete - initial pairing happens via the
-                 * physical button flow, not this trigger. Rejected
-                 * synchronously (no pending state entered), matching how an
-                 * unauthenticated write is already rejected synchronously
-                 * above. ENROLL_ADMIN/ZB_JOIN have no equivalent
-                 * precondition: an authenticated companion session already
-                 * implies an Admin fingerprint exists (it had to authorize
-                 * this session's own WEB_REG_AUTH), so there's no "not set
-                 * up yet" state to guard against for those two. */
-                if (requested_action == SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR &&
-                    sdf_services_get_setup_state() !=
-                        SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE) {
-                    return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
-                }
-                if (on_admin_action) {
-                    on_admin_action(cb_ctx, requested_action, conn_handle);
-                }
-                return 0;
-            }
-
-            if (on_config) {
-                on_config(cb_ctx, tmp, len);
-            }
-            return 0;
+            return sdf_ble_companion_stage_write(
+                om, len, conn_handle, conn->config_value, &conn->config_value_len,
+                sdf_ble_companion_dispatch_config_write);
         }
         xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -675,17 +773,9 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            os_mbuf_copydata(om, 0, len, conn->enroll_value);
-            conn->enroll_value_len = len;
-            void (*on_enroll)(void *, const uint8_t *, size_t) = s_callbacks.on_enroll_write;
-            void *cb_ctx = s_callbacks.ctx;
-            uint8_t *tmp = s_gatt_scratch;
-            memcpy(tmp, conn->enroll_value, len);
-            xSemaphoreGive(s_lock);
-            if (on_enroll) {
-                on_enroll(cb_ctx, tmp, len);
-            }
-            return 0;
+            return sdf_ble_companion_stage_write(
+                om, len, conn_handle, conn->enroll_value, &conn->enroll_value_len,
+                sdf_ble_companion_dispatch_enroll_write);
         }
         xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -726,22 +816,9 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
         struct os_mbuf *om = ctxt->om;
         size_t len = OS_MBUF_PKTLEN(om);
         if (len < SDF_BLE_COMPANION_ATTR_MAX_LEN) {
-            os_mbuf_copydata(om, 0, len, conn->ota_value);
-            conn->ota_value_len = len;
-            sdf_ble_companion_ota_write_cb on_ota = s_callbacks.on_ota_write;
-            void *cb_ctx = s_callbacks.ctx;
-            uint8_t *tmp = s_gatt_scratch;
-            memcpy(tmp, conn->ota_value, len);
-            xSemaphoreGive(s_lock);
-            /* Unlike the other characteristics, a malformed/out-of-protocol
-             * OTA write must be rejected at the GATT layer (non-zero ATT
-             * error, no notify) rather than silently accepted - the failed
-             * write itself is the client's synchronous signal per the BLE
-             * OTA chunked-transfer wire format. */
-            if (on_ota && !on_ota(cb_ctx, conn_handle, tmp, len)) {
-                return BLE_ATT_ERR_UNLIKELY;
-            }
-            return 0;
+            return sdf_ble_companion_stage_write(
+                om, len, conn_handle, conn->ota_value, &conn->ota_value_len,
+                sdf_ble_companion_dispatch_ota_write);
         }
         xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -1014,6 +1091,13 @@ static void sdf_ble_companion_seed_allow_list(void) {
 static void sdf_ble_companion_on_host_sync(void *ctx) {
     (void)ctx;
     ESP_LOGI(TAG, "Shared NimBLE host synced");
+    /* This callback runs on the NimBLE host task, which is also the task that
+     * runs every GATT access callback - so it is the right owner for GATT
+     * write staging. Binding here, before restart_advertising() below starts
+     * accepting connections, means no client can be connected (and so no
+     * acquire can happen) before ownership exists. A NimBLE resync re-enters
+     * this hook on the same task, which rebinds harmlessly. */
+    sdf_ble_companion_gatt_scratch_bind_owner();
     /* Must precede restart_advertising(): that is what pushes the list into
      * the controller's Filter Accept List via ble_gap_wl_set() and starts
      * filtered advertising, so seeding after it would leave a window in which

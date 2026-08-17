@@ -584,6 +584,35 @@ mcu --> bat : ADC GPIO 5\n(voltage divider)
 - HMAC-SHA256 authenticator for authorization data
 - libsodium secretbox (XSalsa20-Poly1305) for encrypted frames
 
+### BLE Companion Authentication Wire Format
+
+`sdf_ble_companion` gates the Config, Enrollment and OTA characteristics behind a LOGIN on the Auth characteristic. LOGIN is a two-round-trip challenge-response: `LOGIN_INIT` writes a username, the client then *reads* the characteristic to collect `[salt(16)][iteration_count(4, little-endian)][nonce(16)]`, and `LOGIN_VERIFY` writes the computed response.
+
+Every command has an exact length. A write longer than 65 bytes — the largest well-formed command, `REGISTER` with a maximum-length username — is rejected with `BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN` before it is copied or dispatched on. Usernames are at most `SDF_STORAGE_WEB_USER_NAME_MAX - 1` (31) bytes on the wire.
+
+| Command | Opcode | Layout | Accepted length |
+|---|---|---|---|
+| `LOGOUT` | `0x00` | `[cmd]` | exactly 1 |
+| *(unassigned)* | `0x01` | — | rejected (retired single-message LOGIN) |
+| `REGISTER` | `0x02` | `[cmd][name_len][name][password_hash(32)]` | `2 + name_len + 32`, `1 <= name_len <= 31` |
+| `LOGIN_INIT` | `0x03` | `[cmd][name_len][name]` | `2 + name_len`, `1 <= name_len <= 31` |
+| `LOGIN_VERIFY` | `0x04` | `[cmd][response(32)]` | exactly 33 |
+
+Any other opcode is rejected with `BLE_ATT_ERR_WRITE_NOT_PERMITTED`. `LOGOUT` carries no operands, so a padded `LOGOUT` is an invalid-length error and does **not** log the connection out.
+
+### BLE Companion GATT Write Staging
+
+A GATT access callback must hand an inbound payload to an application callback *after* releasing the component lock — callbacks may re-enter `sdf_ble_companion`, so they never run under it. The payload therefore needs storage outliving the locked region, and it cannot be a 512-byte stack frame: every GATT access callback runs on the NimBLE host task (`CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE` = 4096).
+
+`sdf_ble_companion_gatt_scratch` owns that storage and enforces single ownership rather than assuming it:
+
+- **`bind_owner()`** records the calling task, once, from the host-sync hook before advertising starts. Re-binding from the same task (NimBLE resync) is a no-op; from another task it is refused.
+- **`acquire()`** returns the buffer only to the owning task, and only when it is not already held; otherwise `NULL`.
+- **`release()`** is idempotent, so error paths may release unconditionally; a non-owner release is refused and leaves the buffer held.
+- **`violation_count()`** counts refusals. A refusal is a contract violation, not a client error: it is logged at error level, fails only the triggering GATT operation with an ATT error, and never aborts the device.
+
+The Auth characteristic does not use this module — nothing it reads survives the lock release, so it stages into a 65-byte stack buffer instead. Config, Enrollment and OTA writes share a single staging helper, so `acquire()` and `release()` each appear exactly once in the component.
+
 ## 8.2 Power Management
 
 Power management is split into two components for separation of concerns:

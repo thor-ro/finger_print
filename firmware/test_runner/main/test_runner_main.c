@@ -330,6 +330,16 @@ extern void test_window_timeout_closes_with_no_bond(void);
 extern void test_window_admit_when_not_open_is_a_noop(void);
 extern void test_allow_listed_device_is_allow_listed(void);
 extern void test_allow_list_snapshot_matches_membership(void);
+
+/* BLE Companion GATT write staging tests */
+extern void test_gatt_scratch_acquire_release_round_trip(void);
+extern void test_gatt_scratch_acquire_while_unbound_refused(void);
+extern void test_gatt_scratch_second_acquire_refused_and_leaves_payload(void);
+extern void test_gatt_scratch_acquire_from_non_owner_refused(void);
+extern void test_gatt_scratch_release_when_unheld_is_noop(void);
+extern void test_gatt_scratch_release_from_non_owner_refused(void);
+extern void test_gatt_scratch_second_bind_from_other_task_refused(void);
+extern void test_gatt_scratch_rebind_same_task_is_silent(void);
 extern void test_addr_eq_compares_type_and_value(void);
 
 void app_main(void) {
@@ -666,6 +676,16 @@ void app_main(void) {
   RUN_TEST(test_window_admit_when_not_open_is_a_noop);
   RUN_TEST(test_allow_listed_device_is_allow_listed);
   RUN_TEST(test_allow_list_snapshot_matches_membership);
+
+  /* BLE Companion GATT write staging tests */
+  RUN_TEST(test_gatt_scratch_acquire_release_round_trip);
+  RUN_TEST(test_gatt_scratch_acquire_while_unbound_refused);
+  RUN_TEST(test_gatt_scratch_second_acquire_refused_and_leaves_payload);
+  RUN_TEST(test_gatt_scratch_acquire_from_non_owner_refused);
+  RUN_TEST(test_gatt_scratch_release_when_unheld_is_noop);
+  RUN_TEST(test_gatt_scratch_release_from_non_owner_refused);
+  RUN_TEST(test_gatt_scratch_second_bind_from_other_task_refused);
+  RUN_TEST(test_gatt_scratch_rebind_same_task_is_silent);
   RUN_TEST(test_addr_eq_compares_type_and_value);
 
   /* app_main() is declared void and called without capturing a return value

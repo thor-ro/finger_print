@@ -6,8 +6,20 @@ const SDF_OTA_UUID     = '7d5a0004-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 
 // Auth characteristic opcodes. LOGIN is a two-round-trip challenge-response
 // (LOGIN_INIT then LOGIN_VERIFY) rather than a single message - see
-// openspec/changes/ble-companion-login-challenge-response. REGISTER and
-// LOGOUT are unchanged.
+// openspec/changes/ble-companion-login-challenge-response.
+//
+// The firmware enforces an exact length per command, and rejects any write
+// over 65 bytes with an invalid-length error before dispatching on the
+// opcode. Usernames are at most 31 bytes on the wire:
+//
+//   LOGOUT       [0x00]                                        exactly 1
+//   REGISTER     [0x02][name_len][name][password_hash(32)]     2 + name_len + 32
+//   LOGIN_INIT   [0x03][name_len][name]                        2 + name_len
+//   LOGIN_VERIFY [0x04][response(32)]                          exactly 33
+//
+// This app has no LOGOUT send path today; if one is added it must write a
+// single byte - a padded LOGOUT is rejected and does not log the connection
+// out.
 const SDF_AUTH_OPCODE_LOGOUT       = 0x00;
 const SDF_AUTH_OPCODE_REGISTER     = 0x02;
 const SDF_AUTH_OPCODE_LOGIN_INIT   = 0x03;
