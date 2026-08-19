@@ -742,9 +742,10 @@ The OTA update mechanism is implemented in the `sdf_ota` component and provides:
 - Comparison: major.minor.patch numerically; pre-release suffixes compare lower than release
 
 ### Signature Verification
-- Ed25519 (mandatory, enforced by `CONFIG_SDF_OTA_SIGNATURE_VERIFY=y`)
-- Public key (32 bytes) embedded in firmware `.rodata`
-- Private key held offline; images signed with `tools/sdf_sign_ota.py` (appends 64-byte signature + 4-byte magic `SDF\x01`)
+- ECDSA P-256 (`secp256r1`) over the image's SHA-256 digest, mandatory, enforced by `CONFIG_SDF_OTA_SIGNATURE_VERIFY=y` (default `y`)
+- Public key (65 bytes, uncompressed EC point `0x04 || X || Y`) embedded in firmware `.rodata`
+- Private key held offline; images signed with `tools/sdf_sign_ota.py` (appends 64-byte raw `r‖s` signature + 4-byte magic `SDF\x01`)
+- The digest is accumulated incrementally as the image streams in, so verification needs no buffer proportional to the image and imposes no maximum image size
 - Verification happens in app before `esp_ota_end()`; bootloader does NOT verify
 
 ### Rollback

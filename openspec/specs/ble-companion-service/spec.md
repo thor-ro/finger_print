@@ -152,7 +152,7 @@ A transfer SHALL begin with a control message declaring the total firmware image
 
 #### Scenario: OTA transfer completed and verified
 - **WHEN** an authenticated client writes an end-transfer message after sending exactly the declared number of bytes
-- **THEN** system verifies the accumulated image's integrity and Ed25519 signature
+- **THEN** system verifies the accumulated image's integrity and ECDSA P-256 signature
 - **AND** system commits and reports success only if verification passes, or reports failure and does not commit if verification fails
 
 #### Scenario: Malformed or oversized OTA request rejected

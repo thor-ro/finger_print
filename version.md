@@ -19,7 +19,7 @@ This file tracks firmware-level changes and maps them to project versions.
 ### Added
 - **sdf_ota component**: Complete OTA update mechanism with version management, signature verification, and rollback support.
   - Semantic version embedding from git tags (`v1.2.3[-N-g<hash>]` format) at build time via CMake.
-  - Ed25519 signature verification on OTA images (mandatory, aborts if missing/invalid).
+  - Ed25519 signature verification on OTA images (mandatory, aborts if missing/invalid). *(Superseded 2026-08-10: replaced by ECDSA P-256 over a streaming SHA-256 digest — the Ed25519 path called an mbedTLS API that does not exist in ESP-IDF and was only ever compiled with verification disabled.)*
   - Three trigger paths: Zigbee OTA (existing, enhanced), CLI (`ota trigger`), BLE Peripheral (architecture placeholder).
   - Version comparison with semantic ordering (pre-release < release).
   - Automatic rollback on boot failure (bootloader) + manual rollback via CLI (`ota rollback`).

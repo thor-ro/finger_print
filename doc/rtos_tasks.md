@@ -286,7 +286,7 @@ Button handling is **taskless** as of `quiesce-poll-loops-light-sleep`:
 **Responsibilities:**
 - Zigbee OTA download handling
 - BLE OTA download handling (future)
-- Signature verification (Ed25519)
+- Signature verification (ECDSA P-256)
 - Partition write/verify/commit
 - Rollback management
 

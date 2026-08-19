@@ -18,8 +18,9 @@ Usage:
     openssl ecparam -genkey -name prime256v1 -noout -out ota_private.key
     openssl ec -in ota_private.key -pubout -out ota_public.key
 
-    # Extract uncompressed public point for embedding in firmware (65 bytes)
-    python3 sdf_sign_ota.py extract-pubkey --key ota_private.key --output ota_pubkey.bin
+    # Extract uncompressed public point for embedding in firmware (65 bytes).
+    # Name it ota_public_key.bin - that is what sdf_ota/CMakeLists.txt embeds.
+    python3 sdf_sign_ota.py extract-pubkey --key ota_private.key --output ota_public_key.bin
 
     # Sign firmware
     python3 sdf_sign_ota.py sign --input sdf.bin --key ota_private.key --output sdf_signed.bin
