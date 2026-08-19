@@ -1,0 +1,35 @@
+## 1. Remove the dead emits
+
+- [x] 1.1 Delete the `SDF_EVENT_ROUTER_BLE_LOCK_ACTION_COMPLETE` event construction and `sdf_event_router_emit()` call from `sdf_nuki_process_encrypted_custom()` in `firmware/components/sdf_protocol_ble/src/sdf_protocol_ble.c` (currently lines 392-399, between `sdf_nuki_nonce_remember()` and the `message_cb` invocation). Leave the `msg` construction and `message_cb` call untouched.
+- [x] 1.2 Delete the `SDF_EVENT_ROUTER_ZIGBEE_COMMAND` event construction and `sdf_event_router_emit()` call from `sdf_zigbee_dispatch_command_event()` in `firmware/components/sdf_protocol_zigbee/src/sdf_protocol_zigbee.c` (currently lines 384-391). The function must still end in `return cb(ctx, event);`.
+- [x] 1.3 In both files, drop the `#include "sdf_event_router.h"` if no other reference to the router remains; if `esp_timer_get_time()` was included only for the removed `timestamp_ms`, drop that include too. Confirm by grep before removing.
+- [x] 1.4 Remove `sdf_event_router` from `REQUIRES`/`PRIV_REQUIRES` in each component's `CMakeLists.txt` only if step 1.3 removed the last dependency on it; otherwise leave the dependency in place.
+
+## 2. Remove the enum and payload declarations
+
+- [x] 2.1 In `firmware/components/sdf_event_router/include/sdf_event_router.h`, delete the `SDF_EVENT_ROUTER_ZIGBEE_COMMAND` and `SDF_EVENT_ROUTER_BLE_LOCK_ACTION_COMPLETE` enumerators from `sdf_event_router_type_t`. Keep `SDF_EVENT_ROUTER_INTERNAL_WAKE = 0` first and `SDF_EVENT_ROUTER_TYPE_COUNT` last.
+- [x] 2.2 Delete the `sdf_event_router_ble_payload_t` and `sdf_event_router_zigbee_payload_t` struct definitions.
+- [x] 2.3 Delete the `ble` and `zigbee` members from the `payload` union in `sdf_event_router_event_t`.
+- [x] 2.4 Verify the size comment above the union (currently at line 167) is still accurate — `sdf_event_router_audit_payload_t` at 16 bytes should remain the largest member, so `sizeof(sdf_event_router_event_t)` is unchanged. Update the comment only if the measured size changed.
+
+## 3. Verify
+
+- [x] 3.1 `rtk grep -rn "BLE_LOCK_ACTION_COMPLETE\|SDF_EVENT_ROUTER_ZIGBEE_COMMAND\|payload\.ble\|payload\.zigbee" firmware/` returns no matches.
+- [x] 3.2 Build the firmware clean and confirm zero new warnings — in particular no unused-variable or unused-include warnings introduced by tasks 1.3/1.4. **Result:** ESP-IDF v6.0.2, esp32c6, build OK (`sdf.bin` 0x110110 bytes). Forced a recompile of both touched sources plus the header: zero warnings in `sdf_protocol_ble`, `sdf_protocol_zigbee`, `sdf_event_router`. The 3 warnings in the build are pre-existing in `sdf_app.c` (2× unused static) and `sdf_power.c` (deprecated `esp_sleep_get_wakeup_cause`), neither file touched by this change.
+- [x] 3.3 Run the host test suite. No test should require modification; if one fails, it was asserting on dead behavior — delete that assertion rather than adapting it, and note it in the change. **Result:** `idf.py --preview set-target linux && idf.py build && ./build/sdf_test_runner.elf` → **299 Tests, 0 Failures, 11 Ignored**. No test required modification; `test_sdf_event_router.c` and `test_sdf_protocol_zigbee.c` compiled unchanged against the renumbered enum, confirming no test referenced the removed types.
+- [~] 3.4 Run the firmware under `esp-emu` through a boot and at least one Nuki lock action, and confirm the Zigbee `LockState` attribute still updates. **PARTIAL — boot verified, lock action not reachable in the emulator.** Boot under `esp-emu` v0.39.0 (esp32c6, 45 s) is clean: no panic, no abort, no watchdog; `sdf_event_router: Event router started: 21/21 subscribers registered` confirms every subscriber still binds under the renumbered enum; Zigbee stack starts and reaches network steering; NimBLE syncs and advertises. The lock action itself cannot be driven: there is no Nuki BLE peer (the device boots UNCLAIMED with no pairing credentials, so it would need the full Nuki pairing handshake first) and no Zigbee coordinator (steering fails, `ESP_FAIL`). The CLI exposes only `nuki status|connect|pair|unpair` and `zigbee status|connect|unpair` — no unlock command. Compensating evidence that the direct-call bridge is unaffected: `sdf_app.c` is not in this change's diff, so the call sites at `sdf_app.c:1297`, `:1398` and `:1871` are byte-identical; and `test_sdf_app_map_lock_state_to_zigbee_logic` covers the state mapping and passes. Recommend the lock-action leg be exercised on hardware, or as part of `defer-zigbee-attribute-writes` which rewrites this path anyway.
+
+## 4. Correct the documentation
+
+- [x] 4.1 In `doc/sdf_sas.md` §6.1 (Biometric Unlock Flow), replace the `BLE -> EVT : emit BLE_LOCK_ACTION_COMPLETE (HIGH)` line with the actual path: `BLE -> APP : message_cb(STATUS=COMPLETE)` feeding `sdf_lock_flow_on_status()` → `lf_on_complete()`. Keep the existing `APP -> APP : update Zigbee lock state` and `release BLE transport` steps.
+- [x] 4.2 In `doc/sdf_sas.md` §6.2 (Zigbee Remote Unlock Flow), remove the `ZB -> EVT : emit(ZIGBEE_COMMAND, HIGH)` and `BLE -> EVT : emit(BLE_LOCK_ACTION_COMPLETE, HIGH)` hops and the `EVT` participant if it becomes unused. Show inbound commands going `ZB -> APP` via the registered `command_cb` (`sdf_app_on_zigbee_command`).
+- [x] 4.3 Still in §6.2, show **both** outbound state paths distinctly and label their trust level: the optimistic `lf_on_complete() -> update_zigbee_from_action(action)` and the authoritative `CMD_KEYTURNER_STATES -> map_lock_state_to_zigbee(state.lock_state)`. Derive the steps from `sdf_app.c:1294-1297`, `1383`, `1398`, and `239-259` rather than from the old diagram.
+- [x] 4.4 In `openspec/specs/sdf-services-tasks/spec.md` §"Event Types", remove the two deleted enumerators and renumber the listing to match the header — including adding the missing `SDF_EVENT_ROUTER_INTERNAL_WAKE = 0`, which is the source of the existing off-by-one across the whole block.
+- [x] 4.5 In the same file's §"Extended Event Union", remove the `sdf_event_router_zigbee_payload_t zigbee;` and `sdf_event_router_ble_payload_t ble;` members, and remove the corresponding entries from §"New Payload Types" if present.
+- [x] 4.6 Re-read the edited §6.1/§6.2 against the code one final time and confirm no remaining arrow describes a call that does not exist.
+- [x] 4.7 (added during implementation) `doc/sdf_sas.md` §9 "Architecture Decisions" carries a *second* copy of the event union plus an event-type list and a "Zigbee, BLE, and Power components emit their own events" claim. Remove the `zigbee`/`ble` union members there too, correct the event-type list to the real catalogue, and replace the emitter claim with the direct-callback rationale.
+
+## 5. Land
+
+- [x] 5.1 Note in the commit message that the enum renumbers, and that any out-of-tree branch subscribing to the removed types will now fail to compile — which is intended, since such a subscription is currently a silent no-op.
+- [x] 5.2 Confirm `git status` shows no stray files and that `firmware/` contains no `.openspec.yaml`.

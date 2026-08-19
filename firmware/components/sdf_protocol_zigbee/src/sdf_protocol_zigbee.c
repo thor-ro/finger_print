@@ -14,7 +14,6 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_system.h"
-#include "esp_timer.h"
 
 #include "esp_zigbee_core.h"
 #include "esp_zigbee_ota.h"
@@ -27,7 +26,6 @@
 #include "zcl/esp_zigbee_zcl_power_config.h"
 
 #include "sdf_ota.h"
-#include "sdf_event_router.h"
 
 #define SDF_ZIGBEE_ENDPOINT 1
 #define SDF_ZIGBEE_TASK_NAME "sdf_zigbee"
@@ -379,16 +377,6 @@ static esp_err_t sdf_zigbee_dispatch_command_event(
              (int)event->command);
     return ESP_ERR_INVALID_STATE;
   }
-
-  // Emit event router event for Zigbee command
-  sdf_event_router_event_t evt = {
-      .type = SDF_EVENT_ROUTER_ZIGBEE_COMMAND,
-      .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
-      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-      .payload.zigbee.command_id = event->command,
-      .payload.zigbee.user_id = event->programming_event.user_id,
-  };
-  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 
   return cb(ctx, event);
 }

@@ -362,10 +362,12 @@ NUKI -> BLE : challenge nonce (32 bytes)
 BLE -> BLE : compute authenticator
 BLE -> NUKI : send lock action (encrypted)
 NUKI -> BLE : status = COMPLETE
-BLE -> EVT : emit BLE_LOCK_ACTION_COMPLETE (HIGH)
-BLE -> APP : on_complete(UNLATCH)
+BLE -> APP : message_cb(CMD_STATUS)\non NimBLE host task
+APP -> APP : sdf_lock_flow_on_status(COMPLETE)
+APP -> APP : lf_on_complete(UNLATCH)
 APP -> APP : update Zigbee lock state
 APP -> APP : release BLE transport
+note right of BLE : The Nuki client delivers messages\nby direct callback, not via the\nevent router. Only the inbound\nBIOMETRIC_MATCH above is routed.
 @enduml
 ```
 
@@ -392,24 +394,35 @@ note right of EVT : All priorities are queued.\nCRITICAL goes to the front,\nHIG
 participant "Smart Home\nApp" as HA
 participant "Zigbee\nCoordinator" as ZC
 participant "sdf_protocol_zigbee\n(Cluster)" as ZB
-participant "sdf_event_router" as EVT
 participant "sdf_app\n(Bridge Flow)" as APP
 participant "sdf_protocol_ble\n(Nuki Client)" as BLE
 participant "Nuki Smart\nLock" as NUKI
 
 HA -> ZC : Unlock Door command
 ZC -> ZB : ZCL command (0x0101)
-ZB -> EVT : emit(ZIGBEE_COMMAND, HIGH)
-EVT -> APP : subscribe/emit BIOMETRIC_MATCH
+ZB -> APP : command_cb\n(sdf_app_on_zigbee_command)
+note right of ZB : Inbound commands are delivered by\nthe handler registered via\nsdf_protocol_zigbee_set_command_handler(),\nnot through the event router.
 APP -> APP : sdf_app_lock_action(UNLOCK)
 APP -> BLE : sdf_lock_flow_begin()
 BLE -> NUKI : challenge + lock action
+
+== Optimistic update (derived from the requested action) ==
 NUKI -> BLE : status = COMPLETE
-BLE -> EVT : emit(BLE_LOCK_ACTION_COMPLETE, HIGH)
-EVT -> APP : on_lock_action_complete
-APP -> ZB : update_lock_state(UNLOCKED)
+BLE -> APP : message_cb(CMD_STATUS)
+APP -> APP : lf_on_complete(UNLOCK)
+APP -> ZB : update_lock_state(UNLOCKED)\nvia update_zigbee_from_action()
 ZB -> ZC : attribute report
 ZC -> HA : lock state updated
+note over APP : Assumes the action did what was asked.\nUNLATCH maps to UNLOCKED even though\nthe latch is momentary.
+
+== Authoritative update (reported by the lock) ==
+NUKI -> BLE : KEYTURNER_STATES notification
+BLE -> APP : message_cb(CMD_KEYTURNER_STATES)
+APP -> APP : map_lock_state_to_zigbee(state.lock_state)
+APP -> ZB : update_lock_state(actual)
+ZB -> ZC : attribute report
+ZC -> HA : lock state corrected
+note over APP : Ground truth. Arrives on notification\nor on the periodic poll; with\nble_connect_on_demand the transport is\nreleased once state has synchronized.
 @enduml
 ```
 
@@ -682,7 +695,7 @@ Power management is split into two components for separation of concerns:
 The `sdf_event_router` component provides a central event bus that decouples components through typed events with priority-based dispatch.
 
 ### Features
-- **Event types**: Biometric match/fail, Zigbee commands, BLE lock actions, Power sleep/wake, Security lockout, Admin actions, Enrollment steps
+- **Event types**: Biometric match/fail, Power sleep/wake/battery, Security lockout, Admin actions, Enrollment steps, Web companion registration, Button presses, Audit. The protocol adapters (`sdf_protocol_ble`, `sdf_protocol_zigbee`) are deliberately *not* on the bus — see §6.1/§6.2.
 - **Priority levels**: CRITICAL (security), HIGH (lock actions), NORMAL (enrollment), LOW (telemetry)
 - **Dispatch modes**: Synchronous (CRITICAL), Asynchronous via FreeRTOS queue (other priorities)
 - **Subscription**: Component-level with event type and minimum priority filters, backed by a static capacity pool frozen at `sdf_event_router_start()` with lock-free dispatch
@@ -692,8 +705,8 @@ The `sdf_event_router` component provides a central event bus that decouples com
 Previously, `sdf_app` registered direct callbacks with `sdf_services` (`unlock_cb`, `enrollment_cb`). The event router replaces this with:
 1. `sdf_services` emits typed events via `sdf_event_router_emit()`
 2. `sdf_app` subscribes to relevant events at init
-3. Zigbee, BLE, and Power components emit their own events
-4. All cross-component communication routes through the event bus
+3. `sdf_power` and the button/audit paths emit their own events
+4. Protocol adapters keep their direct callbacks (`message_cb`, `command_cb`): their traffic is per-frame, latency-sensitive, and single-consumer, so routing it would head-of-line block the shared dispatch task
 
 ### Event Structure
 ```c
@@ -703,8 +716,6 @@ typedef struct {
     uint32_t timestamp_ms;             // Event timestamp
     union {
         sdf_event_router_biometric_payload_t biometric;
-        sdf_event_router_zigbee_payload_t zigbee;
-        sdf_event_router_ble_payload_t ble;
         sdf_event_router_power_payload_t power;
         sdf_event_router_security_payload_t security;
         sdf_event_router_admin_payload_t admin;

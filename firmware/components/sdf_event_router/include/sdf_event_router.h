@@ -13,8 +13,6 @@ typedef enum {
 
     SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
     SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,
-    SDF_EVENT_ROUTER_ZIGBEE_COMMAND,
-    SDF_EVENT_ROUTER_BLE_LOCK_ACTION_COMPLETE,
     SDF_EVENT_ROUTER_POWER_SLEEP,
     SDF_EVENT_ROUTER_POWER_WAKE,
     SDF_EVENT_ROUTER_POWER_BATTERY,
@@ -80,15 +78,6 @@ typedef struct {
      * have to re-query the sensor to find out who just matched. */
     uint8_t permission;
 } sdf_event_router_biometric_payload_t;
-
-typedef struct {
-    uint8_t command_id;
-    uint16_t user_id;
-} sdf_event_router_zigbee_payload_t;
-
-typedef struct {
-    uint8_t action_result;
-} sdf_event_router_ble_payload_t;
 
 typedef struct {
     uint32_t remaining_ms;
@@ -177,8 +166,6 @@ typedef struct {
     uint32_t timestamp_ms;
     union {
         sdf_event_router_biometric_payload_t biometric;
-        sdf_event_router_zigbee_payload_t zigbee;
-        sdf_event_router_ble_payload_t ble;
         sdf_event_router_power_payload_t power;
         sdf_event_router_security_payload_t security;
         sdf_event_router_admin_payload_t admin;

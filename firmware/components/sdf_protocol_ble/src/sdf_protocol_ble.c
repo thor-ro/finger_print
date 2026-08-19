@@ -1,7 +1,6 @@
 #include "sdf_protocol_ble.h"
 
 #include <string.h>
-#include "esp_timer.h"
 
 #if !defined(CONFIG_IDF_TARGET_LINUX) || defined(SDF_PROTOCOL_BLE_TESTING)
 
@@ -16,7 +15,6 @@
 #include "sdkconfig.h"
 
 #include "sdf_nuki_crypto.h"
-#include "sdf_event_router.h"
 #include "sdf_config.h"
 
 #define SDF_NUKI_ADATA_LEN 30
@@ -388,15 +386,6 @@ static int sdf_nuki_process_encrypted_custom(
       .command_id = sdf_nuki_le16_read(client->pd_buf + 4),
       .payload = client->pd_buf + SDF_NUKI_PDATA_HEADER_LEN,
       .payload_len = plaintext_len - SDF_NUKI_PDATA_HEADER_LEN - 2};
-
-  // Emit BLE lock action complete event
-  sdf_event_router_event_t evt = {
-      .type = SDF_EVENT_ROUTER_BLE_LOCK_ACTION_COMPLETE,
-      .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
-      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
-      .payload.ble.action_result = SDF_NUKI_RESULT_OK,
-  };
-  sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 
   if (message_cb != NULL) {
     message_cb(message_ctx, &msg);

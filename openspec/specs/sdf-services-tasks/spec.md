@@ -10,34 +10,43 @@ Split the monolithic `sdf_services_task` into focused FreeRTOS tasks communicati
 
 ```c
 typedef enum {
-    // Existing events...
-    SDF_EVENT_ROUTER_BIOMETRIC_MATCH,           // 0
-    SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,    // 1
-    SDF_EVENT_ROUTER_ZIGBEE_COMMAND,            // 2
-    SDF_EVENT_ROUTER_BLE_LOCK_ACTION_COMPLETE,  // 3
-    SDF_EVENT_ROUTER_POWER_SLEEP,               // 4
-    SDF_EVENT_ROUTER_POWER_WAKE,                // 5
-    SDF_EVENT_ROUTER_SECURITY_LOCKOUT,          // 6
-    SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST,      // 7
-    SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,  // 8
+    // Internal queue-only sentinel; rejected by subscribe() and emit()
+    SDF_EVENT_ROUTER_INTERNAL_WAKE = 0,          // 0
 
-    // NEW: Match cycle
-    SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST,   // 9 - Trigger match cycle
+    SDF_EVENT_ROUTER_BIOMETRIC_MATCH,            // 1
+    SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,     // 2
+    SDF_EVENT_ROUTER_POWER_SLEEP,                // 3
+    SDF_EVENT_ROUTER_POWER_WAKE,                 // 4
+    SDF_EVENT_ROUTER_POWER_BATTERY,              // 5
+    SDF_EVENT_ROUTER_SECURITY_LOCKOUT,           // 6
+    SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST,       // 7
+    SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,   // 8
 
-    // NEW: Enrollment
+    // Match cycle
+    SDF_EVENT_ROUTER_BIOMETRIC_MATCH_REQUEST,    // 9 - Trigger match cycle
+
+    // Enrollment
     SDF_EVENT_ROUTER_ENROLLMENT_START,           // 10 - Begin enrollment
     SDF_EVENT_ROUTER_ENROLLMENT_STEP_RESULT,     // 11 - Driver step result
     SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,        // 12 - All 3 steps done
     SDF_EVENT_ROUTER_ENROLLMENT_FAILED,          // 13 - Enrollment failed
 
-    // NEW: Admin
+    // Admin
     SDF_EVENT_ROUTER_ADMIN_AUTH_RESULT,          // 14 - Admin match result
     SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,      // 15 - Action executed
 
-    // NEW: Button
-    SDF_EVENT_ROUTER_BUTTON_PRESS,               // 16 - Short press
-    SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,          // 17 - Long press
-    SDF_EVENT_ROUTER_BUTTON_MULTI_PRESS,         // 18 - Double/triple
+    // Web Companion
+    SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,        // 16 - Registration authorized
+
+    // Button
+    SDF_EVENT_ROUTER_BUTTON_PRESS,               // 17 - Short press
+    SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,          // 18 - Long press
+    SDF_EVENT_ROUTER_BUTTON_MULTI_PRESS,         // 19 - Double/triple
+
+    // Audit
+    SDF_EVENT_ROUTER_AUDIT,                      // 20
+
+    SDF_EVENT_ROUTER_TYPE_COUNT                  // 21
 } sdf_event_router_type_t;
 ```
 
@@ -109,8 +118,6 @@ typedef struct {
     uint32_t timestamp_ms;
     union {
         sdf_event_router_biometric_payload_t biometric;
-        sdf_event_router_zigbee_payload_t zigbee;
-        sdf_event_router_ble_payload_t ble;
         sdf_event_router_power_payload_t power;
         sdf_event_router_security_payload_t security;
         sdf_event_router_admin_payload_t admin;
