@@ -49,12 +49,45 @@ esp_err_t
 sdf_protocol_zigbee_set_command_handler(sdf_protocol_zigbee_command_cb cb,
                                         void *ctx);
 
+/**
+ * @name Attribute updates
+ *
+ * These four functions (including sdf_protocol_zigbee_update_user_list()
+ * below) share one contract:
+ *
+ * - They never call into the Zigbee SDK on the caller's context and never wait
+ *   on the Zigbee stack lock. The value is recorded and applied later, on a
+ *   task owned by this component. This matters because the dominant caller
+ *   runs on the BLE host task, inside a GATT notify callback.
+ * - @c ESP_OK means "accepted for asynchronous application", NOT that the ZCL
+ *   attribute write has completed. Do not treat it as proof the value reached
+ *   the stack.
+ * - Failure of the underlying ZCL write is logged by this component, not
+ *   returned. There is no way for a caller to observe it.
+ * - Argument and lifecycle errors are still synchronous: an out-of-range value
+ *   returns @c ESP_ERR_INVALID_ARG and records nothing, and an unusable
+ *   component state returns @c ESP_ERR_INVALID_STATE or @c ESP_ERR_TIMEOUT.
+ * - Updates are coalesced to the latest recorded value. Several updates to the
+ *   same attribute in quick succession collapse into a single push of the last
+ *   one, so an intermediate value may never appear as its own attribute
+ *   report. The attribute converges to the most recent value.
+ * - Calling before the stack has started is fine: the value is recorded and
+ *   pushed once the stack comes up, with no retry needed from the caller.
+ * - With Zigbee disabled by configuration every call is a success no-op, so
+ *   callers need not branch on whether Zigbee is enabled.
+ *
+ * Because application is asynchronous, a caller must not assume the attribute
+ * is readable immediately after one of these returns.
+ * @{
+ */
+
 esp_err_t sdf_protocol_zigbee_update_lock_state(
     sdf_protocol_zigbee_lock_state_t lock_state);
 
 esp_err_t sdf_protocol_zigbee_update_battery_percent(uint8_t battery_percent);
 
 esp_err_t sdf_protocol_zigbee_update_alarm_mask(uint16_t alarm_mask);
+/** @} */
 
 bool sdf_protocol_zigbee_is_enabled(void);
 bool sdf_protocol_zigbee_is_ready(void);
@@ -82,6 +115,27 @@ uint32_t sdf_protocol_zigbee_get_checkin_interval_ms(void);
 esp_err_t sdf_protocol_zigbee_trigger_ota_query(void);
 
 #define SDF_ZIGBEE_ATTR_ACTIVE_USERS_LIST_ID 0x4000
+
+/**
+ * @brief Record the active-user list for asynchronous publication to the
+ *        active-users ZCL attribute.
+ *
+ * Shares the attribute-update contract documented above: asynchronous
+ * application, coalescing to the latest list, and @c ESP_OK meaning "accepted"
+ * rather than "written".
+ *
+ * The list is copied into a fixed-size buffer bounded by what a ZCL character
+ * string can carry: 254 bytes, since the type is a one-byte length prefix with
+ * 0xFF reserved. That is below what a full ten-user list with long names needs,
+ * so such a list is rejected outright with @c ESP_ERR_INVALID_ARG and its
+ * length logged, never truncated - a truncated JSON array is malformed, which
+ * serves a central worse than no update. Carrying a longer list needs a wider
+ * ZCL type (long character string), not a larger buffer here.
+ *
+ * @param json_array NUL-terminated JSON array. Not retained; copied.
+ * @return @c ESP_OK if accepted, @c ESP_ERR_INVALID_ARG for NULL or an
+ *         over-long string, @c ESP_ERR_TIMEOUT if internal state was busy.
+ */
 esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array);
 
 #endif /* SDF_PROTOCOL_ZIGBEE_H */

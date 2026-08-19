@@ -9,6 +9,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 #include "sdf_config.h"
+#include "sdf_zigbee_attr_cache.h"
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_check.h"
@@ -31,6 +32,23 @@
 #define SDF_ZIGBEE_TASK_NAME "sdf_zigbee"
 #define SDF_ZIGBEE_TASK_STACK 6144
 #define SDF_ZIGBEE_TASK_PRIORITY 5
+
+/* Applier task: absorbs the esp_zb_lock_acquire() wait that used to run on the
+ * caller's context (most often the NimBLE host task, inside a GATT notify
+ * callback). Its only job is to block, so blocking it costs nothing. Priority
+ * sits below sdf_zigbee_task so it can never preempt the stack task it feeds.
+ *
+ * Stack is measured, not guessed: uxTaskGetStackHighWaterMark() under esp-emu
+ * after exercising all four attribute types, with the user list at its maximum
+ * length (the deepest path - it puts an sdf_zigbee_attr_snapshot_t on this
+ * stack in sdf_zigbee_attr_cache_apply plus another 255 bytes in
+ * sdf_zigbee_set_attr_string), reported 1924 bytes free of 3072, i.e. an 1148
+ * byte peak. 3072 leaves headroom for the deeper SDK paths a joined network
+ * can reach. */
+#define SDF_ZIGBEE_ATTR_TASK_NAME "sdf_zb_attr"
+#define SDF_ZIGBEE_ATTR_TASK_STACK 3072
+#define SDF_ZIGBEE_ATTR_TASK_PRIORITY 4
+
 
 #define SDF_ZIGBEE_INSTALL_CODE_POLICY false
 #define SDF_ZIGBEE_ED_TIMEOUT ESP_ZB_ED_AGING_TIMEOUT_64MIN
@@ -67,31 +85,30 @@ bool sdf_protocol_zigbee_is_enabled(void) {
   return sdf_config_get()->zigbee_enabled;
 }
 
+/* Attribute values live in sdf_zigbee_attr_cache, not here. They are the only
+ * state the outbound path touches, and keeping them behind their own mutex is
+ * what lets a host test verify that mutex is never held across a ZCL write. */
 typedef struct {
   SemaphoreHandle_t lock;
   TaskHandle_t task;
+  TaskHandle_t attr_task;
   bool initialized;
   bool stack_started;
   bool network_joined;
   sdf_protocol_zigbee_command_cb command_cb;
   void *command_ctx;
-  uint8_t lock_state;
-  uint8_t battery_percent_remaining;
-  uint16_t alarm_mask;
   uint32_t checkin_interval_ms;
 } sdf_protocol_zigbee_state_t;
 
 static sdf_protocol_zigbee_state_t s_state = {
     .lock = NULL,
     .task = NULL,
+    .attr_task = NULL,
     .initialized = false,
     .stack_started = false,
     .network_joined = false,
     .command_cb = NULL,
     .command_ctx = NULL,
-    .lock_state = SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED,
-    .battery_percent_remaining = 200,
-    .alarm_mask = 0,
     .checkin_interval_ms = SDF_ZIGBEE_CHECKIN_INTERVAL_DEFAULT_MS,
 };
 
@@ -276,6 +293,21 @@ static bool sdf_zigbee_set_attr_u16(uint16_t cluster_id, uint16_t attr_id,
 
 static bool sdf_zigbee_set_attr_string(uint16_t cluster_id, uint16_t attr_id,
                                        const char *value) {
+  /* Refuse rather than truncate, and do it before taking the stack lock. This
+   * used to clamp to 254 silently, which for the active-user list meant
+   * publishing a JSON array cut off mid-element - malformed, and worse for a
+   * central than no update. Callers bound their input to
+   * SDF_ZIGBEE_USER_LIST_MAX, so reaching this is a programming error. */
+  size_t len = strlen(value);
+  if (len > SDF_ZIGBEE_ZCL_CHAR_STRING_MAX) {
+    ESP_LOGE(TAG,
+             "Refusing %u byte string for cluster=0x%04X attr=0x%04X: exceeds "
+             "the %u byte ZCL character string maximum",
+             (unsigned)len, cluster_id, attr_id,
+             (unsigned)SDF_ZIGBEE_ZCL_CHAR_STRING_MAX);
+    return false;
+  }
+
   if (!esp_zb_lock_acquire(pdMS_TO_TICKS(1000))) {
     ESP_LOGW(TAG,
              "Timeout acquiring Zigbee lock for cluster=0x%04X attr=0x%04X",
@@ -283,12 +315,8 @@ static bool sdf_zigbee_set_attr_string(uint16_t cluster_id, uint16_t attr_id,
     return false;
   }
 
-  size_t len = strlen(value);
-  if (len > 254)
-    len = 254; // Zigbee char string max length is 254
-
   // Zigbee Character String format: 1 byte length prefix + string data
-  uint8_t zcl_str[255];
+  uint8_t zcl_str[SDF_ZIGBEE_ZCL_CHAR_STRING_MAX + 1];
   zcl_str[0] = (uint8_t)len;
   memcpy(&zcl_str[1], value, len);
 
@@ -308,53 +336,124 @@ static bool sdf_zigbee_set_attr_string(uint16_t cluster_id, uint16_t attr_id,
   return true;
 }
 
+/* Gate on the stack being up: skip pointless wakes, and more importantly skip
+ * the log spam of failed attribute writes during boot. Anything recorded while
+ * this is false is flushed by the apply in sdf_zigbee_task once the stack
+ * starts, so nothing is lost and no caller has to retry. */
+static bool sdf_zigbee_stack_started(void) {
+  if (s_state.lock == NULL) {
+    return false;
+  }
+
+  bool started = false;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+    started = s_state.stack_started;
+    xSemaphoreGive(s_state.lock);
+  }
+  return started;
+}
+
+/* Wakes the applier task. Reads the handle under the state mutex so a notify
+ * racing task teardown can never target a stale handle. Never called with the
+ * Zigbee stack lock held. */
+static void sdf_zigbee_notify_attr_task(void) {
+  if (s_state.lock == NULL) {
+    return;
+  }
+
+  TaskHandle_t attr_task = NULL;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+    attr_task = s_state.attr_task;
+    xSemaphoreGive(s_state.lock);
+  }
+
+  if (attr_task != NULL) {
+    xTaskNotifyGive(attr_task);
+  }
+}
+
 esp_err_t sdf_protocol_zigbee_update_user_list(const char *json_array) {
   if (!sdf_protocol_zigbee_is_enabled()) {
     return ESP_OK;
   }
 
-  if (json_array == NULL || s_state.lock == NULL) {
-    return ESP_ERR_INVALID_ARG;
+  esp_err_t err = sdf_zigbee_attr_cache_record_user_list(json_array);
+  if (err != ESP_OK) {
+    if (err == ESP_ERR_INVALID_ARG && json_array != NULL) {
+      ESP_LOGW(TAG, "User list JSON rejected: %u bytes exceeds the %u byte limit",
+               (unsigned)strlen(json_array),
+               (unsigned)(SDF_ZIGBEE_USER_LIST_MAX - 1U));
+    }
+    return err;
   }
 
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) != pdTRUE) {
-    return ESP_ERR_TIMEOUT;
+  if (sdf_zigbee_stack_started()) {
+    sdf_zigbee_notify_attr_task();
   }
 
-  bool ok = sdf_zigbee_set_attr_string(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
-                                       SDF_ZIGBEE_ATTR_ACTIVE_USERS_LIST_ID,
-                                       json_array);
-
-  xSemaphoreGive(s_state.lock);
-
-  return ok ? ESP_OK : ESP_FAIL;
+  return ESP_OK;
 }
 
+/* The ZCL half of an apply. Each callback runs with the attribute cache mutex
+ * released and is free to block on the Zigbee stack lock. */
+static void sdf_zigbee_write_u8(void *ctx, sdf_zigbee_attr_id_t attr,
+                                uint8_t value) {
+  (void)ctx;
+  switch (attr) {
+  case SDF_ZIGBEE_ATTR_LOCK_STATE:
+    sdf_zigbee_set_attr_u8(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
+                           ESP_ZB_ZCL_ATTR_DOOR_LOCK_LOCK_STATE_ID, value);
+    break;
+  case SDF_ZIGBEE_ATTR_BATTERY_PERCENT_REMAINING:
+    sdf_zigbee_set_attr_u8(
+        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+        ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID, value);
+    break;
+  default:
+    break;
+  }
+}
+
+static void sdf_zigbee_write_u16(void *ctx, sdf_zigbee_attr_id_t attr,
+                                 uint16_t value) {
+  (void)ctx;
+  if (attr == SDF_ZIGBEE_ATTR_ALARM_MASK) {
+    sdf_zigbee_set_attr_u16(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
+                            ESP_ZB_ZCL_ATTR_DOOR_LOCK_ALARM_MASK_ID, value);
+  }
+}
+
+static void sdf_zigbee_write_string(void *ctx, sdf_zigbee_attr_id_t attr,
+                                    const char *value) {
+  (void)ctx;
+  if (attr == SDF_ZIGBEE_ATTR_ACTIVE_USER_LIST) {
+    sdf_zigbee_set_attr_string(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
+                               SDF_ZIGBEE_ATTR_ACTIVE_USERS_LIST_ID, value);
+  }
+}
+
+static const sdf_zigbee_attr_writer_t s_zcl_writer = {
+    .write_u8 = sdf_zigbee_write_u8,
+    .write_u16 = sdf_zigbee_write_u16,
+    .write_string = sdf_zigbee_write_string,
+};
+
 static void sdf_zigbee_apply_cached_attributes(void) {
-  if (s_state.lock == NULL) {
-    return;
+  (void)sdf_zigbee_attr_cache_apply(&s_zcl_writer, NULL);
+}
+
+/* Sole owner of the outbound path to the ZCL attributes. Blocks on a
+ * notification, then pushes whatever the cache currently holds - so a burst of
+ * updates that arrives while an apply is in flight collapses into one push of
+ * the latest values. xClearCountOnExit = pdTRUE is what makes that collapse
+ * happen; pdFALSE would replay one wake per update for no benefit. */
+static void sdf_zigbee_attr_task(void *arg) {
+  (void)arg;
+
+  for (;;) {
+    (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    sdf_zigbee_apply_cached_attributes();
   }
-
-  uint8_t lock_state = SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED;
-  uint8_t battery_percent_remaining = 200;
-  uint16_t alarm_mask = 0;
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) != pdTRUE) {
-    return;
-  }
-  lock_state = s_state.lock_state;
-  battery_percent_remaining = s_state.battery_percent_remaining;
-  alarm_mask = s_state.alarm_mask;
-  xSemaphoreGive(s_state.lock);
-
-  sdf_zigbee_set_attr_u8(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
-                         ESP_ZB_ZCL_ATTR_DOOR_LOCK_LOCK_STATE_ID, lock_state);
-  sdf_zigbee_set_attr_u8(
-      ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-      ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-      battery_percent_remaining);
-  sdf_zigbee_set_attr_u16(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
-                          ESP_ZB_ZCL_ATTR_DOOR_LOCK_ALARM_MASK_ID, alarm_mask);
 }
 
 static esp_err_t sdf_zigbee_dispatch_command_event(
@@ -519,11 +618,13 @@ static esp_err_t sdf_zigbee_handle_door_lock_command(
     event.command = SDF_PROTOCOL_ZIGBEE_COMMAND_LATCH;
     break;
   case ESP_ZB_ZCL_CMD_DOOR_LOCK_TOGGLE: {
+    /* Runs as a Zigbee callback with the stack lock already held. Reading the
+     * cache is safe here precisely because the cache never takes the stack
+     * lock while holding its own mutex - see sdf_zigbee_attr_cache.h. */
     uint8_t current_lock_state = SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED;
-    if (s_state.lock != NULL &&
-        xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
-      current_lock_state = s_state.lock_state;
-      xSemaphoreGive(s_state.lock);
+    sdf_zigbee_attr_snapshot_t snapshot;
+    if (sdf_zigbee_attr_cache_snapshot(&snapshot) == ESP_OK) {
+      current_lock_state = snapshot.lock_state;
     }
     event.command =
         (current_lock_state == SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED)
@@ -776,8 +877,22 @@ sdf_zigbee_action_handler(esp_zb_core_action_callback_id_t callback_id,
 }
 
 static esp_err_t sdf_zigbee_register_endpoint(void) {
+  /* Seeds the cluster attributes with whatever has been recorded so far. The
+   * storage is static because the SDK is only documented to take a pointer to
+   * the initial value, not to copy it; the applier task overwrites these with
+   * esp_zb_zcl_set_attribute_val() once the stack is up. */
+  static sdf_zigbee_attr_snapshot_t initial = {
+      .lock_state = SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED,
+      .battery_percent_remaining = 200,
+  };
+  esp_err_t snapshot_err = sdf_zigbee_attr_cache_snapshot(&initial);
+  if (snapshot_err != ESP_OK) {
+    ESP_LOGW(TAG, "Attribute cache unavailable at endpoint registration: %s",
+             esp_err_to_name(snapshot_err));
+  }
+
   esp_zb_door_lock_cfg_t door_lock_cfg = ESP_ZB_DEFAULT_DOOR_LOCK_CONFIG();
-  door_lock_cfg.door_lock_cfg.lock_state = s_state.lock_state;
+  door_lock_cfg.door_lock_cfg.lock_state = initial.lock_state;
 
   esp_zb_cluster_list_t *cluster_list =
       esp_zb_door_lock_clusters_create(&door_lock_cfg);
@@ -792,7 +907,7 @@ static esp_err_t sdf_zigbee_register_endpoint(void) {
 
   esp_err_t err = esp_zb_door_lock_cluster_add_attr(
       door_lock_cluster, ESP_ZB_ZCL_ATTR_DOOR_LOCK_ALARM_MASK_ID,
-      &s_state.alarm_mask);
+      &initial.alarm_mask);
   ESP_RETURN_ON_ERROR(err, TAG, "Failed to add Door Lock alarm mask attribute");
 
   esp_zb_power_config_cluster_cfg_t power_cfg = {
@@ -812,7 +927,7 @@ static esp_err_t sdf_zigbee_register_endpoint(void) {
   err = esp_zb_power_config_cluster_add_attr(
       power_cluster,
       ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-      &s_state.battery_percent_remaining);
+      &initial.battery_percent_remaining);
   ESP_RETURN_ON_ERROR(err, TAG, "Failed to add battery percentage attribute");
 
   err = esp_zb_cluster_list_add_power_config_cluster(
@@ -931,14 +1046,23 @@ static void sdf_zigbee_task(void *arg) {
            (unsigned)SDF_ZIGBEE_ENDPOINT);
   esp_zb_stack_main_loop();
 
-fail:
+fail:;
+  /* The applier has nothing left to apply once the stack is gone, so it goes
+   * with it. Null the handle under the mutex first so a concurrent update
+   * cannot notify a task that is about to be deleted. */
+  TaskHandle_t attr_task = NULL;
   if (s_state.lock != NULL &&
       xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
     s_state.initialized = false;
     s_state.stack_started = false;
     s_state.network_joined = false;
     s_state.task = NULL;
+    attr_task = s_state.attr_task;
+    s_state.attr_task = NULL;
     xSemaphoreGive(s_state.lock);
+  }
+  if (attr_task != NULL) {
+    vTaskDelete(attr_task);
   }
   vTaskDelete(NULL);
 }
@@ -960,6 +1084,11 @@ esp_err_t sdf_protocol_zigbee_init(void) {
     ESP_RETURN_ON_FALSE(s_state.lock != NULL, ESP_ERR_NO_MEM, TAG,
                         "Failed to create Zigbee mutex");
   }
+
+  /* The cache self-initialises on first use, but doing it here keeps the
+   * allocation failure on this error path instead of an update call's. */
+  ESP_RETURN_ON_ERROR(sdf_zigbee_attr_cache_init(), TAG,
+                      "Failed to create Zigbee attribute cache mutex");
 
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) != pdTRUE) {
     return ESP_ERR_TIMEOUT;
@@ -993,16 +1122,40 @@ esp_err_t sdf_protocol_zigbee_init(void) {
     return err;
   }
 
+  /* Created before sdf_zigbee_task so an update racing startup can never
+   * notify a null handle: the applier exists before anything can flip
+   * stack_started true. */
+  BaseType_t attr_task_ok = xTaskCreate(
+      sdf_zigbee_attr_task, SDF_ZIGBEE_ATTR_TASK_NAME,
+      SDF_ZIGBEE_ATTR_TASK_STACK, NULL, SDF_ZIGBEE_ATTR_TASK_PRIORITY,
+      &s_state.attr_task);
+
+  if (attr_task_ok != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create Zigbee attribute applier task");
+    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
+      s_state.initialized = false;
+      s_state.attr_task = NULL;
+      xSemaphoreGive(s_state.lock);
+    }
+    return ESP_FAIL;
+  }
+
   BaseType_t task_ok =
       xTaskCreate(sdf_zigbee_task, SDF_ZIGBEE_TASK_NAME, SDF_ZIGBEE_TASK_STACK,
                   NULL, SDF_ZIGBEE_TASK_PRIORITY, &s_state.task);
 
   if (task_ok != pdPASS) {
     ESP_LOGE(TAG, "Failed to create Zigbee task");
+    TaskHandle_t attr_task = NULL;
     if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
       s_state.initialized = false;
       s_state.task = NULL;
+      attr_task = s_state.attr_task;
+      s_state.attr_task = NULL;
       xSemaphoreGive(s_state.lock);
+    }
+    if (attr_task != NULL) {
+      vTaskDelete(attr_task);
     }
     return ESP_FAIL;
   }
@@ -1051,22 +1204,16 @@ esp_err_t sdf_protocol_zigbee_update_lock_state(
     return ESP_ERR_INVALID_STATE;
   }
 
-  bool ready = false;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
-    s_state.lock_state = (uint8_t)lock_state;
-    ready = s_state.stack_started;
-    xSemaphoreGive(s_state.lock);
+  esp_err_t err = sdf_zigbee_attr_cache_record_lock_state((uint8_t)lock_state);
+  if (err != ESP_OK) {
+    return err;
   }
 
-  if (!ready) {
-    return ESP_OK;
+  if (sdf_zigbee_stack_started()) {
+    sdf_zigbee_notify_attr_task();
   }
 
-  return sdf_zigbee_set_attr_u8(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
-                                ESP_ZB_ZCL_ATTR_DOOR_LOCK_LOCK_STATE_ID,
-                                (uint8_t)lock_state)
-             ? ESP_OK
-             : ESP_FAIL;
+  return ESP_OK;
 }
 
 esp_err_t sdf_protocol_zigbee_update_battery_percent(uint8_t battery_percent) {
@@ -1082,24 +1229,19 @@ esp_err_t sdf_protocol_zigbee_update_battery_percent(uint8_t battery_percent) {
     return ESP_ERR_INVALID_STATE;
   }
 
+  /* ZCL reports battery in half-percent units. */
   uint8_t battery_percent_remaining = (uint8_t)(battery_percent * 2U);
-  bool ready = false;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
-    s_state.battery_percent_remaining = battery_percent_remaining;
-    ready = s_state.stack_started;
-    xSemaphoreGive(s_state.lock);
+  esp_err_t err =
+      sdf_zigbee_attr_cache_record_battery_remaining(battery_percent_remaining);
+  if (err != ESP_OK) {
+    return err;
   }
 
-  if (!ready) {
-    return ESP_OK;
+  if (sdf_zigbee_stack_started()) {
+    sdf_zigbee_notify_attr_task();
   }
 
-  return sdf_zigbee_set_attr_u8(
-             ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-             ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-             battery_percent_remaining)
-             ? ESP_OK
-             : ESP_FAIL;
+  return ESP_OK;
 }
 
 esp_err_t sdf_protocol_zigbee_update_alarm_mask(uint16_t alarm_mask) {
@@ -1111,22 +1253,16 @@ esp_err_t sdf_protocol_zigbee_update_alarm_mask(uint16_t alarm_mask) {
     return ESP_ERR_INVALID_STATE;
   }
 
-  bool ready = false;
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(250)) == pdTRUE) {
-    s_state.alarm_mask = alarm_mask;
-    ready = s_state.stack_started;
-    xSemaphoreGive(s_state.lock);
+  esp_err_t err = sdf_zigbee_attr_cache_record_alarm_mask(alarm_mask);
+  if (err != ESP_OK) {
+    return err;
   }
 
-  if (!ready) {
-    return ESP_OK;
+  if (sdf_zigbee_stack_started()) {
+    sdf_zigbee_notify_attr_task();
   }
 
-  return sdf_zigbee_set_attr_u16(ESP_ZB_ZCL_CLUSTER_ID_DOOR_LOCK,
-                                 ESP_ZB_ZCL_ATTR_DOOR_LOCK_ALARM_MASK_ID,
-                                 alarm_mask)
-             ? ESP_OK
-             : ESP_FAIL;
+  return ESP_OK;
 }
 
 bool sdf_protocol_zigbee_is_ready(void) {

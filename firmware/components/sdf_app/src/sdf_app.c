@@ -1071,8 +1071,11 @@ static void sdf_app_update_zigbee_user_list(void) {
   cJSON_Delete(root);
 
   if (json_str) {
-    sdf_protocol_zigbee_update_user_list(json_str);
-    ESP_LOGI(TAG, "Synced active users to Zigbee: %s", json_str);
+    /* Accepted for asynchronous application, not yet written - the component
+     * logs both the rejection reason and any later ZCL write failure. */
+    if (sdf_protocol_zigbee_update_user_list(json_str) == ESP_OK) {
+      ESP_LOGI(TAG, "Queued active users for Zigbee: %s", json_str);
+    }
     free(json_str);
   } else {
     ESP_LOGE(TAG, "Failed to serialize user list JSON");

@@ -118,6 +118,16 @@ extern void test_sdf_platform_power_gate_ble_radio_always_invalid_state(void);
 /* Zigbee protocol tests */
 extern void test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supported(void);
 extern void test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok(void);
+extern void test_sdf_protocol_zigbee_lock_state_updates_coalesce_to_latest(void);
+extern void test_sdf_protocol_zigbee_burst_applies_every_attribute(void);
+extern void test_sdf_protocol_zigbee_invalid_argument_rejected_synchronously(void);
+extern void test_sdf_protocol_zigbee_user_list_accepts_and_coalesces(void);
+extern void test_sdf_protocol_zigbee_user_list_over_long_rejected_not_truncated(void);
+extern void test_sdf_protocol_zigbee_updates_are_noops_when_disabled(void);
+extern void
+test_sdf_protocol_zigbee_apply_does_not_hold_cache_lock_across_writer(void);
+extern void
+test_sdf_protocol_zigbee_inbound_and_apply_do_not_invert_lock_order(void);
 
 /* SDF Services tests */
 /* Must be the very first two RUN_TEST calls in this section (see their doc
@@ -473,6 +483,15 @@ void app_main(void) {
   /* Zigbee protocol tests */
   RUN_TEST(test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supported);
   RUN_TEST(test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok);
+  RUN_TEST(test_sdf_protocol_zigbee_lock_state_updates_coalesce_to_latest);
+  RUN_TEST(test_sdf_protocol_zigbee_burst_applies_every_attribute);
+  RUN_TEST(test_sdf_protocol_zigbee_invalid_argument_rejected_synchronously);
+  RUN_TEST(test_sdf_protocol_zigbee_user_list_accepts_and_coalesces);
+  RUN_TEST(test_sdf_protocol_zigbee_user_list_over_long_rejected_not_truncated);
+  RUN_TEST(test_sdf_protocol_zigbee_updates_are_noops_when_disabled);
+  RUN_TEST(
+      test_sdf_protocol_zigbee_apply_does_not_hold_cache_lock_across_writer);
+  RUN_TEST(test_sdf_protocol_zigbee_inbound_and_apply_do_not_invert_lock_order);
 
   /* SDF Services tests */
   RUN_TEST(test_sdf_services_init_loads_enrolled_users_cache_before_return);

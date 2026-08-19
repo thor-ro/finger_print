@@ -66,6 +66,24 @@ Documented as **BREAKING** in the proposal. Grep of every call site (`sdf_app.c:
 
 **Rationale:** creating it first means a notify can never target a null handle, including from an update that races startup. Guard the notify on a non-null handle read under the state mutex regardless — cheap, and it keeps the "Zigbee disabled" no-op path honest.
 
+### D6: The lock-ordering logic lives in a unit that builds on both targets
+
+**Chosen:** extract the cache and its snapshot-then-write sequence into `sdf_zigbee_attr_cache.{h,c}`, compiled on target *and* Linux host, with the ZCL writes indirected through a `sdf_zigbee_attr_writer_t` function-pointer struct.
+
+**Rationale:** task 5.4 asks for a host test that drives inbound ZCL dispatch and an outbound update concurrently. That was not possible as originally structured — the entire implementation sits inside `#ifndef CONFIG_IDF_TARGET_LINUX`, so the host build linked only the mock, and a "lock-order test" would have tested the mock's ordering rather than the firmware's. The writer indirection is what lets the shared unit stay free of the Zigbee SDK, which cannot link on the host.
+
+The cache mutex is deliberately **non-recursive**: a regression that holds it across a writer shows up as an `ESP_ERR_TIMEOUT` from a re-entrant record rather than quietly succeeding. `sdf_protocol_zigbee_mock_linux.c` now delegates to the same cache, so the host contract tests (coalescing, rejection bounds) exercise real code too.
+
+Both new tests were validated by reintroducing the inversion in `sdf_zigbee_attr_cache_apply()` and confirming they fail. A first draft of the concurrency test hammered the two paths in a loop and **passed** against the broken build; it was rewritten to force the one interleaving that matters via a handshake. A racy guard is worse than none.
+
+### D7: Over-long user lists are rejected at the API boundary, not at the ZCL write
+
+`sdf_zigbee_set_attr_string()` silently truncated at 254 bytes — the ZCL character-string maximum, since the type is a one-byte length prefix with 0xFF reserved. A truncated JSON array is malformed, which is exactly the failure the "never truncate" rule above exists to prevent, one layer down.
+
+**Chosen:** reject over-long strings in `sdf_zigbee_set_attr_string()` with the length logged, and align the API-boundary bound (`SDF_ZIGBEE_USER_LIST_MAX`) to the same 254 bytes so the caller sees `ESP_ERR_INVALID_ARG` synchronously rather than a silent corruption at apply time.
+
+**Consequence, deliberately accepted:** the capacity-derived worst case (10 users × ~31 fixed bytes + up to 31 name chars ≈ 620 bytes) exceeds what the transport can carry. A full ten-user list with long names is now rejected outright instead of being truncated into malformed JSON. Carrying such a list requires a wider ZCL type (long character string), which is out of scope here and is noted in the header.
+
 ## Risks / Trade-offs
 
 - **The applier task's stack is undersized and it overflows inside the Zigbee SDK** → Measure with `uxTaskGetStackHighWaterMark` under the emulator after exercising all four attribute types, and size with margin. Do not copy a number from another task.
