@@ -45,6 +45,25 @@ void test_sdf_ota_version_compare_pre_release_alphanumeric_order(void) {
   TEST_ASSERT_EQUAL(SDF_OTA_VERSION_OLDER, sdf_ota_version_compare("1.0.0-beta", "1.0.0-alpha"));
 }
 
+void test_sdf_ota_version_compare_git_describe_orders_by_commit_count(void) {
+  /* The versions the OTA gate really sees: `git describe` output embedded as
+   * PROJECT_VER. The commit count orders these, not the string. */
+  TEST_ASSERT_EQUAL(SDF_OTA_VERSION_NEWER,
+                    sdf_ota_version_compare("v1.2.3-5-gaaaaaaa", "v1.2.3-14-gbbbbbbb"));
+  TEST_ASSERT_EQUAL(SDF_OTA_VERSION_OLDER,
+                    sdf_ota_version_compare("v1.2.3-14-gbbbbbbb", "v1.2.3-5-gaaaaaaa"));
+  /* Same commit count is the same build - the abbreviated hash is not an
+   * ordering. */
+  TEST_ASSERT_EQUAL(SDF_OTA_VERSION_EQUAL,
+                    sdf_ota_version_compare("v1.2.3-7-gaaaaaaa", "v1.2.3-7-gbbbbbbb"));
+  /* A tagged release still outranks any describe-suffixed build of it. */
+  TEST_ASSERT_EQUAL(SDF_OTA_VERSION_NEWER,
+                    sdf_ota_version_compare("v1.2.3-9-gaaaaaaa", "v1.2.3"));
+  /* And the commit count never overrides major.minor.patch. */
+  TEST_ASSERT_EQUAL(SDF_OTA_VERSION_NEWER,
+                    sdf_ota_version_compare("v1.2.3-99-gaaaaaaa", "v1.2.4-1-gbbbbbbb"));
+}
+
 void test_sdf_ota_version_compare_build_metadata_ignored(void) {
   TEST_ASSERT_EQUAL(SDF_OTA_VERSION_EQUAL, sdf_ota_version_compare("1.2.3+build1", "1.2.3+build2"));
 }

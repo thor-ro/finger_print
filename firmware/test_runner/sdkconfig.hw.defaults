@@ -8,9 +8,12 @@ CONFIG_BT_BLUEDROID_ENABLED=n
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
 CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+# Peripheral + GATT server are required because the runner links
+# sdf_ble_companion, which registers the companion GATT service.
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
 CONFIG_BT_NIMBLE_GATT_CLIENT=y
-CONFIG_BT_NIMBLE_GATT_SERVER=n
+CONFIG_BT_NIMBLE_GATT_SERVER=y
+CONFIG_BT_NIMBLE_GAP_SERVICE=y
 CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
 
 # Zigbee (option names may vary by ESP-IDF/esp-zigbee version).
@@ -73,3 +76,16 @@ CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
 CONFIG_BOOTLOADER_LOG_LEVEL=2
 CONFIG_SDF_POWER_FP_EN_GPIO=2
 CONFIG_SDF_WS2812_LED_GPIO=8
+
+# The runner drives every suite from app_main() on the main task, and several
+# of them keep large buffers there: the Nuki replay-window suites hold arrays of
+# whole 2 KB messages (the oversized-window case alone needs ~43 KB of frame).
+# The default 3.5 KB overflows partway through the run on a chip target.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=98304
+
+# Test-runner overrides, mirroring test_runner/sdkconfig.defaults: both are
+# off by default in production Kconfig, and without them the suites that
+# exercise the config setters and the CLI auth logic would only ever hit the
+# "feature disabled" short-circuit.
+CONFIG_SDF_CONFIG_ENABLE_RUNTIME_OVERRIDE=y
+CONFIG_SDF_CLI_ENABLE=y

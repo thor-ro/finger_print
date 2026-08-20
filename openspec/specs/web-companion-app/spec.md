@@ -1,6 +1,6 @@
 # Spec: web-companion-app
 
-## Overview
+## Purpose
 This specification covers the Web Companion App, a static web application that connects to the Smart Door Bridge via Web Bluetooth to allow users to register, manage device configuration, and trigger OTA firmware updates.
 
 ## Requirements

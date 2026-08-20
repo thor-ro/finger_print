@@ -27,6 +27,10 @@ static struct {
     TaskHandle_t task;
     bool initialized;
     bool started;
+    /* True only while the router task is inside sdf_event_router_dispatch().
+     * Read together with `task` by sdf_event_router_emit() to reject emits
+     * that originate from a subscriber callback (design.md - D6). */
+    bool in_dispatch;
     uint8_t pool_count;
     uint32_t rejected_registrations;
     uint8_t head_by_type[SDF_EVENT_ROUTER_TYPE_COUNT];
@@ -57,7 +61,9 @@ static void sdf_event_router_task(void *arg)
 
     while (true) {
         if (xQueueReceive(s_state.queue, &event, portMAX_DELAY) == pdTRUE) {
+            s_state.in_dispatch = true;
             sdf_event_router_dispatch(&event);
+            s_state.in_dispatch = false;
         }
     }
 }
@@ -160,6 +166,17 @@ esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event,
         event->type == SDF_EVENT_ROUTER_INTERNAL_WAKE ||
         event->type >= SDF_EVENT_ROUTER_TYPE_COUNT) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Emitting from a subscriber callback is not allowed: the callback runs on
+     * the router task, so a blocking send would wait for a queue only that
+     * same task can drain. Both conjuncts are needed - `in_dispatch` alone
+     * would reject legitimate emits from producer tasks that merely happen to
+     * run while a dispatch is in progress (design.md - D6). */
+    if (s_state.in_dispatch && xTaskGetCurrentTaskHandle() == s_state.task) {
+        ESP_LOGE(TAG, "Rejecting emit from subscriber callback: type=%d prio=%d",
+                 (int)event->type, (int)event->priority);
+        return ESP_ERR_INVALID_STATE;
     }
 
     /* Critical events jump the queue but still land on the router task, so no

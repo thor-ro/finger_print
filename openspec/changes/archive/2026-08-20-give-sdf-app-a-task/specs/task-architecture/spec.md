@@ -1,8 +1,7 @@
 # task-architecture Specification
 
-## Purpose
-TBD - created by archiving change unified-task-architecture. Update Purpose after archive.
-## Requirements
+## MODIFIED Requirements
+
 ### Requirement: Documentation updates
 The system SHALL keep all affected documentation files matching the canonical task architecture. Where these documents state or enumerate the set of tasks, they SHALL reflect the set the firmware actually creates at the time of writing, rather than a count fixed at the time the document was first produced.
 
@@ -21,6 +20,8 @@ The system SHALL keep all affected documentation files matching the canonical ta
 #### Scenario: New doc/rtos_tasks.md created
 - **WHEN** viewing `doc/rtos_tasks.md`
 - **THEN** the file exists with full task specifications
+
+## ADDED Requirements
 
 ### Requirement: The canonical task table matches the tasks the firmware creates
 
@@ -49,17 +50,3 @@ The table SHALL record, per task, at least its name, priority, stack size, and t
 
 - **WHEN** a reviewer compares the table against the task-creation call sites in the firmware
 - **THEN** the two sets correspond, with no task present in one and absent from the other
-
-### Requirement: Stack monitoring and watchdog assignments
-The system SHALL document stack monitoring approach and watchdog timeout per task.
-
-#### Scenario: Stack monitoring documented
-- **WHEN** viewing `doc/rtos_tasks.md`
-- **THEN** stack monitoring via `uxTaskGetStackHighWaterMark()` documented
-- **THEN** validation on hardware required
-
-#### Scenario: Watchdog assignments documented
-- **WHEN** viewing `doc/rtos_tasks.md`
-- **THEN** watchdog timeout per task configured
-- **THEN** priority inversion analysis documented
-

@@ -317,14 +317,20 @@ The following table documents the canonical FreeRTOS task architecture for SDF v
 
 | Task | Priority | Stack | Core | Trigger | Comm | Owner |
 |------|----------|-------|------|---------|------|-------|
+| sdf_app | 5 (HIGH) | 4 KB | 0 | Event-driven | Events (router → own queue) | sdf_app |
+| sdf_evt_router | 5 (HIGH) | 3 KB | 0 | Event queue | Events | sdf_event_router |
 | sdf_power | 4 (NORMAL) | 4 KB | 0 | Timer (250ms) | Events | sdf_power |
-| sdf_zigbee | 5 (HIGH) | 8 KB | 0 | Event queue | Callbacks + Events | sdf_protocol_zigbee |
-| sdf_match | 5 (HIGH) | 6 KB | 0 | 400ms poll | Events | sdf_services |
+| sdf_zigbee | 5 (HIGH) | 6 KB | 0 | Event queue | Callbacks + Events | sdf_protocol_zigbee |
+| sdf_zb_attr | 4 (NORMAL) | 3 KB | 0 | Attribute-write queue | Direct call (queue) | sdf_protocol_zigbee |
+| sdf_match | 5 (HIGH) | 4 KB | 0 | 400ms poll | Events | sdf_services |
 | sdf_enroll | 4 (NORMAL) | 4 KB | 0 | Event-driven | Events | sdf_services |
 | sdf_admin | 5 (HIGH) | 4 KB | 0 | Event-driven | Events | sdf_services |
+| fp_owner | 5 (HIGH) | 4 KB | 0 | Request queue | Direct call (queue) | sdf_drivers |
+| led | 4 (NORMAL) | 2 KB | 0 | Pattern queue | Direct call (queue) | sdf_drivers |
 | sdf_ota (future) | 3 (LOW) | 8 KB | 0 | Event-driven | Events | sdf_ota |
 
-**Total RAM (stacks):** ~34 KB + overhead
+**Total RAM (stacks):** 38 KB (38912 bytes) across the ten tasks that exist
+today, plus TCB overhead. `sdf_ota` is not created yet and is excluded.
 
 **Priority Mapping:**
 - CRITICAL (6): `SECURITY_LOCKOUT_ENTERED`, `BIOMETRIC_MATCH` (admin)

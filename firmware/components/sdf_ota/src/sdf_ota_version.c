@@ -66,10 +66,39 @@ static bool parse_semver(const char *version, semver_t *out)
     return true;
 }
 
+/* `git describe` renders an untagged build as <tag>-<commits>-g<hash>, which
+ * semver reads as the single pre-release identifier "<commits>-g<hash>". Those
+ * are the strings the OTA gate actually compares (PROJECT_VER, see
+ * cmake/version.cmake), and ordering them lexicographically gets it backwards:
+ * "14-g..." sorts below "5-g..." even though 14 commits is the newer build. */
+static bool parse_git_describe_commits(const char *pre, long *count_out)
+{
+    if (pre == NULL) {
+        return false;
+    }
+    char *end;
+    long count = strtol(pre, &end, 10);
+    if (end == pre || end[0] != '-' || end[1] != 'g' || end[2] == '\0') {
+        return false;
+    }
+    *count_out = count;
+    return true;
+}
+
 static int compare_pre_release(const char *a, const char *b)
 {
     /* Both have pre-release: compare alphanumerically */
     if (a && b) {
+        long a_commits, b_commits;
+        if (parse_git_describe_commits(a, &a_commits) &&
+            parse_git_describe_commits(b, &b_commits)) {
+            /* Equal commit counts are the same build: the abbreviated hash
+             * that follows carries no ordering. */
+            if (a_commits != b_commits) {
+                return (a_commits < b_commits) ? -1 : 1;
+            }
+            return 0;
+        }
         return strcmp(a, b);
     }
     /* Release (no pre-release) > pre-release */

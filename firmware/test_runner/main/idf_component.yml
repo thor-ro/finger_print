@@ -1,0 +1,36 @@
+## IDF Component Manager Manifest File
+##
+## The test runner links the same production components as firmware/main, so it
+## needs the same managed components. They are gated on the target because the
+## Linux host build compiles the mock/stub paths instead (see the
+## `IDF_TARGET STREQUAL "linux"` branches in the component CMakeLists files).
+##
+## The Zigbee pair is version-pinned rather than `=*` like firmware/main's
+## manifest: `=*` resolves to the latest release, and firmware/dependencies.lock
+## holds this project at 1.6.8/1.6.4 while 2.0.x has already moved
+## esp_zigbee_core.h under include/compat/, which sdf_protocol_zigbee does not
+## compile against. Pinning keeps the runner on the same stack the firmware
+## links; bump both here when firmware/ bumps.
+dependencies:
+  idf:
+    version: '>=4.1.0'
+  espressif/esp-zigbee-lib:
+    version: '==1.6.8'
+    rules:
+      - if: "target != linux"
+  espressif/esp-zboss-lib:
+    version: '==1.6.4'
+    rules:
+      - if: "target != linux"
+  espressif/led_strip:
+    version: '=*'
+    rules:
+      - if: "target != linux"
+  espressif/button:
+    version: '=*'
+    rules:
+      - if: "target != linux"
+  espressif/cjson:
+    version: "^1.7.19"
+    rules:
+      - if: "target != linux"

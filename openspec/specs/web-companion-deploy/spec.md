@@ -1,4 +1,10 @@
-## ADDED Requirements
+# Web Companion Deployment
+
+## Purpose
+
+Defines GitHub Pages CI/CD workflow for deploying the web companion static application.
+
+## Requirements
 
 ### Requirement: GitHub Actions Deployment Trigger
 The system SHALL deploy the web-companion static application to GitHub Pages whenever changes are pushed to its corresponding directory or workflow file.

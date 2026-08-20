@@ -1,0 +1,28 @@
+model_list:
+  # 1. Google AI 
+  - model_name: gemini-3-7-flash
+    litellm_params:
+      model: gemini/gemini-3.7-flash
+      api_key: os.environ/GEMINI_API_KEY
+      
+  # 2. Anthropic
+  - model_name: claude-opus-5
+    litellm_params:
+      model: anthropic/claude-5-opus-latest
+      api_key: os.environ/ANTHROPIC_API_KEY
+      
+  # 3. Anthropic 
+  - model_name: claude-sonnet-5
+    litellm_params:
+      model: anthropic/claude-5-sonnet-latest
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # 4. OpenRouter
+  - model_name: glm-5-2
+    litellm_params:
+      # OpenRouter requires the provider prefix before the model name
+      model: openrouter/z-ai/glm-5.2
+      api_key: os.environ/OPENROUTER_API_KEY
+
+litellm_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

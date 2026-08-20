@@ -1,4 +1,10 @@
-## ADDED Requirements
+# Security Event Unification
+
+## Purpose
+
+Specifies the unification of security event routing and elimination of duplicate audit logging.
+
+## Requirements
 
 ### Requirement: All security events emit through event router only
 The system SHALL emit all security events exclusively through `sdf_event_router_emit()`. The legacy callback mechanism (`sdf_app_set_event_callback`, `sdf_app_set_audit_callback`) SHALL NOT be used for any security event type.

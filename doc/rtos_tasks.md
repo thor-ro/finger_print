@@ -10,14 +10,24 @@
 
 | Task | Priority | Stack | Core | Trigger | Comm | Owner |
 |------|----------|-------|------|---------|------|-------|
+| sdf_app | 5 (HIGH) | 4 KB | 0 | Event-driven (≤1s idle cap) | Events (router → own queue) | sdf_app |
+| sdf_evt_router | 5 (HIGH) | 3 KB | 0 | Event queue (`portMAX_DELAY`) | Events | sdf_event_router |
 | sdf_power | 4 (NORMAL) | 4 KB | 0 | Deadline-computed (≤1s cap) + Activity Wake | Events + Direct Call | sdf_power |
-| sdf_zigbee | 5 (HIGH) | 8 KB | 0 | ESP-ZB queue | Callbacks + Events | sdf_protocol_zigbee |
-| sdf_match | 5 (HIGH) | 6 KB | 0 | Timer (400ms) | Events | sdf_services |
+| sdf_zigbee | 5 (HIGH) | 6 KB | 0 | ESP-ZB queue | Callbacks + Events | sdf_protocol_zigbee |
+| sdf_zb_attr | 4 (NORMAL) | 3 KB | 0 | Attribute-write queue | Direct call (queue) | sdf_protocol_zigbee |
+| sdf_match | 5 (HIGH) | 4 KB | 0 | Timer (400ms) | Events | sdf_services |
 | sdf_enroll | 4 (NORMAL) | 4 KB | 0 | Event-driven (≤1s cap idle, 200ms retry timer active) | Events | sdf_services |
 | sdf_admin | 5 (HIGH) | 4 KB | 0 | Deadline-computed (≤1s cap) + Event-driven | Events | sdf_services |
+| fp_owner | 5 (HIGH) | 4 KB | 0 | Request queue | Direct call (queue) | sdf_drivers |
+| led | 4 (NORMAL) | 2 KB | 0 | Pattern queue + animation tick | Direct call (queue) | sdf_drivers |
 | sdf_ota (future) | 3 (LOW) | 8 KB | 0 | Event-driven | Events | sdf_ota |
 
-**Total Stack RAM:** ~34 KB + overhead
+Every figure above is read from the `xTaskCreate()` call site, not from another
+document. The `sdf_zigbee` and `sdf_match` rows in particular used to state 8 KB
+and 6 KB; both were wrong.
+
+**Total Stack RAM:** 38 KB (38912 bytes) across the ten tasks that exist today,
+plus TCB overhead; `sdf_ota` is not created yet and is excluded from the total.
 
 **Priority Levels (FreeRTOS 0-6):**
 - CRITICAL = 6 (reserved for future immediate-response)
@@ -90,7 +100,7 @@ int sdf_power_get_battery_percent(void);
 **File:** `firmware/components/sdf_protocol_zigbee/src/sdf_protocol_zigbee.c:941`  
 **Entry:** `sdf_zigbee_task()` (ESP-Zigbee internal)  
 **Priority:** 5 (HIGH)  
-**Stack:** 8192 bytes (increased from 4096)  
+**Stack:** 6144 bytes (`SDF_ZIGBEE_TASK_STACK`)  
 **Core:** 0  
 **Trigger:** ESP-Zigbee internal event queue
 
@@ -120,7 +130,7 @@ void sdf_protocol_zigbee_set_command_handler(sdf_zigbee_command_handler_t handle
 |-----------|---------|------------|
 | Endpoint | 1 | `CONFIG_SDF_ZIGBEE_ENDPOINT` |
 | Check-in interval | 15s | `CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS` |
-| Stack size | 8192 | `CONFIG_SDF_ZIGBEE_TASK_STACK` |
+| Stack size | 6144 | `SDF_ZIGBEE_TASK_STACK` (compile-time constant, not Kconfig) |
 
 **Watchdog:** ESP-ZB internal WDT; task watchdog timeout: 10s
 
@@ -130,7 +140,7 @@ void sdf_protocol_zigbee_set_command_handler(sdf_zigbee_command_handler_t handle
 
 **Entry:** `sdf_match_task()` (new — from `refactor-services-task`)  
 **Priority:** 5 (HIGH) — must preempt enrollment for lock actions  
-**Stack:** 6144 bytes  
+**Stack:** 4096 bytes (`SDF_MATCH_TASK_STACK`)  
 **Core:** 0  
 **Loop Interval:** 400ms (config: `CONFIG_SDF_SVC_MATCH_POLL_INTERVAL_MS`)
 
@@ -168,7 +178,7 @@ void sdf_protocol_zigbee_set_command_handler(sdf_zigbee_command_handler_t handle
 | Fail threshold | 5 attempts | `CONFIG_SDF_SVC_SECURITY_FAIL_THRESHOLD` |
 | Fail window | 60s | `CONFIG_SDF_SVC_SECURITY_FAIL_WINDOW_MS` |
 | Lockout duration | 120s | `CONFIG_SDF_SVC_SECURITY_LOCKOUT_MS` |
-| Stack size | 6144 | `CONFIG_SDF_SVC_MATCH_TASK_STACK` |
+| Stack size | 4096 | `SDF_MATCH_TASK_STACK` (compile-time constant, not Kconfig) |
 
 **Watchdog:** Task watchdog timeout: 2s (5× poll interval)
 
@@ -310,6 +320,71 @@ Button handling is **taskless** as of `quiesce-poll-loops-light-sleep`:
 
 ---
 
+### 2.8 sdf_app_task
+
+**File:** `firmware/components/sdf_app/src/sdf_app.c`  
+**Entry:** `sdf_app_task()`  
+**Priority:** 5 (HIGH) — owns the lock-actuation path, so it sits at the same level as `sdf_match` and `sdf_admin`  
+**Stack:** 4096 bytes (`SDF_APP_TASK_STACK`)  
+**Core:** 0  
+**Queue depth:** 10 (`SDF_APP_EVENT_QUEUE_DEPTH`), matching the three service task queues  
+**Loop:** blocking receive on its own queue, capped at 1000 ms (`SDF_APP_IDLE_WAIT_CAP_MS`) so the watchdog is fed while idle
+
+**Responsibilities:**
+- Handles the nine event types `sdf_app` subscribes to, off the dispatch task
+- Biometric-match → unlatch, enrollment progress → Zigbee alarm mask, audit counters
+- Web-registration authorisation result (PBKDF2 + NVS write + BLE reply)
+- Admin-action completion (BLE reply for denied/timed-out actions)
+
+**How events reach it:** all nine subscriptions register one trampoline,
+`sdf_app_event_trampoline()`, which copies the event into the app queue with
+timeout `0` and returns. `PRIO_CRITICAL` events are sent to the front, mirroring
+the router's own ordering; everything else to the back. A failed enqueue is
+logged and counted in `s_app_evt_dropped` — the trampoline never blocks, because
+blocking there would stall the router's only dispatch task.
+
+**Watchdog:** registered via `sdf_platform_time_wdt_add()` as the task's first
+action and fed once per loop iteration. There is deliberately no
+`sdf_platform_time_wdt_delete()`: `sdf_app` has no stop path, so there is no
+context in which the deletion could run.
+
+**Stack sizing:** measured, not guessed. Instrumented
+`uxTaskGetStackHighWaterMark()` around dispatch on the pre-change router task:
+baseline depth 624 B, deep path (`WEB_REG_AUTH_RESULT` → 10 000-iteration
+PBKDF2-HMAC-SHA256 → NVS write → BLE reply) 1528 B. **That 1528 B is a lower
+bound**: the GATT-notify tail was not reached, because
+`sdf_ble_companion_reply_auth()` returned `ESP_ERR_NOT_FOUND` with no BLE client
+connected under the emulator. 4096 gives ~2.7× headroom over the measured figure
+and is the tier already used by `sdf_match`, `sdf_enroll`, `sdf_admin` and
+`fp_owner` — the tasks doing the same kind of work (NVS, crypto, driver I/O).
+
+---
+
+### 2.9 sdf_evt_router_task
+
+**File:** `firmware/components/sdf_event_router/src/sdf_event_router.c`  
+**Entry:** `sdf_event_router_task()`  
+**Priority:** 5 (HIGH)  
+**Stack:** 3072 bytes (`SDF_EVENT_ROUTER_TASK_STACK`)  
+**Core:** 0  
+**Trigger:** blocking receive on the router queue (`portMAX_DELAY`)
+
+Dispatches each queued event to every matching subscriber in registration order.
+Subscriber callbacks run on this task, which is why emitting from a callback is
+rejected with `ESP_ERR_INVALID_STATE`: the dispatch task is the queue's only
+consumer, so a blocking send from a callback could never be satisfied.
+
+**Over-provisioned stack (follow-up, not changed here):** 3072 bytes was sized
+when subscriber callbacks did real work on this stack. Now that every subscriber
+is a trampoline that copies an event to its own queue and returns, the deepest
+frame the dispatch task reaches is a few hundred bytes — the measurement in
+§2.8 put the *pre-change* baseline at 624 B including the router's own loop
+frames. Shrinking it needs its own measurement pass against the post-change
+firmware and is deliberately out of scope for this change; the number stays at
+3072 until then.
+
+---
+
 ## 3. Event Router Contracts
 
 ### 3.1 Priority Mapping
@@ -389,6 +464,7 @@ uint32_t sdf_task_get_stack_high_water_mark(sdf_task_id_t task_id);
 **Task IDs:**
 ```c
 typedef enum {
+    SDF_TASK_APP,
     SDF_TASK_POWER,
     SDF_TASK_ZIGBEE,
     SDF_TASK_MATCH,
@@ -410,9 +486,10 @@ typedef enum {
 **Target Margins:**
 | Task | Stack | Min Free | Target Free |
 |------|-------|----------|-------------|
+| sdf_app | 4 KB | 512 B | 1 KB |
 | sdf_power | 4 KB | 512 B | 1 KB |
-| sdf_zigbee | 8 KB | 1 KB | 2 KB |
-| sdf_match | 6 KB | 1 KB | 1.5 KB |
+| sdf_zigbee | 6 KB | 1 KB | 1.5 KB |
+| sdf_match | 4 KB | 512 B | 1 KB |
 | sdf_enroll | 4 KB | 512 B | 1 KB |
 | sdf_admin | 4 KB | 512 B | 1 KB |
 
@@ -420,12 +497,19 @@ typedef enum {
 
 | Task | Timeout | Type |
 |------|---------|------|
+| sdf_app | TWDT default | Task WDT (`sdf_platform_time_wdt_add()`; 1s idle wait cap) |
 | sdf_power | 5s | Task WDT |
 | sdf_zigbee | 10s | Task WDT |
 | sdf_match | 2s | Task WDT (5× poll) |
 | sdf_enroll | 30s | Task WDT |
-| sdf_admin | None | Not registered (1s wait cap) |
+| sdf_admin | TWDT default | Task WDT (registered by `register-admin-task-watchdog`; 1s wait cap) |
+| fp_owner | TWDT default | Task WDT (`esp_task_wdt_add(NULL)`) |
 | sdf_ota | 60s | Task WDT |
+
+`sdf_evt_router`, `sdf_zb_attr` and `led` are not registered with the task
+watchdog. Registering them is a separate decision from this change; note that
+`sdf_evt_router` waits on its queue with `portMAX_DELAY`, so it would need a
+bounded wait first.
 
 **Bootloader WDT:** 90s (enabled via `CONFIG_BOOTLOADER_WDT_ENABLE`)
 
@@ -521,7 +605,7 @@ CONFIG_SDF_OTA_VERIFY_WRITE=y
 - [ ] `doc/rtos_tasks.md` created with all 7 task specs
 - [ ] `doc/sdf_sas.md` §6 updated with canonical task table
 - [ ] `doc/software-architecture.md` §6 aligned with actual implementation
-- [ ] `AGENTS.md` Component Structure lists all 6 tasks with owners
+- [x] `AGENTS.md` Component Structure lists all 10 existing tasks with owners
 - [ ] Stack high-water marks measured on hardware
 - [ ] Priority inversion analysis documented
 - [ ] Watchdog timeouts configured per task
@@ -531,5 +615,5 @@ CONFIG_SDF_OTA_VERIFY_WRITE=y
 
 ---
 
-*Last updated: 2026-07-27*  
+*Last updated: 2026-08-20*  
 *Source of truth for task architecture — update on any task change*

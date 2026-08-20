@@ -1,6 +1,6 @@
 # Spec: firmware-ci
 
-## Overview
+## Purpose
 
 Defines the CI workflow that gates `firmware/**` pushes and pull requests: what triggers it, which pinned toolchain it builds with, what its build and unit-test checks must verify, and how its jobs relate to each other.
 

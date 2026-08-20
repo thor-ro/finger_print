@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "sdkconfig.h"
+
 #include "sdf_config.h"
 
 /* Enrollment SM tests */
@@ -198,7 +200,10 @@ extern void test_sdf_event_router_subscribe_rejects_invalid_type_and_sentinels(v
 extern void test_sdf_event_router_subscribe_pool_exhaustion_fails_start(void);
 extern void test_sdf_event_router_multiple_subscribers_invoked_no_truncation(void);
 extern void test_sdf_event_router_min_prio_filter_semantics(void);
-extern void test_sdf_event_router_reentrant_critical_emit_no_deadlock(void);
+extern void test_sdf_event_router_reentrant_critical_emit_rejected(void);
+extern void test_sdf_event_router_emit_from_callback_rejected_all_priorities_and_timeouts(void);
+extern void test_sdf_event_router_emit_from_other_task_accepted_during_dispatch(void);
+extern void test_sdf_event_router_emit_from_callback_returns_promptly_on_full_queue(void);
 extern void test_sdf_event_router_security_lockout_pair_delivered(void);
 extern void test_sdf_event_router_emit_before_start_delivered_after_start(void);
 extern void test_sdf_event_router_emit_zero_timeout_delivers(void);
@@ -273,6 +278,7 @@ extern void test_sdf_ota_version_compare_minor_newer_and_older(void);
 extern void test_sdf_ota_version_compare_patch_newer_and_older(void);
 extern void test_sdf_ota_version_compare_release_newer_than_pre_release(void);
 extern void test_sdf_ota_version_compare_pre_release_alphanumeric_order(void);
+extern void test_sdf_ota_version_compare_git_describe_orders_by_commit_count(void);
 extern void test_sdf_ota_version_compare_build_metadata_ignored(void);
 extern void test_sdf_ota_version_compare_malformed_input_returns_equal(void);
 extern void test_sdf_ota_verify_digest_known_answer_vectors_pass(void);
@@ -358,6 +364,35 @@ extern void test_gatt_scratch_second_bind_from_other_task_refused(void);
 extern void test_gatt_scratch_rebind_same_task_is_silent(void);
 extern void test_addr_eq_compares_type_and_value(void);
 
+#ifndef CONFIG_IDF_TARGET_LINUX
+/* sdf_app tests (target-only) */
+extern void test_sdf_app_string_mappers(void);
+extern void test_sdf_app_valid_lock_action_logic(void);
+extern void test_sdf_app_map_lock_state_to_zigbee_logic(void);
+extern void test_sdf_app_choose_fingerprint_permission_logic(void);
+extern void test_sdf_app_on_admin_action_factory_reset_calls_sequence(void);
+
+/* Lock flow tests (target-only) */
+extern void test_lock_flow_init(void);
+extern void test_lock_flow_reset_preserves_max_retries(void);
+extern void test_lock_flow_is_idle_on_init(void);
+extern void test_lock_flow_is_not_idle_when_active(void);
+extern void test_lock_flow_begin_success(void);
+extern void test_lock_flow_begin_rejected_when_active(void);
+extern void test_lock_flow_retry_increments(void);
+extern void test_lock_flow_retry_exhaustion(void);
+extern void test_lock_flow_on_status_complete(void);
+extern void test_lock_flow_on_status_accepted_noop(void);
+
+/* sdf_app task/queue tests (target-only) */
+extern void test_sdf_app_task_event_handled_on_app_task(void);
+extern void test_sdf_app_task_full_queue_trampoline_does_not_block(void);
+extern void test_sdf_app_task_critical_event_handled_first(void);
+extern void test_sdf_app_task_is_watchdog_registered(void);
+extern void test_sdf_app_alarm_mask_composition_single_threaded(void);
+extern void test_sdf_app_alarm_mask_concurrent_set_and_clear_converge(void);
+#endif
+
 void app_main(void) {
   printf("Starting Smart Door Firmware (SDF) Tests...\n");
 
@@ -417,9 +452,14 @@ void app_main(void) {
   RUN_TEST(test_map_ack_nouser);
   RUN_TEST(test_map_ack_unknown);
 
+  /* Fingerprint owner-task dispatch. Host-only: the concurrency cases pace the
+   * sensor through sdf_mock_uart_set_read_delay_ms(), which exists only in the
+   * Linux mock UART backend. */
+#ifdef CONFIG_IDF_TARGET_LINUX
   RUN_TEST(test_fp_owner_task_dispatch_round_trip);
   RUN_TEST(test_fp_owner_task_serializes_concurrent_requests);
   RUN_TEST(test_fp_owner_task_power_off_deferred_until_op_completes);
+#endif
 
   /* Storage tests */
   RUN_TEST(test_sdf_storage_nuki_save_and_load_success);
@@ -480,7 +520,10 @@ void app_main(void) {
   RUN_TEST(test_sdf_platform_power_enable_gpio_wake_delegates);
   RUN_TEST(test_sdf_platform_power_gate_ble_radio_always_invalid_state);
 
-  /* Zigbee protocol tests */
+  /* Zigbee protocol tests. Host-only: they drive sdf_protocol_zigbee through
+   * its Linux mock backend (sdf_protocol_zigbee_mock_*), which does not exist
+   * when the component is compiled against the real Zigbee stack. */
+#ifdef CONFIG_IDF_TARGET_LINUX
   RUN_TEST(test_sdf_protocol_zigbee_factory_reset_disabled_returns_not_supported);
   RUN_TEST(test_sdf_protocol_zigbee_factory_reset_enabled_returns_ok);
   RUN_TEST(test_sdf_protocol_zigbee_lock_state_updates_coalesce_to_latest);
@@ -492,6 +535,7 @@ void app_main(void) {
   RUN_TEST(
       test_sdf_protocol_zigbee_apply_does_not_hold_cache_lock_across_writer);
   RUN_TEST(test_sdf_protocol_zigbee_inbound_and_apply_do_not_invert_lock_order);
+#endif
 
   /* SDF Services tests */
   RUN_TEST(test_sdf_services_init_loads_enrolled_users_cache_before_return);
@@ -546,7 +590,10 @@ void app_main(void) {
   RUN_TEST(test_task_wake_helpers_safe_when_idle);
   RUN_TEST(test_sdf_services_start_stop_start_tasks_cycle);
 
-  /* Event Router tests */
+  /* Event Router tests. Host-only: every case tears the router down between
+   * runs via sdf_event_router_reset_for_test(), which is compiled for the
+   * Linux target only. */
+#ifdef CONFIG_IDF_TARGET_LINUX
   RUN_TEST(test_sdf_event_router_init_returns_ok);
   RUN_TEST(test_sdf_event_router_init_idempotent);
   RUN_TEST(test_sdf_event_router_start_before_init_fails);
@@ -557,7 +604,10 @@ void app_main(void) {
   RUN_TEST(test_sdf_event_router_subscribe_pool_exhaustion_fails_start);
   RUN_TEST(test_sdf_event_router_multiple_subscribers_invoked_no_truncation);
   RUN_TEST(test_sdf_event_router_min_prio_filter_semantics);
-  RUN_TEST(test_sdf_event_router_reentrant_critical_emit_no_deadlock);
+  RUN_TEST(test_sdf_event_router_reentrant_critical_emit_rejected);
+  RUN_TEST(test_sdf_event_router_emit_from_callback_rejected_all_priorities_and_timeouts);
+  RUN_TEST(test_sdf_event_router_emit_from_other_task_accepted_during_dispatch);
+  RUN_TEST(test_sdf_event_router_emit_from_callback_returns_promptly_on_full_queue);
   RUN_TEST(test_sdf_event_router_security_lockout_pair_delivered);
   RUN_TEST(test_sdf_event_router_emit_before_start_delivered_after_start);
   RUN_TEST(test_sdf_event_router_emit_zero_timeout_delivers);
@@ -571,6 +621,7 @@ void app_main(void) {
   RUN_TEST(test_sdf_event_router_critical_emit_before_start_delivered_after_start);
   RUN_TEST(test_sdf_event_router_full_queue_drops_critical);
   RUN_TEST(test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_nonzero);
+#endif
 
   /* Tasks tests */
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);
@@ -632,6 +683,7 @@ void app_main(void) {
   RUN_TEST(test_sdf_ota_version_compare_patch_newer_and_older);
   RUN_TEST(test_sdf_ota_version_compare_release_newer_than_pre_release);
   RUN_TEST(test_sdf_ota_version_compare_pre_release_alphanumeric_order);
+  RUN_TEST(test_sdf_ota_version_compare_git_describe_orders_by_commit_count);
   RUN_TEST(test_sdf_ota_version_compare_build_metadata_ignored);
   RUN_TEST(test_sdf_ota_version_compare_malformed_input_returns_equal);
   RUN_TEST(test_sdf_ota_verify_digest_known_answer_vectors_pass);
@@ -708,7 +760,10 @@ void app_main(void) {
   RUN_TEST(test_allow_listed_device_is_allow_listed);
   RUN_TEST(test_allow_list_snapshot_matches_membership);
 
-  /* BLE Companion GATT write staging tests */
+  /* BLE Companion GATT write staging tests. Host-only: they reset the staging
+   * buffer between cases via sdf_ble_companion_gatt_scratch_reset_for_test(),
+   * which is compiled for the Linux target only. */
+#ifdef CONFIG_IDF_TARGET_LINUX
   RUN_TEST(test_gatt_scratch_acquire_release_round_trip);
   RUN_TEST(test_gatt_scratch_acquire_while_unbound_refused);
   RUN_TEST(test_gatt_scratch_second_acquire_refused_and_leaves_payload);
@@ -718,6 +773,36 @@ void app_main(void) {
   RUN_TEST(test_gatt_scratch_second_bind_from_other_task_refused);
   RUN_TEST(test_gatt_scratch_rebind_same_task_is_silent);
   RUN_TEST(test_addr_eq_compares_type_and_value);
+#endif
+
+  /* sdf_app suites. Target-only: sdf_app is not built for the Linux host
+   * because it links the BLE and Zigbee stacks. */
+#ifndef CONFIG_IDF_TARGET_LINUX
+  RUN_TEST(test_sdf_app_string_mappers);
+  RUN_TEST(test_sdf_app_valid_lock_action_logic);
+  RUN_TEST(test_sdf_app_map_lock_state_to_zigbee_logic);
+  RUN_TEST(test_sdf_app_choose_fingerprint_permission_logic);
+  RUN_TEST(test_sdf_app_on_admin_action_factory_reset_calls_sequence);
+
+  RUN_TEST(test_lock_flow_init);
+  RUN_TEST(test_lock_flow_reset_preserves_max_retries);
+  RUN_TEST(test_lock_flow_is_idle_on_init);
+  RUN_TEST(test_lock_flow_is_not_idle_when_active);
+  RUN_TEST(test_lock_flow_begin_success);
+  RUN_TEST(test_lock_flow_begin_rejected_when_active);
+  RUN_TEST(test_lock_flow_retry_increments);
+  RUN_TEST(test_lock_flow_retry_exhaustion);
+  RUN_TEST(test_lock_flow_on_status_complete);
+  RUN_TEST(test_lock_flow_on_status_accepted_noop);
+
+  /* sdf_app task/queue behaviour (give-sdf-app-a-task). */
+  RUN_TEST(test_sdf_app_task_event_handled_on_app_task);
+  RUN_TEST(test_sdf_app_task_full_queue_trampoline_does_not_block);
+  RUN_TEST(test_sdf_app_task_critical_event_handled_first);
+  RUN_TEST(test_sdf_app_task_is_watchdog_registered);
+  RUN_TEST(test_sdf_app_alarm_mask_composition_single_threaded);
+  RUN_TEST(test_sdf_app_alarm_mask_concurrent_set_and_clear_converge);
+#endif
 
   /* app_main() is declared void and called without capturing a return value
    * by the linux target's main_task() (see FreeRTOS-Kernel port_idf.c), so

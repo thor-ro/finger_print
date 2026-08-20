@@ -34,21 +34,32 @@ idf.py build
 # so this doubles as a CI gate.
 ```
 
-`sdf_app` and the lock-flow suites remain hardware-only (they pull in `sdf_ble_companion`/BLE/WiFi/OTA stacks that don't build for `IDF_TARGET=linux`) and aren't wired into `test_runner` on the `linux` target — see `openspec/changes/fix-test-runner-build/design.md`'s Open Questions for the proposed follow-up (`add-linux-target-sdf-app-support`). To exercise those, flash the hardware target instead:
+`sdf_app` and the lock-flow suites are still not wired into the `linux` target (they pull in `sdf_ble_companion`/BLE/WiFi/OTA stacks that don't build for `IDF_TARGET=linux`) — see `openspec/changes/fix-test-runner-build/design.md`'s Open Questions for the proposed follow-up (`add-linux-target-sdf-app-support`). They do run on the chip target, which builds and runs under the emulator without hardware:
 
 ```bash
-# From firmware/test_runner, targeting real ESP32-C6 hardware
-idf.py -D SDKCONFIG_DEFAULTS="sdkconfig.hw.defaults" set-target esp32c6
-idf.py -p <PORT> flash monitor
-# Menu shows available tests; run individually or all
+# From firmware/test_runner, targeting ESP32-C6. Build out-of-tree so the
+# in-tree linux sdkconfig/build stay untouched.
+idf.py -B /tmp/tr_hw -D SDKCONFIG_DEFAULTS="sdkconfig.hw.defaults" -D SDKCONFIG=/tmp/sdkconfig.hw set-target esp32c6
+idf.py -B /tmp/tr_hw -D SDKCONFIG=/tmp/sdkconfig.hw build
+idf.py -B /tmp/tr_hw -D SDKCONFIG=/tmp/sdkconfig.hw merge-bin -o /tmp/tr_merged.bin
+
+# Either run it under the emulator...
+esp-emu --chip esp32c6 --firmware /tmp/tr_merged.bin --elf /tmp/tr_hw/sdf_test_runner.elf --timeout 240s --exit-on "Tests "
+# ...or flash real hardware
+idf.py -B /tmp/tr_hw -D SDKCONFIG=/tmp/sdkconfig.hw -p <PORT> flash monitor
 ```
+
+The chip-target run is not yet clean: four suites assert host-environment behaviour (the linux sleep-retention and WDT stubs) or need absent peripherals (fingerprint sensor). Everything else passes.
+
+Switching `test_runner` between the two targets rewrites `dependencies.lock` and `managed_components/` in place, since the component manager keys both to the project directory rather than the build directory. Expect churn in `dependencies.lock`, and run `idf.py build` for the `linux` target last so the committed lock stays on the CI target.
 
 ## Component Structure
 Each component exposes public API in `include/` and internals in `src/`:
-- `sdf_app` — Application flows (biometric unlock, zigbee bridge, enrollment)
-- `sdf_drivers` — Hardware drivers (fingerprint UART, LED, battery, GPIO)
+- `sdf_app` — Application flows (biometric unlock, zigbee bridge, enrollment). Owns `sdf_app_task`
+- `sdf_drivers` — Hardware drivers (fingerprint UART, LED, battery, GPIO). Owns `fp_owner_task` and `led_task`
 - `sdf_protocol_ble` — BLE/Nuki protocol adaptor
-- `sdf_protocol_zigbee` — Zigbee Door Lock cluster adaptor (owns `sdf_zigbee_task`)
+- `sdf_protocol_zigbee` — Zigbee Door Lock cluster adaptor (owns `sdf_zigbee_task` and `sdf_zb_attr_task`)
+- `sdf_event_router` — Typed event bus (owns `sdf_evt_router_task`; subscriber callbacks must not emit)
 - `sdf_services` — Core services (owns `sdf_match_task`, `sdf_enroll_task`, `sdf_admin_task`)
 - `sdf_state_machines` — Enrollment and device state machines
 - `sdf_power` — Power manager & sleep (owns `sdf_power_task`)
@@ -121,7 +132,8 @@ When making architectural changes, you **must** update the corresponding documen
 ## Gotchas
 - Fingerprint sensor `Control LED (0x3C)` payload bytes are module-variant specific; defaults in `sdf_services.c` may need tuning on real hardware.
 - Match task uses suspend flag + extended polling (10s) when idle instead of WDT delete/recreate + semaphore-block for deep sleep transitions. This keeps the WDT active and reduces context-switch overhead.
-- `.github/workflows/firmware-ci.yml` gates `firmware/**` pushes/PRs with two jobs: `build-firmware` (`idf.py build` for `esp32c6`) and `test-firmware` (host-side Unity via `test_runner`'s `linux` target). The unit test job only covers what `test_runner` links on `linux` — `sdf_app`/lock-flow suites stay hardware-only (see Testing above), so a green `test-firmware` check is not full regression coverage.
+- `.github/workflows/firmware-ci.yml` gates `firmware/**` pushes/PRs with two jobs: `build-firmware` (`idf.py build` for `esp32c6`) and `test-firmware` (host-side Unity via `test_runner`'s `linux` target). The unit test job only covers what `test_runner` links on `linux` — the `sdf_app`/lock-flow suites run only on the chip target (see Testing above) and CI does not run them, so a green `test-firmware` check is not full regression coverage.
+- `sdf_ota_version_compare()` lives in `sdf_ota_version.c` only. It used to be duplicated in `sdf_ota.c`, and because `sdf_ota.c` is not compiled for `IDF_TARGET=linux`, the host suite tested one comparator while the device ran the other. Keep it single-definition. It orders `git describe` pre-releases (`<tag>-<commits>-g<hash>`) by commit count, not lexically — that is the form `PROJECT_VER` takes, so changing it changes the OTA upgrade/downgrade gate.
 - `scripts/` and `tools/` directories are currently empty.
 
 ## Instructions

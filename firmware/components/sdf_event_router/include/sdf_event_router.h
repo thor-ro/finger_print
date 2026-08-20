@@ -230,11 +230,21 @@ esp_err_t sdf_event_router_start(void);
  * @param event           Event to emit. Rejected with ESP_ERR_INVALID_ARG if
  *                        NULL, if the router is not initialized, or if the
  *                        type is SDF_EVENT_ROUTER_INTERNAL_WAKE or out of range.
+ * Emitting from inside a subscriber callback is rejected outright with
+ * ESP_ERR_INVALID_STATE, at every priority and every timeout. A callback runs
+ * on the router task, so any wait for queue space would be a wait on a queue
+ * only that same task can drain. A subscriber that needs to produce a
+ * follow-on event hands the work off to a task it owns and emits from there;
+ * that is what the trampoline in each service component does.
+ *
  * @param send_timeout_ms How long the caller may block waiting for queue space.
  *                        Pass 0 to never block (required from contexts that
- *                        must not sleep, e.g. esp_timer callbacks). Returns
- *                        ESP_ERR_NO_MEM if the queue stays full for this long,
- *                        at every priority including PRIO_CRITICAL.
+ *                        must not sleep, e.g. esp_timer callbacks and ISR-
+ *                        adjacent code). Returns ESP_ERR_NO_MEM if the queue
+ *                        stays full for this long, at every priority including
+ *                        PRIO_CRITICAL. The value is irrelevant from a
+ *                        subscriber callback: that call is rejected before the
+ *                        timeout is ever consulted.
  */
 esp_err_t sdf_event_router_emit(const sdf_event_router_event_t *event,
                                 uint32_t send_timeout_ms);

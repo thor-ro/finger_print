@@ -4,7 +4,6 @@
 
 #include <string.h>
 #include <stdlib.h>
-#include <stdio.h>
 
 #include "esp_log.h"
 #include "esp_ota_ops.h"
@@ -569,49 +568,4 @@ esp_err_t sdf_ota_get_bytes_written(sdf_ota_handle_t handle, uint32_t *bytes_wri
     *bytes_written_out = s_session.bytes_written;
     xSemaphoreGive(s_session_mutex);
     return ESP_OK;
-}
-
-sdf_ota_version_cmp_t sdf_ota_version_compare(const char *current, const char *incoming)
-{
-    if (current == NULL || incoming == NULL) {
-        return SDF_OTA_VERSION_EQUAL;
-    }
-
-    /* Skip leading 'v' if present */
-    if (*current == 'v') current++;
-    if (*incoming == 'v') incoming++;
-
-    /* Parse major.minor.patch */
-    int c_maj = 0, c_min = 0, c_pat = 0;
-    int i_maj = 0, i_min = 0, i_pat = 0;
-
-    sscanf(current, "%d.%d.%d", &c_maj, &c_min, &c_pat);
-    sscanf(incoming, "%d.%d.%d", &i_maj, &i_min, &i_pat);
-
-    if (i_maj != c_maj) return (i_maj > c_maj) ? SDF_OTA_VERSION_NEWER : SDF_OTA_VERSION_OLDER;
-    if (i_min != c_min) return (i_min > c_min) ? SDF_OTA_VERSION_NEWER : SDF_OTA_VERSION_OLDER;
-    if (i_pat != c_pat) return (i_pat > c_pat) ? SDF_OTA_VERSION_NEWER : SDF_OTA_VERSION_OLDER;
-
-    /* Check for pre-release suffix (-N-g<hash>) */
-    const char *c_pre = strchr(current, '-');
-    const char *i_pre = strchr(incoming, '-');
-
-    bool c_has_pre = (c_pre != NULL);
-    bool i_has_pre = (i_pre != NULL);
-
-    if (c_has_pre && !i_has_pre) {
-        return SDF_OTA_VERSION_OLDER;  /* release > pre-release */
-    }
-    if (!c_has_pre && i_has_pre) {
-        return SDF_OTA_VERSION_NEWER;  /* pre-release < release */
-    }
-    if (c_has_pre && i_has_pre) {
-        /* Both have pre-release, compare commit count */
-        int c_cnt = 0, i_cnt = 0;
-        sscanf(c_pre, "-%d-g", &c_cnt);
-        sscanf(i_pre, "-%d-g", &i_cnt);
-        if (i_cnt != c_cnt) return (i_cnt > c_cnt) ? SDF_OTA_VERSION_NEWER : SDF_OTA_VERSION_OLDER;
-    }
-
-    return SDF_OTA_VERSION_EQUAL;
 }

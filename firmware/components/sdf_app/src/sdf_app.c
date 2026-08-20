@@ -2,6 +2,7 @@
 #include "sdf_platform.h"
 #include "sdf_config.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -11,8 +12,10 @@
 #include "esp_timer.h"
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_task_wdt.h"
-#include "freertos/FreeRTOS.h"
 #endif
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "mbedtls/platform_util.h"
 #include "sdkconfig.h"
 
@@ -44,6 +47,28 @@
 #define SDF_APP_ZB_ALARM_BIOMETRIC_LOCKOUT 0x0004u
 #define SDF_APP_ZB_ALARM_SECURITY_PROTOCOL 0x0008u
 
+#define SDF_APP_TASK_NAME "sdf_app"
+/* 4096 from the measured high-water mark on the deepest handler path
+ * (WEB_REG_AUTH_RESULT -> 10k-iteration PBKDF2 -> NVS write), taken on the
+ * router's dispatch task before that path moved here: 1528 bytes deepest use,
+ * against a 624-byte baseline. That figure is a lower bound - the GATT-notify
+ * tail in sdf_ble_companion_reply_auth() could not be exercised - so it is
+ * sized at the tier the project already gives sdf_match/sdf_enroll/sdf_admin/
+ * fp_owner (4096) rather than at the measurement plus an invented constant.
+ * The derivation and its limits are recorded in doc/rtos_tasks.md. */
+#define SDF_APP_TASK_STACK 4096
+/* 5, matching sdf_match and sdf_admin: this task owns the lock-actuation path
+ * (BIOMETRIC_MATCH -> sdf_app_lock_action()), so it must not sit below the
+ * tasks that feed it. */
+#define SDF_APP_TASK_PRIORITY 5
+/* 10, matching the three service task queues. Sized against the same burst
+ * behaviour; the drop counter below is what makes it reviewable. */
+#define SDF_APP_EVENT_QUEUE_DEPTH 10
+/* 1000 ms, matching SDF_ADMIN_IDLE_WAIT_CAP_MS. The cap only has to be short
+ * enough to feed the watchdog; making it shorter would tighten the shortest
+ * periodic wake in the system and cut the automatic light-sleep window. */
+#define SDF_APP_IDLE_WAIT_CAP_MS 1000u
+
 static const char *TAG = "sdf_app";
 
 static sdf_nuki_ble_transport_t s_ble;
@@ -52,12 +77,23 @@ static sdf_nuki_pairing_t s_pairing;
 static bool s_has_creds;
 static bool s_pairing_active;
 static bool s_pairing_requested;
-static uint16_t s_zigbee_alarm_mask;
+/* Atomic because it is read-modify-written from more than one task: the app
+ * task (via sdf_app_on_event()), the NimBLE host task (via
+ * sdf_app_on_message()) and the lock-flow completion context. Updated only
+ * through sdf_app_set_alarm_mask_bits() (design.md - D7). */
+static _Atomic uint16_t s_zigbee_alarm_mask;
 // Diagnostic counters
 static uint32_t s_app_audit_err_biometric_failed = 0;
 static uint32_t s_app_audit_err_auth_lockout = 0;
 static uint32_t s_app_audit_err_nonce_replay = 0;
 static uint32_t s_app_audit_err_protocol = 0;
+/* Events the router handed to the trampoline that the app queue had no room
+ * for. A drop is a handler that never runs - a match that does not unlatch,
+ * a lockout that does not raise an alarm - so it is counted here rather than
+ * only logged. */
+static uint32_t s_app_evt_dropped = 0;
+static QueueHandle_t s_app_event_queue;
+static TaskHandle_t s_app_task;
 static bool s_latch_sequence_active;
 static bool s_lock_action_pending;
 static uint8_t s_pending_lock_action;
@@ -90,10 +126,8 @@ static int sdf_app_queue_lock_action(uint8_t lock_action, uint8_t flags);
 static int sdf_app_dispatch_pending_lock_action(void);
 static int sdf_app_start_unlock_unlatch_sequence(void);
 
-static void sdf_app_on_web_reg_auth_result(void *ctx,
-                                            const sdf_event_router_event_t *event);
-static void sdf_app_on_admin_action_complete(void *ctx,
-                                              const sdf_event_router_event_t *event);
+static void sdf_app_on_web_reg_auth_result(const sdf_event_router_event_t *event);
+static void sdf_app_on_admin_action_complete(const sdf_event_router_event_t *event);
 static void sdf_app_on_ble_admin_action_request(void *ctx,
                                                  sdf_services_admin_action_t action,
                                                  uint16_t conn_handle);
@@ -111,12 +145,28 @@ static const char *sdf_app_status_name(uint8_t status) {
 
 static void sdf_app_set_alarm_mask_bits(uint16_t set_bits,
                                          uint16_t clear_bits) {
-  uint16_t new_mask = (s_zigbee_alarm_mask | set_bits) & (uint16_t)(~clear_bits);
-  if (new_mask != s_zigbee_alarm_mask) {
-    s_zigbee_alarm_mask = new_mask;
-    if (sdf_protocol_zigbee_is_enabled()) {
-      sdf_protocol_zigbee_update_alarm_mask(s_zigbee_alarm_mask);
+  uint16_t old_mask;
+  uint16_t new_mask;
+  do {
+    old_mask = atomic_load(&s_zigbee_alarm_mask);
+    new_mask = (uint16_t)((old_mask | set_bits) & (uint16_t)(~clear_bits));
+    /* Redundant-update suppression stays *inside* the loop, evaluated against
+     * the same load `new_mask` was composed from. Hoisting it out would let a
+     * producer compare against a value a concurrent update already superseded
+     * and suppress a real change (design.md - D7). */
+    if (new_mask == old_mask) {
+      return;
     }
+    /* _weak may fail spuriously; the loop retries, and on failure the
+     * compare-exchange reloads old_mask for us. */
+  } while (!atomic_compare_exchange_weak(&s_zigbee_alarm_mask, &old_mask, new_mask));
+
+  /* Pushed after the exchange succeeds, never while holding it. Two producers
+   * may therefore call this out of CAS order; that is harmless because each
+   * passes a mask that already includes the other's bits and the Zigbee
+   * component keeps the latest value it is given. */
+  if (sdf_protocol_zigbee_is_enabled()) {
+    sdf_protocol_zigbee_update_alarm_mask(new_mask);
   }
 }
 
@@ -772,8 +822,7 @@ static void sdf_ble_companion_on_enroll_write(void *ctx,
     cJSON_Delete(root);
 }
 
-static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
-  (void)ctx;
+static void sdf_app_on_event(const sdf_event_router_event_t *event) {
   if (event == NULL) {
     return;
   }
@@ -885,7 +934,7 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
     break;
   }
   case SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT: {
-    sdf_app_on_web_reg_auth_result(ctx, event);
+    sdf_app_on_web_reg_auth_result(event);
     break;
   }
   default:
@@ -893,9 +942,7 @@ static void sdf_app_on_event(void *ctx, const sdf_event_router_event_t *event) {
   }
 }
 
-static void sdf_app_on_web_reg_auth_result(void *ctx,
-                                             const sdf_event_router_event_t *event) {
-  (void)ctx;
+static void sdf_app_on_web_reg_auth_result(const sdf_event_router_event_t *event) {
   if (!event) {
     return;
   }
@@ -968,9 +1015,7 @@ static void sdf_app_on_web_reg_auth_result(void *ctx,
  * waiting on the auth characteristic would never be notified, and
  * s_state.web_reg_auth_pending would stay latched, permanently blocking
  * any subsequent web registration request. */
-static void sdf_app_on_admin_action_complete(void *ctx,
-                                              const sdf_event_router_event_t *event) {
-  (void)ctx;
+static void sdf_app_on_admin_action_complete(const sdf_event_router_event_t *event) {
   if (!event) {
     return;
   }
@@ -1009,6 +1054,139 @@ static void sdf_app_on_admin_action_complete(void *ctx,
     s_ble_admin_action_pending = false;
     sdf_ble_companion_reply_admin_action(conn_handle, action, false);
   }
+}
+
+/* The one subscriber callback behind all nine of this component's event-router
+ * subscriptions. It copies the event onto the app queue and returns; every
+ * handler body above runs on sdf_app_task() instead of on the router's
+ * dispatch task.
+ *
+ * Ordering mirrors the router's own queue: the router ranks a PRIO_CRITICAL
+ * event ahead of queued lower-priority ones, and a plain FIFO here would undo
+ * that on the second hop - a SECURITY_LOCKOUT could end up behind a NORMAL
+ * enrollment step the router had already ranked below it. */
+#ifdef SDF_APP_TESTING
+/* Test-only probe. An event whose timestamp carries SDF_APP_TEST_PROBE_MAGIC in
+ * its high half is recorded and then dropped instead of being handled, so the
+ * target suite can follow a real event across both hops - router dispatch ->
+ * trampoline -> app queue -> app task - without any production handler running
+ * and without needing the subsystems those handlers touch. */
+#define SDF_APP_TEST_PROBE_MAGIC 0xA55A0000u
+#define SDF_APP_TEST_PROBE_MASK 0xFFFF0000u
+#define SDF_APP_TEST_PROBE_MAX 32
+
+static TaskHandle_t s_test_trampoline_task;
+static TaskHandle_t s_test_handled_task[SDF_APP_TEST_PROBE_MAX];
+static uint16_t s_test_handled_tag[SDF_APP_TEST_PROBE_MAX];
+static volatile uint32_t s_test_handled_count;
+
+static bool sdf_app_test_is_probe(const sdf_event_router_event_t *event) {
+  return (event->timestamp_ms & SDF_APP_TEST_PROBE_MASK) ==
+         SDF_APP_TEST_PROBE_MAGIC;
+}
+
+static void sdf_app_test_note_handled(const sdf_event_router_event_t *event) {
+  uint32_t idx = s_test_handled_count;
+  if (idx < SDF_APP_TEST_PROBE_MAX) {
+    s_test_handled_task[idx] = xTaskGetCurrentTaskHandle();
+    s_test_handled_tag[idx] = (uint16_t)(event->timestamp_ms & 0xFFFFu);
+    s_test_handled_count = idx + 1u;
+  }
+}
+#endif
+
+static void sdf_app_event_trampoline(void *ctx,
+                                     const sdf_event_router_event_t *event) {
+  (void)ctx;
+  if (event == NULL || s_app_event_queue == NULL) {
+    return;
+  }
+
+#ifdef SDF_APP_TESTING
+  if (sdf_app_test_is_probe(event)) {
+    s_test_trampoline_task = xTaskGetCurrentTaskHandle();
+  }
+#endif
+
+  sdf_event_router_event_t evt_copy = *event;
+  /* The zero timeout is load-bearing, not stylistic (design.md - D5). This
+   * runs on the router's dispatch task, which is the router queue's only
+   * consumer, while the app task may wait up to SDF_EVENT_ROUTER_EMIT_TIMEOUT
+   * pushing onto that queue. The two queues form a cycle, and it is deadlock-
+   * free only because this edge never blocks. Giving it a non-zero timeout
+   * reintroduces a cycle in which both parties can wait on each other. */
+  BaseType_t ok = (evt_copy.priority == SDF_EVENT_ROUTER_PRIO_CRITICAL)
+                      ? xQueueSendToFront(s_app_event_queue, &evt_copy, 0)
+                      : xQueueSendToBack(s_app_event_queue, &evt_copy, 0);
+  if (ok != pdTRUE) {
+    s_app_evt_dropped++;
+    ESP_LOGW(TAG, "App queue full, dropping event type=%d prio=%d (dropped=%u)",
+             (int)evt_copy.type, (int)evt_copy.priority,
+             (unsigned)s_app_evt_dropped);
+  }
+}
+
+static void sdf_app_task(void *arg) {
+  (void)arg;
+
+  /* First action, per sdf-services-tasks: the watchdog watches only tasks that
+   * subscribe to it (sdf_app_init() reconfigures the TWDT with
+   * idle_core_mask = 0), so a task that skips this is simply unwatched. There
+   * is deliberately no matching sdf_platform_time_wdt_delete(): sdf_app has no
+   * shutdown path, this task runs until reboot, and the spec records that as a
+   * scoped exception rather than a gap to close with an invented stop path. */
+  sdf_platform_time_wdt_add();
+
+  sdf_event_router_event_t event;
+  while (true) {
+    sdf_platform_time_wdt_reset();
+
+    if (xQueueReceive(s_app_event_queue, &event,
+                      pdMS_TO_TICKS(SDF_APP_IDLE_WAIT_CAP_MS)) != pdTRUE) {
+      continue;
+    }
+
+#ifdef SDF_APP_TESTING
+    if (sdf_app_test_is_probe(&event)) {
+      sdf_app_test_note_handled(&event);
+      continue;
+    }
+#endif
+
+    switch (event.type) {
+    case SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT:
+      sdf_app_on_web_reg_auth_result(&event);
+      break;
+    case SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE:
+      sdf_app_on_admin_action_complete(&event);
+      break;
+    default:
+      sdf_app_on_event(&event);
+      break;
+    }
+  }
+}
+
+/* The queue must exist before the task, since the task blocks on it
+ * immediately. Split out of sdf_app_init() so the target test suite can bring
+ * up the task on its own, without the subsystems the rest of init needs. */
+static esp_err_t sdf_app_start_task(void) {
+  s_app_event_queue = xQueueCreate(SDF_APP_EVENT_QUEUE_DEPTH,
+                                   sizeof(sdf_event_router_event_t));
+  if (s_app_event_queue == NULL) {
+    ESP_LOGE(TAG, "Failed to create app event queue");
+    return ESP_ERR_NO_MEM;
+  }
+
+  if (xTaskCreate(sdf_app_task, SDF_APP_TASK_NAME, SDF_APP_TASK_STACK, NULL,
+                  SDF_APP_TASK_PRIORITY, &s_app_task) != pdPASS) {
+    ESP_LOGE(TAG, "Failed to create app task");
+    vQueueDelete(s_app_event_queue);
+    s_app_event_queue = NULL;
+    return ESP_FAIL;
+  }
+
+  return ESP_OK;
 }
 
 static int sdf_app_start_unlock_unlatch_sequence(void) {
@@ -1612,7 +1790,7 @@ esp_err_t sdf_app_init(void) {
       .ctx = NULL,
   };
   sdf_lock_flow_init(&s_lock_flow, SDF_APP_LOCK_ACTION_MAX_RETRIES, &lf_ops);
-  s_zigbee_alarm_mask = 0;
+  atomic_store(&s_zigbee_alarm_mask, 0);
   s_latch_sequence_active = false;
   s_lock_action_pending = false;
   s_pending_lock_action = 0;
@@ -1716,7 +1894,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   // Subscribe to events
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
                                    SDF_EVENT_ROUTER_PRIO_HIGH,
-                                   sdf_app_on_event, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to biometric match: %s", esp_err_to_name(err));
     return err;
@@ -1729,7 +1907,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
    * events, ensuring the lockout-cleared event is delivered so the alarm clears. */
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
                                    SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                   sdf_app_on_event, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to security lockout: %s", esp_err_to_name(err));
     return err;
@@ -1737,7 +1915,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH_FAILED,
                                    SDF_EVENT_ROUTER_PRIO_HIGH,
-                                   sdf_app_on_event, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to biometric match failed: %s", esp_err_to_name(err));
     return err;
@@ -1745,7 +1923,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
                                    SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                   sdf_app_on_event, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment step: %s", esp_err_to_name(err));
     return err;
@@ -1753,7 +1931,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_COMPLETE,
                                    SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                   sdf_app_on_event, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
     return err;
@@ -1761,7 +1939,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_FAILED,
                                    SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                   sdf_app_on_event, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
     return err;
@@ -1769,7 +1947,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_AUDIT,
                                    SDF_EVENT_ROUTER_PRIO_NORMAL,
-                                   sdf_app_on_event, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to audit: %s", esp_err_to_name(err));
     return err;
@@ -1777,7 +1955,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
 
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
                                    SDF_EVENT_ROUTER_PRIO_HIGH,
-                                   sdf_app_on_web_reg_auth_result, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to web reg auth result: %s", esp_err_to_name(err));
     return err;
@@ -1792,7 +1970,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
    * latched true server-side, blocking any future web reg auth request. */
   err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
                                    SDF_EVENT_ROUTER_PRIO_HIGH,
-                                   sdf_app_on_admin_action_complete, NULL);
+                                   sdf_app_event_trampoline, NULL);
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to subscribe to admin action complete: %s", esp_err_to_name(err));
     return err;
@@ -1834,9 +2012,19 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
     }
   }
 
+  /* Create the app task after its nine subscriptions are registered and before
+   * the router starts, so no event of a subscribed type can be dispatched
+   * before there is a queue to receive it. */
+  err = sdf_app_start_task();
+  if (err != ESP_OK) {
+    return err;
+  }
+
   /* Start event router dispatch task and freeze the subscriber table.
    * All 21 subscriptions (app: 9, match: 3, admin: 4, enroll: 3, ble: 2)
-   * must be registered before this point. No further subscribers may register. */
+   * must be registered before this point. No further subscribers may register.
+   * The app's nine are served by one trampoline callback (sdf_app_event_
+   * trampoline); the count is per subscription, not per callback. */
   err = sdf_event_router_start();
   if (err != ESP_OK) {
     ESP_LOGE(TAG, "Failed to start event router: %s", esp_err_to_name(err));

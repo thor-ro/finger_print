@@ -45,3 +45,81 @@ uint8_t test_sdf_app_choose_fingerprint_permission(
 void test_sdf_app_on_admin_action(void *ctx, sdf_services_admin_action_t action) {
   sdf_app_on_admin_action(ctx, action);
 }
+
+/* --- Task/queue seams (give-sdf-app-a-task) ------------------------------ */
+
+esp_err_t test_sdf_app_start_task(void) {
+  return sdf_app_start_task();
+}
+
+TaskHandle_t test_sdf_app_task_handle(void) {
+  return s_app_task;
+}
+
+void test_sdf_app_subscribe_trampoline(sdf_event_router_type_t type) {
+  ESP_ERROR_CHECK(sdf_event_router_subscribe(
+      type, SDF_EVENT_ROUTER_PRIO_LOW, sdf_app_event_trampoline, NULL));
+}
+
+/* Calls the subscriber callback exactly as the router's dispatch task would. */
+void test_sdf_app_event_trampoline(const sdf_event_router_event_t *event) {
+  sdf_app_event_trampoline(NULL, event);
+}
+
+/* Builds a probe event: recorded and dropped by the app task instead of being
+ * handled, so no production handler runs. `tag` identifies it in the log. */
+sdf_event_router_event_t
+test_sdf_app_make_probe(sdf_event_router_type_t type,
+                        sdf_event_router_priority_t priority, uint16_t tag) {
+  sdf_event_router_event_t event = {
+      .type = type,
+      .priority = priority,
+      .timestamp_ms = SDF_APP_TEST_PROBE_MAGIC | (uint32_t)tag,
+  };
+  return event;
+}
+
+void test_sdf_app_probe_log_reset(void) {
+  s_test_handled_count = 0;
+  s_test_trampoline_task = NULL;
+  memset(s_test_handled_task, 0, sizeof(s_test_handled_task));
+  memset(s_test_handled_tag, 0, sizeof(s_test_handled_tag));
+}
+
+uint32_t test_sdf_app_probe_handled_count(void) {
+  return s_test_handled_count;
+}
+
+TaskHandle_t test_sdf_app_probe_handled_task(uint32_t idx) {
+  return (idx < SDF_APP_TEST_PROBE_MAX) ? s_test_handled_task[idx] : NULL;
+}
+
+uint16_t test_sdf_app_probe_handled_tag(uint32_t idx) {
+  return (idx < SDF_APP_TEST_PROBE_MAX) ? s_test_handled_tag[idx] : 0;
+}
+
+TaskHandle_t test_sdf_app_probe_trampoline_task(void) {
+  return s_test_trampoline_task;
+}
+
+uint32_t test_sdf_app_evt_dropped(void) {
+  return s_app_evt_dropped;
+}
+
+uint32_t test_sdf_app_event_queue_depth(void) {
+  return SDF_APP_EVENT_QUEUE_DEPTH;
+}
+
+/* --- Zigbee alarm mask seams (design.md - D7) ---------------------------- */
+
+void test_sdf_app_set_alarm_mask_bits(uint16_t set_bits, uint16_t clear_bits) {
+  sdf_app_set_alarm_mask_bits(set_bits, clear_bits);
+}
+
+uint16_t test_sdf_app_get_alarm_mask(void) {
+  return atomic_load(&s_zigbee_alarm_mask);
+}
+
+void test_sdf_app_store_alarm_mask(uint16_t mask) {
+  atomic_store(&s_zigbee_alarm_mask, mask);
+}

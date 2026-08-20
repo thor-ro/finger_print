@@ -1,3 +1,9 @@
+# Firmware Host Test Runner
+
+## Purpose
+
+Defines host-side test runner requirements for compiling and executing Unity test suites on `IDF_TARGET=linux`.
+
 ## Requirements
 
 ### Requirement: Host-Target Build

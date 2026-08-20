@@ -51,11 +51,16 @@ Out of scope:
 * On-demand BLE sessions (radio gated by power manager).
 
 **Primary Tasks**
+* `sdf_app_task` (prio 5, 4KB) — application event handling: biometric unlock, enrollment progress, web-registration authorisation, admin-action completion.
+* `sdf_evt_router_task` (prio 5, 3KB) — dispatches queued events to subscribers; subscribers must not emit from a callback.
 * `sdf_power_task` (prio 4, 4KB) — sleep/wake scheduling, battery reporting, Zigbee check-in, BLE radio gating.
-* `sdf_zigbee_task` (prio 5, 8KB) — ESP-Zigbee stack, ZHA commands, attribute reporting, OTA.
-* `sdf_match_task` (prio 5, 6KB) — fingerprint 1:N match polling (400ms), sensor power mgmt, lockout tracking.
+* `sdf_zigbee_task` (prio 5, 6KB) — ESP-Zigbee stack, ZHA commands, attribute reporting, OTA.
+* `sdf_zb_attr_task` (prio 4, 3KB) — drains the deferred Zigbee attribute-write queue off the caller's stack.
+* `sdf_match_task` (prio 5, 4KB) — fingerprint 1:N match polling (400ms), sensor power mgmt, lockout tracking.
 * `sdf_enroll_task` (prio 4, 4KB) — enrollment step execution, retry logic, LED feedback.
 * `sdf_admin_task` (prio 5, 4KB) — admin auth (10s timeout), action execution (pair/join/reset/perm).
+* `fp_owner_task` (prio 5, 4KB) — serialises fingerprint sensor requests behind one owner.
+* `led_task` (prio 4, 2KB) — LED pattern playback and animation ticks.
 * `sdf_ota_task` (prio 3, 8KB, future) — OTA download, verify, commit, rollback.
 * `nimble_host` — BLE host stack (NimBLE, managed by ESP-IDF, stack/prio via menuconfig).
 

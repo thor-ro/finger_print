@@ -1,7 +1,8 @@
 # security-event-emission Specification
 
 ## Purpose
-TBD - created by archiving change security-events-unify. Update Purpose after archive.
+Specifies the requirement that all security and audit events are emitted exclusively through the event router.
+
 ## Requirements
 ### Requirement: Security events emit exclusively through event router
 The system SHALL emit all security events (match success, match failure, lockout entered, lockout cleared) exclusively through `sdf_event_router_emit()` rather than through a legacy callback mechanism. **The legacy callback registration functions (`sdf_app_set_event_callback`, `sdf_app_set_audit_callback`) SHALL NOT be used for any security event type.**
@@ -54,4 +55,8 @@ The system SHALL emit all audit events for security operations through `sdf_even
 
 ### Requirement: All event router subscribers receive security events
 The system SHALL ensure that all subscribers registered with the event router receive security events, including `sdf_app_on_event()` for alarm mask and audit logic.
+
+#### Scenario: Subscribers receive security events
+- **WHEN** a security event is dispatched
+- **THEN** all registered subscribers with matching minimum priority receive the event
 

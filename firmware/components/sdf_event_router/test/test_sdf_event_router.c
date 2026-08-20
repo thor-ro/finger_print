@@ -4,6 +4,7 @@
 #include "sdf_event_router_capacity.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "esp_timer.h"
 
 static int s_test_event_count = 0;
 static sdf_event_router_event_t s_last_event;
@@ -222,6 +223,7 @@ static void reentrant_match_cb(void *ctx, const sdf_event_router_event_t *e)
 }
 
 static bool s_reentrant_dispatched_inline = false;
+static esp_err_t s_reentrant_emit_err = ESP_OK;
 
 static void reentrant_btn_cb(void *ctx, const sdf_event_router_event_t *e)
 {
@@ -233,20 +235,26 @@ static void reentrant_btn_cb(void *ctx, const sdf_event_router_event_t *e)
         .priority = SDF_EVENT_ROUTER_PRIO_CRITICAL,
         .payload.biometric.user_id = 99
     };
-    sdf_event_router_emit(&nested_evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
+    s_reentrant_emit_err = sdf_event_router_emit(&nested_evt,
+                                                 SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
 
-    /* The emitter here IS the router task, so it cannot preempt itself: the
-     * nested event must still be queued when this callback returns. Under the
-     * old synchronous path it would already have been dispatched. */
+    /* Nothing may be dispatched inline either way; asserted after the call so
+     * a future regression that reintroduces synchronous dispatch is caught
+     * here rather than only by the return code. */
     s_reentrant_dispatched_inline = (s_reentrant_nested_count != 0);
 }
 
-void test_sdf_event_router_reentrant_critical_emit_no_deadlock(void) {
+/* The emit is issued from the router task mid-dispatch, so it is rejected
+ * outright: waiting for queue space would be waiting on the only task that can
+ * drain the queue. This previously asserted the nested event was queued and
+ * later dispatched - a guarantee that never held on a full queue. */
+void test_sdf_event_router_reentrant_critical_emit_rejected(void) {
     sdf_event_router_reset_for_test();
     TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_init());
 
     s_reentrant_nested_count = 0;
     s_reentrant_dispatched_inline = false;
+    s_reentrant_emit_err = ESP_OK;
 
     TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_subscribe(SDF_EVENT_ROUTER_BUTTON_PRESS,
                                                          SDF_EVENT_ROUTER_PRIO_HIGH,
@@ -264,8 +272,11 @@ void test_sdf_event_router_reentrant_critical_emit_no_deadlock(void) {
     TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_emit(&btn_evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS));
 
     vTaskDelay(pdMS_TO_TICKS(50));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, s_reentrant_emit_err);
     TEST_ASSERT_FALSE(s_reentrant_dispatched_inline);
-    TEST_ASSERT_EQUAL(1, s_reentrant_nested_count);
+    /* Neither enqueued nor dispatched: the count stays at zero forever, not
+     * just until the callback returns. */
+    TEST_ASSERT_EQUAL(0, s_reentrant_nested_count);
 }
 
 static int s_lockout_entered_count = 0;
@@ -631,4 +642,236 @@ void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_match_no
     sdf_event_router_event_t zero_evt = {0};
     TEST_ASSERT_EQUAL(SDF_EVENT_ROUTER_INTERNAL_WAKE, zero_evt.type);
     TEST_ASSERT_NOT_EQUAL(SDF_EVENT_ROUTER_BIOMETRIC_MATCH, zero_evt.type);
+}
+/* ---- Emit from dispatch is rejected (design.md - D6) -------------------- */
+
+#define EMIT_BAN_ATTEMPTS 4
+
+static esp_err_t s_emit_ban_results[EMIT_BAN_ATTEMPTS];
+static int s_emit_ban_invocations = 0;
+static int s_emit_ban_target_count = 0;
+
+static void emit_ban_target_cb(void *ctx, const sdf_event_router_event_t *e)
+{
+    (void)ctx;
+    (void)e;
+    s_emit_ban_target_count++;
+}
+
+static void emit_ban_btn_cb(void *ctx, const sdf_event_router_event_t *e)
+{
+    (void)ctx;
+    (void)e;
+    if (++s_emit_ban_invocations != 1) {
+        return;
+    }
+
+    /* Every combination of priority and send timeout that a subscriber could
+     * plausibly reach for. All four are rejected before the timeout is ever
+     * consulted, so none of them can stall the dispatch task. */
+    sdf_event_router_event_t crit = {
+        .type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
+        .priority = SDF_EVENT_ROUTER_PRIO_CRITICAL,
+    };
+    sdf_event_router_event_t normal = {
+        .type = SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
+        .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+    };
+    s_emit_ban_results[0] = sdf_event_router_emit(&crit, 0);
+    s_emit_ban_results[1] = sdf_event_router_emit(&crit, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
+    s_emit_ban_results[2] = sdf_event_router_emit(&normal, 0);
+    s_emit_ban_results[3] = sdf_event_router_emit(&normal, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
+}
+
+void test_sdf_event_router_emit_from_callback_rejected_all_priorities_and_timeouts(void) {
+    sdf_event_router_reset_for_test();
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_init());
+
+    s_emit_ban_invocations = 0;
+    s_emit_ban_target_count = 0;
+    for (int i = 0; i < EMIT_BAN_ATTEMPTS; i++) {
+        s_emit_ban_results[i] = ESP_OK;
+    }
+
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_subscribe(SDF_EVENT_ROUTER_BUTTON_PRESS,
+                                                         SDF_EVENT_ROUTER_PRIO_LOW,
+                                                         emit_ban_btn_cb, NULL));
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_subscribe(SDF_EVENT_ROUTER_BIOMETRIC_MATCH,
+                                                         SDF_EVENT_ROUTER_PRIO_LOW,
+                                                         emit_ban_target_cb, NULL));
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_start());
+
+    sdf_event_router_event_t btn = {
+        .type = SDF_EVENT_ROUTER_BUTTON_PRESS,
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+    };
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_emit(&btn, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS));
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    TEST_ASSERT_EQUAL(1, s_emit_ban_invocations);
+    for (int i = 0; i < EMIT_BAN_ATTEMPTS; i++) {
+        TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, s_emit_ban_results[i]);
+    }
+    /* Rejected means not enqueued: no attempt is dispatched later either. */
+    TEST_ASSERT_EQUAL(0, s_emit_ban_target_count);
+}
+
+/* Guards against getting the rejection condition wrong in the other direction:
+ * `in_dispatch` alone, without the task check, would reject this. */
+static volatile bool s_scope_cb_entered = false;
+static volatile bool s_scope_cb_release = false;
+static int s_scope_other_count = 0;
+
+static void scope_stall_cb(void *ctx, const sdf_event_router_event_t *e)
+{
+    (void)ctx;
+    (void)e;
+    s_scope_cb_entered = true;
+    /* Bounded so a missing release fails an assertion rather than wedging the
+     * suite; vTaskDelay rather than a spin so the test task gets to run. */
+    for (int i = 0; i < 2000 && !s_scope_cb_release; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+static void scope_other_cb(void *ctx, const sdf_event_router_event_t *e)
+{
+    (void)ctx;
+    (void)e;
+    s_scope_other_count++;
+}
+
+void test_sdf_event_router_emit_from_other_task_accepted_during_dispatch(void) {
+    sdf_event_router_reset_for_test();
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_init());
+
+    s_scope_cb_entered = false;
+    s_scope_cb_release = false;
+    s_scope_other_count = 0;
+
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_subscribe(SDF_EVENT_ROUTER_BUTTON_PRESS,
+                                                         SDF_EVENT_ROUTER_PRIO_LOW,
+                                                         scope_stall_cb, NULL));
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_subscribe(SDF_EVENT_ROUTER_AUDIT,
+                                                         SDF_EVENT_ROUTER_PRIO_LOW,
+                                                         scope_other_cb, NULL));
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_start());
+
+    sdf_event_router_event_t btn = {
+        .type = SDF_EVENT_ROUTER_BUTTON_PRESS,
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+    };
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_emit(&btn, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS));
+
+    for (int i = 0; i < 500 && !s_scope_cb_entered; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    TEST_ASSERT_TRUE_MESSAGE(s_scope_cb_entered, "dispatch never started");
+
+    /* This test task is not the dispatch task, so its emit is accepted even
+     * though a dispatch is demonstrably in progress right now. */
+    sdf_event_router_event_t audit = {
+        .type = SDF_EVENT_ROUTER_AUDIT,
+        .priority = SDF_EVENT_ROUTER_PRIO_LOW,
+    };
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_emit(&audit, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS));
+
+    s_scope_cb_release = true;
+    vTaskDelay(pdMS_TO_TICKS(100));
+    TEST_ASSERT_EQUAL(1, s_scope_other_count);
+}
+
+/* A full queue is the case the ban exists for: the old blocking send would
+ * wait out the whole timeout for space only this task can free. Asserts on
+ * elapsed time, because the return code alone would also pass if the emit had
+ * blocked for the full 2000 ms and then failed. */
+static volatile bool s_stall_cb_entered = false;
+static volatile bool s_stall_queue_refilled = false;
+static volatile int s_stall_invocations = 0;
+static volatile esp_err_t s_stall_emit_err = ESP_OK;
+static volatile int64_t s_stall_emit_us = 0;
+
+#define STALL_EMIT_TIMEOUT_MS 2000
+
+static void stall_full_queue_cb(void *ctx, const sdf_event_router_event_t *e)
+{
+    (void)ctx;
+    (void)e;
+    if (++s_stall_invocations != 1) {
+        return;
+    }
+
+    s_stall_cb_entered = true;
+    /* Receiving this event freed one queue slot. Wait for the test task to
+     * take it back so the emit below meets a genuinely full queue. */
+    for (int i = 0; i < 2000 && !s_stall_queue_refilled; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    sdf_event_router_event_t nested = {
+        .type = SDF_EVENT_ROUTER_AUDIT,
+        .priority = SDF_EVENT_ROUTER_PRIO_LOW,
+    };
+    int64_t started_us = esp_timer_get_time();
+    s_stall_emit_err = sdf_event_router_emit(&nested, STALL_EMIT_TIMEOUT_MS);
+    s_stall_emit_us = esp_timer_get_time() - started_us;
+}
+
+void test_sdf_event_router_emit_from_callback_returns_promptly_on_full_queue(void) {
+    sdf_event_router_reset_for_test();
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_init());
+
+    s_stall_cb_entered = false;
+    s_stall_queue_refilled = false;
+    s_stall_invocations = 0;
+    s_stall_emit_err = ESP_OK;
+    s_stall_emit_us = 0;
+
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_subscribe(SDF_EVENT_ROUTER_AUDIT,
+                                                         SDF_EVENT_ROUTER_PRIO_LOW,
+                                                         stall_full_queue_cb, NULL));
+
+    sdf_event_router_event_t filler = {
+        .type = SDF_EVENT_ROUTER_AUDIT,
+        .priority = SDF_EVENT_ROUTER_PRIO_LOW,
+    };
+
+    /* Fill before start() so nothing drains, without hardcoding the depth. */
+    esp_err_t err = ESP_OK;
+    for (int i = 0; i < 256; i++) {
+        err = sdf_event_router_emit(&filler, 0);
+        if (err != ESP_OK) {
+            break;
+        }
+    }
+    TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, err);
+
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_start());
+
+    for (int i = 0; i < 500 && !s_stall_cb_entered; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+    TEST_ASSERT_TRUE_MESSAGE(s_stall_cb_entered, "dispatch never started");
+
+    /* Refill the slot the dispatch freed. Emitted from the test task, so it is
+     * accepted; it stops at ESP_ERR_NO_MEM, which is the state we want. */
+    for (int i = 0; i < 256; i++) {
+        if (sdf_event_router_emit(&filler, 0) != ESP_OK) {
+            break;
+        }
+    }
+    s_stall_queue_refilled = true;
+
+    for (int i = 0; i < 1000 && s_stall_emit_us == 0; i++) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, s_stall_emit_err);
+    TEST_ASSERT_GREATER_THAN(0, (int)s_stall_emit_us);
+    /* An order of magnitude below the requested timeout: the emit returned
+     * without waiting for space, not after giving up on it. */
+    TEST_ASSERT_LESS_THAN_MESSAGE((int)(STALL_EMIT_TIMEOUT_MS * 1000 / 10),
+                                  (int)s_stall_emit_us,
+                                  "emit from dispatch waited for queue space");
 }
