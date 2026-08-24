@@ -10,6 +10,13 @@ on:
       - 'firmware/**'
       - '.github/workflows/firmware-ci.yml'
 
+defaults:
+  run:
+    # The espressif/idf container ships bash, but GitHub only picks it as the
+    # default when it finds it in PATH - otherwise steps silently run under
+    # dash/sh, where `set -o pipefail` aborts with "Illegal option".
+    shell: bash
+
 jobs:
   build-firmware:
     name: build-firmware (esp32c6)
@@ -35,11 +42,15 @@ jobs:
 
       - name: idf.py build
         working-directory: firmware
+        # GitHub does not run the container's ENTRYPOINT, so the IDF
+        # environment (idf.py on PATH) must be sourced explicitly in every
+        # step that builds or flashes.
         run: |
           # pipefail is not set by GitHub Actions' default `bash -e {0}` shell,
           # so without it the pipeline would exit with tee's status and a failed
           # build would pass this step silently.
           set -o pipefail
+          . "${IDF_PATH:-/opt/esp/idf}/export.sh" >/dev/null
           idf.py build | tee /tmp/build-firmware.log
 
       - name: Confirm the provisioned signing key was reused
@@ -64,8 +75,8 @@ jobs:
       - name: Install esp-emu
         run: |
           curl -fsSL https://raw.githubusercontent.com/espressif/esp-emulator/main/install.sh \
-            | sh -s -- --version 0.39.0
-          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+            | sh -s -- --version 0.40.1
+          echo "${HOME}/local/bin:${HOME}/.local/bin" >> "${GITHUB_PATH}"
 
       - name: Write OTA signing key
         env:
@@ -87,6 +98,7 @@ jobs:
           # once above, consumed by idf.py/espsecure as a file path, and
           # never otherwise referenced by this workflow.
           set -o pipefail
+          . "${IDF_PATH:-/opt/esp/idf}/export.sh" >/dev/null
           scripts/run_ota_signature_gate.sh
 
   test-firmware:
@@ -104,6 +116,7 @@ jobs:
       - name: idf.py set-target linux && idf.py build
         working-directory: firmware/test_runner
         run: |
+          . "${IDF_PATH:-/opt/esp/idf}/export.sh" >/dev/null
           idf.py set-target linux
           idf.py build
 
