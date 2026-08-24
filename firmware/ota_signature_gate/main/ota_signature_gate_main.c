@@ -387,7 +387,7 @@ static void gate_run_reject_cases(const esp_partition_t *fixtures, uint32_t imag
     esp_err_t err = gate_run_case(fixtures, image_size, GATE_SOURCE_TAMPERED);
     const esp_partition_t *boot_after = esp_ota_get_boot_partition();
 
-    if (err == ESP_OK) { /* TEMPORARY 5.5 red-run: inverted assertion */
+    if (err == SDF_ERR_OTA_SIGNATURE_INVALID && s_audit_seen_signature_invalid && boot_after == boot_before) {
         *tampered_out = GATE_CASE_REJECTED;
         ESP_LOGI(TAG, "CASE 1 (tampered): rejected as expected");
     } else {
