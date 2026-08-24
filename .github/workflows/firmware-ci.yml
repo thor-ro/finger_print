@@ -115,12 +115,16 @@ jobs:
 
       - name: idf.py build (linux target)
         working-directory: firmware/test_runner
-        # The committed sdkconfig pins CONFIG_IDF_TARGET=linux (AGENTS.md);
-        # regenerating it via set-target would drop the accumulated working
-        # settings, so build against it directly - same as the host workflow.
+        # The committed sdkconfig pins CONFIG_IDF_TARGET=linux (AGENTS.md).
+        # IDF_TARGET is still passed explicitly because a fresh configure
+        # resolves components before reading sdkconfig, and without it
+        # sdf_ble_companion pulls in the chip-only 'bt' component. set-target
+        # is deliberately NOT used: it regenerates sdkconfig from defaults and
+        # loses the accumulated working settings (mbedtls platform symbols go
+        # unresolved).
         run: |
           . "${IDF_PATH:-/opt/esp/idf}/export.sh" >/dev/null
-          idf.py build
+          idf.py -D IDF_TARGET=linux build
 
       - name: Run Unity test suite
         working-directory: firmware/test_runner
