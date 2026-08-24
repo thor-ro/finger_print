@@ -23,9 +23,71 @@ jobs:
       - name: Mark repository safe
         run: git config --global --add safe.directory '*'
 
+      - name: Write OTA signing key
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          if [ -z "${OTA_SIGNING_KEY}" ]; then
+            echo "::error::OTA_SIGNING_KEY secret is empty or unset; the build cannot sign firmware images." >&2
+            exit 1
+          fi
+          printf '%s\n' "${OTA_SIGNING_KEY}" > ota_signing_key.pem
+
       - name: idf.py build
         working-directory: firmware
-        run: idf.py build
+        run: |
+          # pipefail is not set by GitHub Actions' default `bash -e {0}` shell,
+          # so without it the pipeline would exit with tee's status and a failed
+          # build would pass this step silently.
+          set -o pipefail
+          idf.py build | tee /tmp/build-firmware.log
+
+      - name: Confirm the provisioned signing key was reused
+        run: |
+          if grep -q "Generated a new signing key" /tmp/build-firmware.log; then
+            echo "::error::Build generated a new signing key instead of reusing the one from the OTA_SIGNING_KEY secret. Firmware built this way will be rejected by every already-provisioned device." >&2
+            exit 1
+          fi
+
+  ota-signature:
+    name: ota-signature (esp32c6 — esp-emu)
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v6.0.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Mark repository safe
+        run: git config --global --add safe.directory '*'
+
+      - name: Install esp-emu
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/espressif/esp-emulator/main/install.sh \
+            | sh -s -- --version 0.39.0
+          echo "${HOME}/.local/bin" >> "${GITHUB_PATH}"
+
+      - name: Write OTA signing key
+        env:
+          OTA_SIGNING_KEY: ${{ secrets.OTA_SIGNING_KEY }}
+        run: |
+          if [ -z "${OTA_SIGNING_KEY}" ]; then
+            echo "::error::OTA_SIGNING_KEY secret is empty or unset; the gate cannot sign the fixture image." >&2
+            exit 1
+          fi
+          printf '%s\n' "${OTA_SIGNING_KEY}" > ota_signing_key.pem
+
+      - name: Run the ota-signature-emulator-gate (Layer 1)
+        run: |
+          # scripts/run_ota_signature_gate.sh already declares its own
+          # set -euo pipefail and applies it to every internal build/emulator
+          # pipe into tee; this mirrors that discipline at the step level too.
+          # This job never cats or echoes ota_signing_key.pem and has no
+          # artifact-upload step covering it (task 5.4) - the key is written
+          # once above, consumed by idf.py/espsecure as a file path, and
+          # never otherwise referenced by this workflow.
+          set -o pipefail
+          scripts/run_ota_signature_gate.sh
 
   test-firmware:
     name: test-firmware (linux target — partial coverage, see AGENTS.md)

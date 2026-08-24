@@ -10,6 +10,12 @@ build_output.log
 firmware/test_runner/build*
 firmware/build
 firmware/managed_components
+firmware/ble_ota_gate/build*
+firmware/ble_ota_gate/managed_components
+firmware/ota_signature_gate/build*
+firmware/ota_signature_gate/managed_components
+scripts/__pycache__/
+tools/__pycache__/
 breakboard
 doc/UART_Fingerprint_Sensor_(C)_Demo
 case
@@ -17,3 +23,5 @@ case
 ota_private.key
 ota_pubkey.*
 ota_public_key.*
+ota_signing_key.pem
+*.pem

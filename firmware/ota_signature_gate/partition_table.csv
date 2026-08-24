@@ -1,0 +1,15 @@
+# Name,   Type, SubType,   Offset,    Size,    Flags
+#
+# Own partition table for the ota-signature-emulator-gate fixture (D4):
+# firmware/partition_table.csv is production's and stays untouched. ota_0/
+# ota_1 are sized like firmware/test_runner/partition_table.csv's hw variant,
+# since this fixture links the same footprint (sdf_ota + its dependency
+# closure, no BLE/app stack). `fixtures` is a raw data partition at 0x400000
+# sized 0x140000 - flash is 8 MB and production's table ends at 0x400000, so
+# this sits in space production never touches (design.md D4).
+nvs,      data, nvs,       0x9000,    0x6000,
+phy_init, data, phy,       0xF000,    0x1000,
+otadata,  data, ota,       0x10000,   0x2000,
+ota_0,    app,  ota_0,     0x20000,   0xF0000,
+ota_1,    app,  ota_1,     0x110000,  0xF0000,
+fixtures, data, undefined, 0x400000,  0x140000,

@@ -1,5 +1,4 @@
 #include "sdf_ota.h"
-#include "sdf_ota_digest.h"
 #include "sdf_common.h"
 
 #include <string.h>
@@ -26,33 +25,27 @@ typedef struct {
     const esp_partition_t *target_partition;
     uint32_t expected_size;
     uint32_t bytes_written;
-    /* Everything sdf_ota_verify_and_commit() needs before esp_ota_end() is
-     * captured here from the write stream, so the commit path performs no read
-     * of target_partition while the OTA handle is open.
+    /* The incoming esp_app_desc_t is captured here from the write stream, so
+     * the version/downgrade check performs no read of target_partition while
+     * the OTA handle is open.
      *
-     * That is not a micro-optimisation. esp_ota_write() defers the trailing
-     * (size % 16) bytes into an internal buffer and only flushes them in
-     * esp_ota_end() when flash encryption is enabled (esp_ota_ops.c:347-377,
-     * :583-592), so a read-back would see erased flash for the last <=15 bytes
-     * the day encryption is turned on - and since app images are 16-byte
-     * aligned and the footer is 68 bytes, that slice is exactly the "SDF\x01"
-     * magic. ESP-IDF v6 also allows writes to land in a *staging* partition
-     * that is only copied to the final one inside esp_ota_end()
-     * (esp_ota_ops.c:262, :598-601), which would make any earlier read return
-     * the previous image wholesale. Capturing on the way in is immune to both,
-     * and to whatever the write layer does next.
+     * That is not a micro-optimisation. ESP-IDF v6 allows writes to land in a
+     * *staging* partition that is only copied to the final one inside
+     * esp_ota_end() (esp_ota_ops.c:262, :598-601), which would make an
+     * earlier read return the previous image wholesale. Capturing on the way
+     * in is immune to that, and to whatever the write layer does next.
      *
-     *   digest    SHA-256 over the signed range [0, expected_size - 68)
+     * Signature verification is no longer this component's concern: it
+     * happens inside esp_ota_end() itself, against the staging partition,
+     * after the transfer's trailing bytes have been flushed - see
+     * sdf_ota_verify_and_commit().
+     *
      *   app_desc  the incoming esp_app_desc_t, window [32, 288), for the
      *             version and downgrade check
-     *   footer    the 64-byte signature plus magic, window
-     *             [expected_size - 68, expected_size)
      *
-     * All three windows are fixed at sdf_ota_begin() and depend only on writes
-     * being a pure sequential append, which they are. */
-    sdf_ota_digest_t digest;
+     * The window is fixed at sdf_ota_begin() and depends only on writes being
+     * a pure sequential append, which they are. */
     uint8_t app_desc[SDF_OTA_APP_DESC_SIZE];
-    uint8_t footer[SDF_OTA_FOOTER_SIZE];
     sdf_ota_state_t state;
     bool active;
     /* True from a successful esp_ota_begin() until whichever comes first:
@@ -69,16 +62,6 @@ static SemaphoreHandle_t s_session_mutex = NULL;
 
 /* Version string embedded at build time */
 extern const char sdf_ota_version_string[];
-
-
-
-/* Idempotent, so it is safe on every path that ends a session - including
- * paths that may run twice - without leaking or double-freeing the mbedTLS
- * context. Callers must hold s_session_mutex. */
-static void sdf_ota_session_digest_release(void)
-{
-    sdf_ota_digest_release(&s_session.digest);
-}
 
 static esp_err_t sdf_ota_emit_audit(sdf_audit_event_type_t type, int32_t status, uint16_t detail)
 {
@@ -140,20 +123,18 @@ static esp_err_t sdf_ota_state_transition(sdf_ota_state_t new_state)
     return ESP_OK;
 }
 
-/* The single way a session ends badly. Releases the digest context, hands the
- * OTA handle back to ESP-IDF if it is still ours to hand back, marks the
- * session FAILED and - the part every hand-rolled failure block used to miss -
- * clears active, so the next sdf_ota_begin() from any transport is accepted
- * without a reboot. Returns err unchanged so callers can `return
- * sdf_ota_session_fail(err);` and lose nothing.
+/* The single way a session ends badly. Hands the OTA handle back to ESP-IDF
+ * if it is still ours to hand back, marks the session FAILED and - the part
+ * every hand-rolled failure block used to miss - clears active, so the next
+ * sdf_ota_begin() from any transport is accepted without a reboot. Returns
+ * err unchanged so callers can `return sdf_ota_session_fail(err);` and lose
+ * nothing.
  *
  * Callers must hold s_session_mutex and must give it back themselves; the
  * mutex is deliberately not touched here so this stays usable from paths that
  * have more to do before unlocking. */
 static esp_err_t sdf_ota_session_fail(esp_err_t err)
 {
-    sdf_ota_session_digest_release();
-
     if (s_session.ota_handle_open) {
         esp_ota_abort(s_session.ota_handle);
         s_session.ota_handle_open = false;
@@ -207,17 +188,19 @@ esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_ha
     }
 
     /* The smallest thing that can be a signed app image is a header plus a
-     * complete esp_app_desc_t plus the footer. Below that the two capture
-     * windows would overlap or run past the end of the stream and the commit
-     * path would be verifying whatever the memset left behind, so reject here
-     * rather than in the middle of a transfer. Also keeps signed_len below
-     * from underflowing. */
+     * complete esp_app_desc_t. Below that the app-desc capture window would
+     * run past the end of the stream and the commit path would be reading
+     * whatever the memset left behind, so reject here rather than in the
+     * middle of a transfer. There is no project-defined signed range to add
+     * on top of this any more - IDF's own signed-app verification validates
+     * the signature sector's presence and position itself, inside
+     * esp_ota_end(). */
     if (image_size < SDF_OTA_MIN_IMAGE_SIZE) {
         xSemaphoreGive(s_session_mutex);
         ESP_LOGE(TAG, "Image size %" PRIu32 " is below the %u-byte minimum for a signed image "
-                      "(%u-byte header + %u-byte app descriptor + %u-byte signature footer)",
+                      "(%u-byte header + %u-byte app descriptor)",
                  image_size, (unsigned)SDF_OTA_MIN_IMAGE_SIZE, (unsigned)SDF_OTA_APP_DESC_OFFSET,
-                 (unsigned)SDF_OTA_APP_DESC_SIZE, (unsigned)SDF_OTA_FOOTER_SIZE);
+                 (unsigned)SDF_OTA_APP_DESC_SIZE);
         return ESP_ERR_INVALID_SIZE;
     }
 
@@ -247,22 +230,12 @@ esp_err_t sdf_ota_begin(sdf_ota_source_t source, uint32_t image_size, sdf_ota_ha
     s_session.active = true;
     s_session.ota_handle_open = true;
 
-    /* The two paths below release the handle by hand rather than through
+    /* The path below releases the handle by hand rather than through
      * sdf_ota_session_fail(): the session is still IDLE here, and IDLE ->
-     * FAILED is not a legal transition. They must still clear the flag, or a
+     * FAILED is not a legal transition. It must still clear the flag, or a
      * later abort would look up a handle esp_ota_abort() has already freed. */
-    err = sdf_ota_digest_begin(&s_session.digest, image_size - SDF_OTA_FOOTER_SIZE);
-    if (err != ESP_OK) {
-        esp_ota_abort(ota_handle);
-        s_session.ota_handle_open = false;
-        s_session.active = false;
-        xSemaphoreGive(s_session_mutex);
-        return err;
-    }
-
     err = sdf_ota_state_transition(SDF_OTA_STATE_DOWNLOADING);
     if (err != ESP_OK) {
-        sdf_ota_session_digest_release();
         esp_ota_abort(ota_handle);
         s_session.ota_handle_open = false;
         s_session.active = false;
@@ -303,26 +276,13 @@ esp_err_t sdf_ota_write(sdf_ota_handle_t handle, const void *data, uint32_t len)
     }
 
     /* Writes are a pure sequential append - there is no offset addressing here
-     * and transports resume from the device's own bytes_written - so every
-     * byte reaches the digest exactly once, in order. The accumulator clamps
-     * at the signed range itself, so the 68-byte footer the client streams
-     * along with the image is excluded without splitting chunks here. */
-    err = sdf_ota_digest_update(&s_session.digest, data, len);
-    if (err != ESP_OK) {
-        err = sdf_ota_session_fail(err);
-        xSemaphoreGive(s_session_mutex);
-        return err;
-    }
-
-    /* Same append property, so the same reasoning: each window fills in
-     * whatever order the chunks happen to be sliced, and is complete once the
-     * stream has passed its end. Captured before bytes_written advances, since
-     * that is this chunk's own offset in the stream. Neither call can fail and
-     * neither depends on chunk alignment. */
+     * and transports resume from the device's own bytes_written - so the
+     * window fills in whatever order the chunks happen to be sliced, and is
+     * complete once the stream has passed its end. Captured before
+     * bytes_written advances, since that is this chunk's own offset in the
+     * stream. Cannot fail and does not depend on chunk alignment. */
     sdf_ota_window_capture(s_session.app_desc, SDF_OTA_APP_DESC_OFFSET, SDF_OTA_APP_DESC_SIZE,
                            s_session.bytes_written, data, len);
-    sdf_ota_window_capture(s_session.footer, s_session.expected_size - SDF_OTA_FOOTER_SIZE,
-                           SDF_OTA_FOOTER_SIZE, s_session.bytes_written, data, len);
 
     s_session.bytes_written += len;
 
@@ -350,7 +310,6 @@ esp_err_t sdf_ota_abort(sdf_ota_handle_t handle)
         err = esp_ota_abort(s_session.ota_handle);
         s_session.ota_handle_open = false;
     }
-    sdf_ota_session_digest_release();
     s_session.active = false;
     (void)sdf_ota_state_transition(SDF_OTA_STATE_FAILED);
     xSemaphoreGive(s_session_mutex);
@@ -464,41 +423,31 @@ esp_err_t sdf_ota_verify_and_commit(sdf_ota_handle_t handle)
         sdf_ota_emit_audit(SDF_AUDIT_OTA_VERSION_UPGRADE, 0, 0);
     }
 
-    /* Finalize the streaming digest before anything can consume it. Done
-     * unconditionally so the context is released on exactly one path whether
-     * or not verification is compiled in. */
-    uint8_t digest[SDF_OTA_DIGEST_SIZE] = {0};
-    err = sdf_ota_digest_finish(&s_session.digest, digest);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to finalize image digest: %s", esp_err_to_name(err));
-        err = sdf_ota_session_fail(err);
-        xSemaphoreGive(s_session_mutex);
-        return err;
-    }
-
-    /* Verify signature if enabled. Against the footer captured from the
-     * stream, not one read back from the target - see the session struct. */
-#if CONFIG_SDF_OTA_SIGNATURE_VERIFY
-    err = sdf_ota_verify_footer(s_session.footer, digest);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Signature verification failed: %s", esp_err_to_name(err));
-        sdf_ota_emit_audit(SDF_AUDIT_OTA_SIGNATURE_INVALID, err, 0);
-        err = sdf_ota_session_fail(err);
-        xSemaphoreGive(s_session_mutex);
-        return err;
-    }
-    ESP_LOGI(TAG, "Signature verification passed");
-#endif
-
-    /* Finalize OTA. esp_ota_end() frees its entry on every path it can return
-     * from, success and failure alike (esp_ota_ops.c:604-610), so the handle
-     * stops being ours the moment it returns - hence the flag is cleared
-     * before the error branch, which would otherwise abort a freed handle. */
+    /* Finalize OTA. This is where ESP-IDF's signed-app verification actually
+     * runs: esp_ota_end() flushes any deferred trailing bytes to the staging
+     * partition, then calls esp_image_verify() against it before copying
+     * staging to the final partition (esp_ota_ops.c:565-600). A validation
+     * failure - bad signature, missing signature block, or a malformed image
+     * - comes back as ESP_ERR_OTA_VALIDATE_FAILED and is mapped onto the
+     * same SDF_ERR_OTA_SIGNATURE_INVALID / OTA_SIGNATURE_INVALID pair the
+     * previous footer-based scheme reported, so audit-log consumers and the
+     * BLE/CLI/Zigbee transports that key off it keep working unchanged.
+     *
+     * esp_ota_end() frees its handle entry on every path it can return from,
+     * success and failure alike (esp_ota_ops.c:604-610), so the handle stops
+     * being ours the moment it returns - hence the flag is cleared before the
+     * error branch, which would otherwise abort a freed handle. */
     err = esp_ota_end(s_session.ota_handle);
     s_session.ota_handle_open = false;
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
-        err = sdf_ota_session_fail(err);
+        if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
+            ESP_LOGE(TAG, "OTA image validation failed: %s", esp_err_to_name(err));
+            sdf_ota_emit_audit(SDF_AUDIT_OTA_SIGNATURE_INVALID, err, 0);
+            err = sdf_ota_session_fail(SDF_ERR_OTA_SIGNATURE_INVALID);
+        } else {
+            ESP_LOGE(TAG, "esp_ota_end failed: %s", esp_err_to_name(err));
+            err = sdf_ota_session_fail(err);
+        }
         xSemaphoreGive(s_session_mutex);
         return err;
     }

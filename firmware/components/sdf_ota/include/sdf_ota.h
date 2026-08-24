@@ -4,27 +4,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "esp_err.h"
-#include "esp_partition.h"
 #include "esp_app_desc.h"
 #include "esp_assert.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Signed-image footer layout: the image bytes are followed by a 64-byte raw
- * ECDSA P-256 signature (r||s, two 32-byte big-endian halves) and the 4-byte
- * magic marker "SDF\x01". Raw rather than ASN.1 DER so the footer length is a
- * compile-time constant - sdf_ota_begin() has to know the signed range before
- * the first byte arrives, which a length-variable DER footer would prevent. */
-#define SDF_OTA_SIG_SIZE     64u
-#define SDF_OTA_MAGIC_SIZE   4u
-#define SDF_OTA_FOOTER_SIZE  (SDF_OTA_SIG_SIZE + SDF_OTA_MAGIC_SIZE)
-#define SDF_OTA_DIGEST_SIZE  32u
-/* Uncompressed EC point: 0x04 || X || Y. Compressed encoding is not used
- * because point decompression is not reliably compiled into ESP-IDF's
- * mbedTLS. */
-#define SDF_OTA_PUBKEY_SIZE  65u
 
 /* Where the incoming image carries its esp_app_desc_t. The offset is
  * sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) = 24 + 8,
@@ -38,16 +23,21 @@ extern "C" {
 ESP_STATIC_ASSERT(SDF_OTA_APP_DESC_SIZE == sizeof(esp_app_desc_t),
                   "SDF_OTA_APP_DESC_SIZE must track sizeof(esp_app_desc_t)");
 
-/* Smallest image a session will accept: header, a complete app descriptor and
- * the signature footer. Anything shorter cannot carry the windows the commit
- * path captures, and is not a bootable app image either. */
-#define SDF_OTA_MIN_IMAGE_SIZE  (SDF_OTA_APP_DESC_OFFSET + SDF_OTA_APP_DESC_SIZE + SDF_OTA_FOOTER_SIZE)
+/* Smallest image a session will accept: header plus a complete app
+ * descriptor. Anything shorter cannot carry the window the commit path
+ * captures, and is not a bootable app image either. There is no
+ * project-defined signed range to add on top of this any more - IDF's own
+ * signed-app verification (esp_ota_end() -> esp_image_verify()) validates
+ * the signature sector's presence and position itself. */
+#define SDF_OTA_MIN_IMAGE_SIZE  (SDF_OTA_APP_DESC_OFFSET + SDF_OTA_APP_DESC_SIZE)
 
 /* ESP-IDF defines no ESP_ERR_INVALID_SIGNATURE - the previous implementation
  * returned one anyway, which is one of the ways it gave itself away as never
  * having been compiled. Allocate a component-local code in a range ESP-IDF
  * leaves free (0x9000-0xBFFF sits between ESP_ERR_ESP_TLS_BASE and
- * ESP_ERR_HW_CRYPTO_BASE). */
+ * ESP_ERR_HW_CRYPTO_BASE). Retained across the move to IDF signed-app
+ * verification so audit-log consumers keep working: esp_ota_end()'s
+ * ESP_ERR_OTA_VALIDATE_FAILED is mapped onto this code. */
 #define SDF_ERR_OTA_BASE               0xA000
 #define SDF_ERR_OTA_SIGNATURE_INVALID  (SDF_ERR_OTA_BASE + 1)
 
@@ -92,54 +82,26 @@ sdf_ota_state_t sdf_ota_get_state(void);
 esp_err_t sdf_ota_get_bytes_written(sdf_ota_handle_t handle, uint32_t *bytes_written_out);
 sdf_ota_version_cmp_t sdf_ota_version_compare(const char *current, const char *incoming);
 
-/* Verify a raw ECDSA P-256 signature over an already-computed SHA-256 digest.
- * Pure: touches no partition, flash or config state, so it compiles and runs
- * unchanged on IDF_TARGET=linux and can be exercised against known-answer
- * vectors by the host test runner.
+/* Copy whatever part of the transfer chunk [stream_offset, stream_offset+len)
+ * falls inside the absolute window [win_start, win_start+win_len) into dst, at
+ * the offset within the window it belongs at.
  *
- *   digest  32 bytes, SHA-256 of the signed range
- *   sig     64 bytes, raw r||s (two 32-byte big-endian integers)
- *   pubkey  65 bytes, uncompressed EC point 0x04 || X || Y
+ * The incoming esp_app_desc_t is needed before esp_ota_end(), and reading it
+ * back off the target partition at that point is only correct while
+ * esp_ota_write() happens not to be buffering (flash encryption) and the
+ * staging partition happens to be the final one. The window is absolute
+ * rather than sliding because expected_size is fixed at sdf_ota_begin(), so
+ * no ring-buffer state is needed and a chunk never has to be split by the
+ * caller.
  *
- * Returns ESP_OK when the signature is valid, ESP_ERR_INVALID_ARG for a NULL
- * argument or a malformed public key, and SDF_ERR_OTA_SIGNATURE_INVALID when
- * the inputs are well-formed but the signature does not verify. */
-esp_err_t sdf_ota_verify_digest(const uint8_t digest[SDF_OTA_DIGEST_SIZE],
-                                const uint8_t sig[SDF_OTA_SIG_SIZE],
-                                const uint8_t pubkey[SDF_OTA_PUBKEY_SIZE]);
-
-/* Verify a 68-byte signature footer (64-byte raw r||s, then the 4-byte "SDF\x01"
- * magic) against digest - the SHA-256 accumulated over the signed range - using
- * the public key embedded at build time. Takes the footer as bytes rather than
- * as a partition to read, so a live session can hand over the copy it captured
- * from the transfer stream instead of reading the target partition back while
- * its esp_ota_handle_t is still open.
- *
- * Returns ESP_ERR_INVALID_CRC when the magic marker is absent - the "not
- * signed" indicator - and otherwise whatever sdf_ota_verify_digest() returns. */
-esp_err_t sdf_ota_verify_footer(const uint8_t footer[SDF_OTA_FOOTER_SIZE],
-                                const uint8_t digest[SDF_OTA_DIGEST_SIZE]);
-
-/* Verify the ECDSA P-256 signature footer appended after the first image_size
- * bytes of partition, against digest - the SHA-256 accumulated over the
- * signed range during sdf_ota_write(). image_size must be the actual size of
- * the written app image (e.g. sdf_ota_begin()'s image_size, or a size
- * independently derived from the image itself) - NOT partition->size, since
- * partitions are erased-flash-padded and almost always larger than the image
- * they hold. Passing partition->size here will read the footer from stale or
- * erased flash for any image smaller than the full partition. */
-esp_err_t sdf_ota_verify_signature(const esp_partition_t *partition, uint32_t image_size,
-                                   const uint8_t digest[SDF_OTA_DIGEST_SIZE]);
-
-/* Compute the digest of an already-written image by reading the partition
- * back, for callers that have no live session to have accumulated one -
- * today only "ota verify", which inspects a partition flashed out of band.
- * The read-back hazard that rules this approach out inside a live session
- * (esp_ota_write() defers the trailing bytes until esp_ota_end()) does not
- * apply here, because the image is already fully committed to flash.
- * Reads in bounded chunks; no allocation proportional to image_size. */
-esp_err_t sdf_ota_compute_partition_digest(const esp_partition_t *partition, uint32_t image_size,
-                                           uint8_t digest_out[SDF_OTA_DIGEST_SIZE]);
+ * Takes no partition, flash or session argument, so the chunk-boundary
+ * arithmetic - where an off-by-one would hide - is exercised directly by the
+ * host test runner on IDF_TARGET=linux. Stateless and idempotent per byte: a
+ * chunk lying wholly outside the window leaves dst untouched, and feeding the
+ * same chunk twice is harmless. Callers must still feed the stream in order and
+ * exactly once for the window to end up complete. */
+void sdf_ota_window_capture(uint8_t *dst, uint32_t win_start, uint32_t win_len,
+                            uint32_t stream_offset, const void *data, uint32_t len);
 
 #ifdef __cplusplus
 }

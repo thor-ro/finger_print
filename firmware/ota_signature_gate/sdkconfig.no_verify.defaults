@@ -1,0 +1,40 @@
+# Task 4.4 regression check only - never used for the real gate. Layered on
+# top of sdkconfig.defaults (via -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;
+# sdkconfig.no_verify.defaults;sdkconfig.no_verify_<case>.defaults" - see
+# main/Kconfig.projbuild) to build a fixture with signature verification
+# disabled.
+#
+# CONFIG_SECURE_SIGNED_ON_UPDATE (bootloader/Kconfig.projbuild:456-459) is a
+# derived symbol with no prompt - it cannot be set directly. The switch a
+# defaults file can actually set is CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT
+# (bootloader/Kconfig.projbuild:608-620, default y under
+# CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT), which is what
+# CONFIG_SECURE_SIGNED_ON_UPDATE's `default y` actually depends on with no
+# hardware secure boot burned.
+#
+# EMPIRICAL FINDING (recorded here rather than only in design.md, since it
+# explains why this file's effect is *not* "verification off, everything
+# else unchanged"): turning this off does NOT merely skip the
+# esp_image_verify() call inside esp_ota_end() - process_checksum() runs
+# unconditionally inside esp_image_verify() regardless of
+# SECURE_BOOT_CHECK_SIGNATURE (esp_image_format.c:218, outside every
+# `#if SECURE_BOOT_CHECK_SIGNATURE` guard), so a naively byte-flipped
+# payload is still caught there before any crypto check would run - which
+# is exactly why design.md D3 requires the tampered case's checksum and
+# appended hash to be repaired after the flip (scripts/ota_signature_gate_
+# prepare.py's generate_tampered_repaired_image()), rather than testing a
+# raw byte flip against this build. This symbol also cascades:
+# CONFIG_SECURE_SIGNED_APPS depends on SECURE_SIGNED_ON_UPDATE
+# (Kconfig.projbuild:468), and CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES
+# depends on SECURE_SIGNED_APPS (Kconfig.projbuild:699) - so a fixture built
+# with this file produces an *unsigned* image of its own (no trailing
+# signature/hash sector, and a different size than the verification-enabled
+# build). That is why the runner script never stages this build's own
+# output as the D2 "valid" image for task 4.4: the staged images (valid,
+# tampered-repaired, foreign-key) are always generated from a normal,
+# verification-enabled build; only the *running/checking* app is built with
+# this file, and main/ota_signature_gate_main.c skips the D2 signature-
+# match precondition (`#if CONFIG_SECURE_SIGNED_ON_UPDATE`) when compiled
+# this way, since the running app has no signature block of its own to
+# compare against.
+CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=n

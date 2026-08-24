@@ -18,8 +18,6 @@ set(test_srcs
          "../../components/sdf_services/test/test_sdf_services.c"
          "../../components/sdf_cli/test/test_sdf_cli.c"
          "../../components/sdf_ota/test/test_sdf_ota_version.c"
-         "../../components/sdf_ota/test/test_sdf_ota_signature.c"
-         "../../components/sdf_ota/test/test_sdf_ota_digest.c"
          "../../components/sdf_ota/test/test_sdf_ota_window.c"
          "../../components/sdf_ble_companion/test/test_sdf_ble_ota_protocol.c"
          "../../components/sdf_ble_companion/test/test_sdf_ble_companion_bond_state.c"

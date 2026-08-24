@@ -879,7 +879,7 @@ CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT=y
 # default:
 # CONFIG_SECURE_BOOT is not set
 CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
-CONFIG_SECURE_BOOT_SIGNING_KEY="../ota_signing_key.pem"
+CONFIG_SECURE_BOOT_SIGNING_KEY="../../ota_signing_key.pem"
 # default:
 # CONFIG_SECURE_FLASH_ENC_ENABLED is not set
 
@@ -988,15 +988,6 @@ CONFIG_BOOT_ROM_LOG_ALWAYS_ON=y
 # end of Boot ROM Behavior
 
 #
-# ESP-TEE (Trusted Execution Environment)
-#
-# default:
-# CONFIG_SECURE_ENABLE_TEE is not set
-# default:
-CONFIG_SECURE_TEE_LOG_LEVEL=0
-# end of ESP-TEE (Trusted Execution Environment)
-
-#
 # Serial flasher config
 #
 # default:
@@ -1067,11 +1058,26 @@ CONFIG_PARTITION_TABLE_MD5=y
 # end of Partition Table
 
 #
+# OTA Signature Gate fixture (task 4.4 self-test only)
+#
+# default:
+CONFIG_GATE_SELF_TEST_MODE_FULL=y
+# default:
+# CONFIG_GATE_SELF_TEST_MODE_TAMPERED_ONLY is not set
+# default:
+# CONFIG_GATE_SELF_TEST_MODE_FOREIGN_KEY_ONLY is not set
+# end of OTA Signature Gate fixture (task 4.4 self-test only)
+
+#
 # Compiler options
 #
-# CONFIG_COMPILER_OPTIMIZATION_DEBUG is not set
-CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+# default:
+CONFIG_COMPILER_OPTIMIZATION_DEBUG=y
+# default:
+# CONFIG_COMPILER_OPTIMIZATION_SIZE is not set
+# default:
 # CONFIG_COMPILER_OPTIMIZATION_PERF is not set
+# default:
 # CONFIG_COMPILER_OPTIMIZATION_NONE is not set
 # default:
 CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE=y
@@ -1146,631 +1152,6 @@ CONFIG_COMPILER_CXX_GLIBCXX_CONSTEXPR_NO_CHANGE=y
 #
 
 #
-# Bluetooth
-#
-CONFIG_BT_ENABLED=y
-# CONFIG_BT_BLUEDROID_ENABLED is not set
-CONFIG_BT_NIMBLE_ENABLED=y
-# CONFIG_BT_CONTROLLER_ONLY is not set
-CONFIG_BT_CONTROLLER_ENABLED=y
-# CONFIG_BT_CONTROLLER_DISABLED is not set
-
-#
-# Common Options
-#
-# default:
-CONFIG_BT_ALARM_MAX_NUM=50
-# default:
-CONFIG_BT_SMP_CRYPTO_STACK_TINYCRYPT=y
-# default:
-# CONFIG_BT_SMP_CRYPTO_STACK_MBEDTLS is not set
-
-#
-# BT Logs
-#
-
-#
-# Log Sources
-#
-# default:
-# CONFIG_BT_LE_CONTROLLER_LOG_ENABLED is not set
-# end of Log Sources
-
-# default:
-# CONFIG_BT_LOG_CRITICAL_ONLY is not set
-# default:
-# CONFIG_BLE_LOG_ENABLED is not set
-
-#
-# Legacy SPI Log Output (Deprecated - use BT Log Async Output instead)
-#
-# default:
-# CONFIG_BT_BLE_LOG_SPI_OUT_ENABLED is not set
-# end of Legacy SPI Log Output (Deprecated - use BT Log Async Output instead)
-# end of BT Logs
-
-# default:
-# CONFIG_BT_LE_USED_MEM_STATISTICS_ENABLED is not set
-# end of Common Options
-
-#
-# NimBLE Options
-#
-
-#
-# General
-#
-# default:
-CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
-# default:
-# CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_DEFAULT is not set
-# default:
-CONFIG_BT_NIMBLE_PINNED_TO_CORE=0
-# default:
-CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE=4096
-# end of General
-
-#
-# Roles and Profiles
-#
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
-# default:
-CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
-CONFIG_BT_NIMBLE_GATT_CLIENT=y
-CONFIG_BT_NIMBLE_GATT_SERVER=y
-# end of Roles and Profiles
-
-#
-# Security (SMP)
-#
-# default:
-CONFIG_BT_NIMBLE_SECURITY_ENABLE=y
-# default:
-CONFIG_BT_NIMBLE_SM_LEGACY=y
-# default:
-CONFIG_BT_NIMBLE_SM_SC=y
-# default:
-# CONFIG_BT_NIMBLE_SM_SC_DEBUG_KEYS is not set
-# default:
-CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_ENCRYPTION=y
-# default:
-CONFIG_BT_NIMBLE_SM_LVL=0
-# default:
-CONFIG_BT_NIMBLE_SM_SC_ONLY=0
-# default:
-# CONFIG_BT_NIMBLE_SMP_ID_RESET is not set
-CONFIG_BT_NIMBLE_NVS_PERSIST=y
-# default:
-CONFIG_BT_NIMBLE_MAX_BONDS=3
-# default:
-# CONFIG_BT_NIMBLE_HANDLE_REPEAT_PAIRING_DELETION is not set
-# end of Security (SMP)
-
-#
-# GAP
-#
-# default:
-CONFIG_BT_NIMBLE_RPA_TIMEOUT=900
-# default:
-CONFIG_BT_NIMBLE_WHITELIST_SIZE=12
-# default:
-CONFIG_BT_NIMBLE_ENABLE_CONN_REATTEMPT=y
-# default:
-CONFIG_BT_NIMBLE_MAX_CONN_REATTEMPT=3
-# default:
-CONFIG_BT_NIMBLE_HS_PVCY=y
-# default:
-# CONFIG_BT_NIMBLE_HOST_ALLOW_CONNECT_WITH_SCAN is not set
-# default:
-# CONFIG_BT_NIMBLE_HOST_QUEUE_CONG_CHECK is not set
-# default:
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=3
-CONFIG_BT_NIMBLE_MAX_CCCDS=16
-# default:
-# CONFIG_BT_NIMBLE_CRYPTO_STACK_MBEDTLS is not set
-# default:
-CONFIG_BT_NIMBLE_HS_STOP_TIMEOUT_MS=2000
-# default:
-CONFIG_BT_NIMBLE_USE_ESP_TIMER=y
-# end of GAP
-
-#
-# GATT / ATT
-#
-# default:
-CONFIG_BT_NIMBLE_ATT_PREFERRED_MTU=256
-# default:
-CONFIG_BT_NIMBLE_ATT_MAX_PREP_ENTRIES=64
-# default:
-CONFIG_BT_NIMBLE_GATT_MAX_PROCS=4
-# default:
-# CONFIG_BT_NIMBLE_BLE_GATT_BLOB_TRANSFER is not set
-# default:
-# CONFIG_BT_NIMBLE_GATT_CACHING is not set
-# default:
-# CONFIG_BT_NIMBLE_INCL_SVC_DISCOVERY is not set
-# end of GATT / ATT
-
-#
-# L2CAP
-#
-# default:
-CONFIG_BT_NIMBLE_L2CAP_COC_MAX_NUM=0
-# end of L2CAP
-
-#
-# Memory Settings
-#
-# default:
-CONFIG_BT_NIMBLE_MSYS_1_BLOCK_COUNT=24
-# default:
-CONFIG_BT_NIMBLE_MSYS_1_BLOCK_SIZE=128
-# default:
-CONFIG_BT_NIMBLE_MSYS_2_BLOCK_COUNT=24
-# default:
-CONFIG_BT_NIMBLE_MSYS_2_BLOCK_SIZE=320
-# default:
-CONFIG_BT_NIMBLE_MSYS_BUF_FROM_HEAP=y
-# default:
-CONFIG_BT_NIMBLE_TRANSPORT_ACL_FROM_LL_COUNT=24
-# default:
-CONFIG_BT_NIMBLE_TRANSPORT_ACL_SIZE=255
-# default:
-CONFIG_BT_NIMBLE_TRANSPORT_EVT_SIZE=70
-# default:
-CONFIG_BT_NIMBLE_TRANSPORT_EVT_COUNT=30
-# default:
-CONFIG_BT_NIMBLE_TRANSPORT_EVT_DISCARD_COUNT=8
-# default:
-CONFIG_BT_NIMBLE_L2CAP_COC_SDU_BUFF_COUNT=1
-# default:
-# CONFIG_BT_NIMBLE_MEMPOOL_RUNTIME_ALLOC is not set
-# end of Memory Settings
-
-#
-# BLE 5.x Features
-#
-CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
-# default:
-CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_2M_PHY=y
-# default:
-CONFIG_BT_NIMBLE_LL_CFG_FEAT_LE_CODED_PHY=y
-# default:
-# CONFIG_BT_NIMBLE_EXT_ADV is not set
-# default:
-# CONFIG_BT_NIMBLE_EXT_SCAN is not set
-# default:
-# CONFIG_BT_NIMBLE_BLE_POWER_CONTROL is not set
-# default:
-# CONFIG_BT_NIMBLE_ISO is not set
-# end of BLE 5.x Features
-
-#
-# Services
-#
-# default:
-CONFIG_BT_NIMBLE_PROX_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_ANS_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_CTS_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_HTP_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_IPSS_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_TPS_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_IAS_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_LLS_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_SPS_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_HR_SERVICE=y
-# default:
-# CONFIG_BT_NIMBLE_HID_SERVICE is not set
-# default:
-CONFIG_BT_NIMBLE_BAS_SERVICE=y
-# default:
-# CONFIG_BT_NIMBLE_SVC_BAS_BATTERY_LEVEL_NOTIFY is not set
-# default:
-CONFIG_BT_NIMBLE_DIS_SERVICE=y
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_MANUFACTURER_NAME is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_SERIAL_NUMBER is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_HARDWARE_REVISION is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_FIRMWARE_REVISION is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_SOFTWARE_REVISION is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_SYSTEM_ID is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_PNP_ID is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_DIS_INCLUDED is not set
-CONFIG_BT_NIMBLE_GAP_SERVICE=y
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_DEVICE_NAME="nimble"
-# default:
-CONFIG_BT_NIMBLE_GAP_DEVICE_NAME_MAX_LEN=31
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_APPEARANCE=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_NAME_WRITE_PERM=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_NAME_WRITE_PERM_ENC=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_NAME_WRITE_PERM_AUTHEN=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_NAME_WRITE_PERM_AUTHOR=0
-# default:
-# CONFIG_BT_NIMBLE_SVC_GAP_GATT_SECURITY_LEVEL is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_GAP_RPA_ONLY is not set
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_CAR_CHAR_NOT_SUPP=y
-# default:
-# CONFIG_BT_NIMBLE_SVC_GAP_CAR_NOT_SUPP is not set
-# default:
-# CONFIG_BT_NIMBLE_SVC_GAP_CAR_SUPP is not set
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_CENT_ADDR_RESOLUTION=-1
-
-#
-# GAP Appearance write permissions
-#
-# default:
-# CONFIG_BT_NIMBLE_SVC_GAP_APPEAR_WRITE is not set
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_APPEAR_WRITE_PERM=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_APPEAR_WRITE_PERM_ENC=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_APPEAR_WRITE_PERM_ATHN=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_APPEAR_WRITE_PERM_ATHR=0
-# end of GAP Appearance write permissions
-
-#
-# GAP device name write permissions
-#
-# default:
-# CONFIG_BT_NIMBLE_SVC_GAP_NAME_WRITE is not set
-# end of GAP device name write permissions
-
-#
-# Peripheral Preferred Connection Parameters (PPCP) settings
-#
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MAX_CONN_INTERVAL=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_PPCP_MIN_CONN_INTERVAL=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SLAVE_LATENCY=0
-# default:
-CONFIG_BT_NIMBLE_SVC_GAP_PPCP_SUPERVISION_TMO=0
-# end of Peripheral Preferred Connection Parameters (PPCP) settings
-# end of Services
-
-#
-# Extra Features
-#
-# default:
-# CONFIG_BT_NIMBLE_DYNAMIC_SERVICE is not set
-# default:
-# CONFIG_BT_NIMBLE_BLUFI_ENABLE is not set
-# default:
-# CONFIG_BT_NIMBLE_ENC_ADV_DATA is not set
-# default:
-# CONFIG_BT_NIMBLE_ADV_UUID_CONCAT is not set
-# default:
-# CONFIG_BT_NIMBLE_GATTC_PROC_PREEMPTION_PROTECT is not set
-# default:
-# CONFIG_BT_NIMBLE_GATTC_AUTO_PAIR is not set
-# default:
-CONFIG_BT_NIMBLE_EATT_CHAN_NUM=0
-# default:
-# CONFIG_BT_NIMBLE_SUBRATE is not set
-# default:
-# CONFIG_BT_NIMBLE_STATIC_PASSKEY is not set
-# default:
-CONFIG_BT_NIMBLE_DTM_MODE_TEST=y
-# default:
-CONFIG_BT_NIMBLE_MEM_OPTIMIZATION=y
-# default:
-CONFIG_BT_NIMBLE_STATIC_TO_DYNAMIC=y
-# default:
-CONFIG_BT_NIMBLE_SM_SIGN_CNT=y
-# default:
-CONFIG_BT_NIMBLE_CPFD_CAFD=y
-# default:
-CONFIG_BT_NIMBLE_RECONFIG_MTU=y
-# default:
-# CONFIG_BT_NIMBLE_LOW_SPEED_MODE is not set
-# end of Extra Features
-
-#
-# NimBLE Mesh
-#
-# default:
-# CONFIG_BT_NIMBLE_MESH is not set
-# end of NimBLE Mesh
-
-#
-# Host-controller Transport
-#
-# default:
-CONFIG_UART_HW_FLOWCTRL_DISABLE=y
-# default:
-# CONFIG_UART_HW_FLOWCTRL_CTS_RTS is not set
-# default:
-CONFIG_BT_NIMBLE_HCI_UART_FLOW_CTRL=0
-# default:
-CONFIG_BT_NIMBLE_HCI_UART_RTS_PIN=19
-# default:
-CONFIG_BT_NIMBLE_HCI_UART_CTS_PIN=23
-# end of Host-controller Transport
-
-#
-# Debugging/Testing
-#
-# default:
-# CONFIG_BT_NIMBLE_MEM_DEBUG is not set
-# default:
-# CONFIG_BT_NIMBLE_LOG_LEVEL_NONE is not set
-# default:
-# CONFIG_BT_NIMBLE_LOG_LEVEL_ERROR is not set
-# default:
-# CONFIG_BT_NIMBLE_LOG_LEVEL_WARNING is not set
-# default:
-CONFIG_BT_NIMBLE_LOG_LEVEL_INFO=y
-# default:
-# CONFIG_BT_NIMBLE_LOG_LEVEL_DEBUG is not set
-# default:
-CONFIG_BT_NIMBLE_LOG_LEVEL=1
-# default:
-CONFIG_BT_NIMBLE_PRINT_ERR_NAME=y
-# default:
-# CONFIG_BT_NIMBLE_DEBUG is not set
-# default:
-# CONFIG_BT_NIMBLE_TEST_THROUGHPUT_TEST is not set
-# end of Debugging/Testing
-
-#
-# Vendor / Optimization
-#
-# default:
-# CONFIG_BT_NIMBLE_VS_SUPPORT is not set
-# default:
-# CONFIG_BT_NIMBLE_OPTIMIZE_MULTI_CONN is not set
-# default:
-# CONFIG_BT_NIMBLE_HIGH_DUTY_ADV_ITVL is not set
-# default:
-# CONFIG_BT_NIMBLE_ADV_SEND_CONSTANT_DID is not set
-# default:
-# CONFIG_BT_NIMBLE_SCAN_ALLOW_ENH_ADI_FILTER is not set
-# end of Vendor / Optimization
-
-#
-# Helper Utils
-#
-# default:
-CONFIG_BT_NIMBLE_CHK_HOST_STATUS=y
-# default:
-CONFIG_BT_NIMBLE_UTIL_API=y
-# default:
-CONFIG_BT_NIMBLE_EXTRA_ADV_FIELDS=y
-# end of Helper Utils
-# end of NimBLE Options
-
-#
-# Controller Options
-#
-
-#
-# HCI Config
-#
-# default:
-CONFIG_BT_LE_HCI_INTERFACE_USE_RAM=y
-# default:
-# CONFIG_BT_LE_HCI_INTERFACE_USE_UART is not set
-# end of HCI Config
-
-# default:
-CONFIG_BT_LE_CONTROLLER_NPL_OS_PORTING_SUPPORT=y
-# default:
-CONFIG_BT_LE_CONTROLLER_TASK_STACK_SIZE=4096
-
-#
-# Controller debug features
-#
-# default:
-# CONFIG_BT_LE_ERROR_SIM_ENABLED is not set
-# default:
-# CONFIG_BT_LE_ASSERT_WHEN_ABNORMAL_DISCONN_ENABLED is not set
-# default:
-# CONFIG_BT_LE_DEBUG_REMAIN_SCENE_ENABLED is not set
-# default:
-# CONFIG_BT_LE_PTR_CHECK_ENABLED is not set
-# default:
-# CONFIG_BT_LE_MEM_CHECK_ENABLED is not set
-# end of Controller debug features
-
-# default:
-CONFIG_BT_LE_LL_RESOLV_LIST_SIZE=4
-# default:
-CONFIG_BT_LE_LL_DUP_SCAN_LIST_COUNT=20
-# default:
-CONFIG_BT_LE_LL_SCA=60
-# default:
-# CONFIG_BT_LE_LL_PEER_SCA_SET_ENABLE is not set
-# default:
-# CONFIG_BT_LE_COEX_PHY_CODED_TX_RX_TLIM_EN is not set
-# default:
-CONFIG_BT_LE_COEX_PHY_CODED_TX_RX_TLIM_DIS=y
-# default:
-CONFIG_BT_LE_COEX_PHY_CODED_TX_RX_TLIM_EFF=0
-# default:
-# CONFIG_BT_LE_SLEEP_ENABLE is not set
-# default:
-CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL=y
-# default:
-# CONFIG_BT_LE_LP_CLK_SRC_DEFAULT is not set
-# default:
-CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_SUPP=y
-# default:
-CONFIG_BT_CTRL_BLE_ADV_REPORT_FLOW_CTRL_NUM=100
-# default:
-CONFIG_BT_CTRL_BLE_ADV_REPORT_DISCARD_THRSHOLD=20
-# default:
-CONFIG_BT_LE_SCAN_DUPL=y
-# default:
-CONFIG_BT_LE_SCAN_DUPL_TYPE_DEVICE=y
-# default:
-# CONFIG_BT_LE_SCAN_DUPL_TYPE_DATA is not set
-# default:
-# CONFIG_BT_LE_SCAN_DUPL_TYPE_DATA_DEVICE is not set
-# default:
-CONFIG_BT_LE_SCAN_DUPL_TYPE=0
-# default:
-CONFIG_BT_LE_SCAN_DUPL_CACHE_REFRESH_PERIOD=0
-# default:
-CONFIG_BT_LE_MSYS_INIT_IN_CONTROLLER=y
-# default:
-# CONFIG_BT_LE_TX_CCA_ENABLED is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N15 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N12 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N9 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N6 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N3 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_N0 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_P3 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_P6 is not set
-# default:
-CONFIG_BT_LE_DFT_TX_POWER_LEVEL_P9=y
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_P12 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_P15 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_P18 is not set
-# default:
-# CONFIG_BT_LE_DFT_TX_POWER_LEVEL_P20 is not set
-# default:
-CONFIG_BT_LE_DFT_TX_POWER_LEVEL_DBM_EFF=9
-# default:
-# CONFIG_BT_LE_CTRL_CHECK_CONNECT_IND_ACCESS_ADDRESS is not set
-# default:
-# CONFIG_BT_CTRL_RUN_IN_FLASH_ONLY is not set
-
-#
-# BLE disconnects when Instant Passed (0x28) occurs
-#
-# default:
-# CONFIG_BT_LE_CTRL_LLCP_CONN_UPDATE is not set
-# default:
-# CONFIG_BT_LE_CTRL_LLCP_CHAN_MAP_UPDATE is not set
-# default:
-# CONFIG_BT_LE_CTRL_LLCP_PHY_UPDATE is not set
-# end of BLE disconnects when Instant Passed (0x28) occurs
-
-# default:
-CONFIG_BT_CTRL_SCAN_BACKOFF_UPPERLIMITMAX=32
-# default:
-# CONFIG_BT_LE_CTRL_CHAN_ASS_EN is not set
-# default:
-CONFIG_BT_LE_CTRL_ADV_DATA_LENGTH_ZERO_AUX=y
-# default:
-CONFIG_BT_LE_RXBUF_OPT_ENABLED=y
-# default:
-CONFIG_BT_LE_CTRL_FAST_CONN_DATA_TX_EN=y
-
-#
-# Reserved Memory Config
-#
-# default:
-CONFIG_BT_LE_EXT_ADV_RESERVED_MEMORY_COUNT=2
-# default:
-CONFIG_BT_LE_CONN_RESERVED_MEMORY_COUNT=2
-# end of Reserved Memory Config
-
-# default:
-# CONFIG_BT_LE_DTM_ENABLED is not set
-
-#
-# Scheduling Priority Level Config
-#
-# default:
-CONFIG_BT_LE_ADV_SCHED_PRIO_LOW_LEVEL=y
-# default:
-# CONFIG_BT_LE_ADV_SCHED_PRIO_MID_LEVEL is not set
-# default:
-# CONFIG_BT_LE_ADV_SCHED_PRIO_HIGH_LEVEL is not set
-# default:
-CONFIG_BT_LE_DFT_ADV_SCHED_PRIO_LEVEL=0
-# default:
-# CONFIG_BT_LE_PERIODIC_ADV_SCHED_PRIO_LOW_LEVEL is not set
-# default:
-CONFIG_BT_LE_PERIODIC_ADV_SCHED_PRIO_MID_LEVEL=y
-# default:
-# CONFIG_BT_LE_PERIODIC_ADV_SCHED_PRIO_HIGH_LEVEL is not set
-# default:
-CONFIG_BT_LE_DFT_PERIODIC_ADV_SCHED_PRIO_LEVEL=1
-# default:
-# CONFIG_BT_LE_SYNC_SCHED_PRIO_LOW_LEVEL is not set
-# default:
-CONFIG_BT_LE_SYNC_SCHED_PRIO_MID_LEVEL=y
-# default:
-# CONFIG_BT_LE_SYNC_SCHED_PRIO_HIGH_LEVEL is not set
-# default:
-CONFIG_BT_LE_DFT_SYNC_SCHED_PRIO_LEVEL=1
-# end of Scheduling Priority Level Config
-
-# default:
-# CONFIG_BT_LE_CTRL_SLV_FAST_RX_CONN_DATA_EN is not set
-# default:
-# CONFIG_BT_LE_CTRL_DL_ITVL_PHY_SYNC_EN is not set
-# default:
-# CONFIG_BT_LE_CTRL_ADV_FAST_TX_EN is not set
-
-#
-# Adv Tx Options
-#
-# default:
-# CONFIG_BT_LE_CTRL_ADV_EVENT_INC_ON_FULL_TX_EN is not set
-# default:
-# CONFIG_BT_LE_CTRL_ADV_CH38_39_TX_AVOID_CONFLICT_EN is not set
-# default:
-# CONFIG_BT_LE_ADV_CH39_TXPWR_CONFIG_SEPARATELY_EN is not set
-# default:
-# CONFIG_BT_LE_CTRL_ADV_TX_CONTINUE_WHEN_EXCEED_ITVL_EN is not set
-# default:
-# CONFIG_BT_LE_CTRL_ADV_RAND_CH_IDX_EN is not set
-# end of Adv Tx Options
-# end of Controller Options
-
-# default:
-# CONFIG_BT_HCI_LOG_DEBUG_EN is not set
-# end of Bluetooth
-
-# default:
-# CONFIG_BLE_MESH is not set
-
-#
 # Console Library
 #
 # default:
@@ -1814,44 +1195,6 @@ CONFIG_EFUSE_MAX_BLK_LEN=256
 # end of eFuse Bit Manager
 
 #
-# ESP-TLS
-#
-# default:
-CONFIG_ESP_TLS_USING_MBEDTLS=y
-# default:
-# CONFIG_ESP_TLS_CUSTOM_STACK is not set
-# default:
-# CONFIG_ESP_TLS_USE_SECURE_ELEMENT is not set
-# default:
-CONFIG_ESP_TLS_USE_DS_PERIPHERAL=y
-# default:
-# CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS is not set
-# default:
-# CONFIG_ESP_TLS_SERVER_SESSION_TICKETS is not set
-# default:
-# CONFIG_ESP_TLS_SERVER_CERT_SELECT_HOOK is not set
-# default:
-# CONFIG_ESP_TLS_SERVER_MIN_AUTH_MODE_OPTIONAL is not set
-# default:
-# CONFIG_ESP_TLS_PSK_VERIFICATION is not set
-# default:
-# CONFIG_ESP_TLS_INSECURE is not set
-# default:
-CONFIG_ESP_TLS_DYN_BUF_STRATEGY_SUPPORTED=y
-# end of ESP-TLS
-
-#
-# ADC and ADC Calibration
-#
-# default:
-# CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM is not set
-# default:
-# CONFIG_ADC_CONTINUOUS_ISR_IRAM_SAFE is not set
-# default:
-# CONFIG_ADC_ENABLE_DEBUG_LOG is not set
-# end of ADC and ADC Calibration
-
-#
 # Wireless Coexistence
 #
 # default:
@@ -1862,6 +1205,8 @@ CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
 # CONFIG_ESP_COEX_EXTERNAL_COEXIST_ENABLE is not set
 # default:
 # CONFIG_ESP_COEX_POWER_MANAGEMENT is not set
+# default:
+# CONFIG_ESP_COEX_GPIO_DEBUG is not set
 # end of Wireless Coexistence
 
 #
@@ -1892,138 +1237,6 @@ CONFIG_GDMA_OBJ_DRAM_SAFE=y
 # end of ESP-Driver:GPIO Configurations
 
 #
-# ESP-Driver:GPTimer Configurations
-#
-# default:
-CONFIG_GPTIMER_ISR_HANDLER_IN_IRAM=y
-# default:
-# CONFIG_GPTIMER_CTRL_FUNC_IN_IRAM is not set
-# default:
-# CONFIG_GPTIMER_ISR_CACHE_SAFE is not set
-# default:
-CONFIG_GPTIMER_OBJ_CACHE_SAFE=y
-# default:
-# CONFIG_GPTIMER_ENABLE_DEBUG_LOG is not set
-# end of ESP-Driver:GPTimer Configurations
-
-#
-# ESP-Driver:I2C Configurations
-#
-# default:
-# CONFIG_I2C_ISR_IRAM_SAFE is not set
-# default:
-# CONFIG_I2C_ENABLE_DEBUG_LOG is not set
-# default:
-CONFIG_I2C_MASTER_ISR_HANDLER_IN_IRAM=y
-# end of ESP-Driver:I2C Configurations
-
-#
-# ESP-Driver:I2S Configurations
-#
-# default:
-# CONFIG_I2S_ISR_IRAM_SAFE is not set
-# default:
-# CONFIG_I2S_CTRL_FUNC_IN_IRAM is not set
-# default:
-# CONFIG_I2S_ENABLE_DEBUG_LOG is not set
-# end of ESP-Driver:I2S Configurations
-
-#
-# ESP-Driver:I3C Master Configurations
-#
-# default:
-# CONFIG_I3C_MASTER_ISR_CACHE_SAFE is not set
-# default:
-# CONFIG_I3C_MASTER_ENABLE_DEBUG_LOG is not set
-# default:
-# CONFIG_I3C_MASTER_ISR_HANDLER_IN_IRAM is not set
-# end of ESP-Driver:I3C Master Configurations
-
-#
-# ESP-Driver:LEDC Configurations
-#
-# default:
-# CONFIG_LEDC_CTRL_FUNC_IN_IRAM is not set
-# end of ESP-Driver:LEDC Configurations
-
-#
-# ESP-Driver:MCPWM Configurations
-#
-# default:
-CONFIG_MCPWM_ISR_HANDLER_IN_IRAM=y
-# default:
-# CONFIG_MCPWM_ISR_CACHE_SAFE is not set
-# default:
-# CONFIG_MCPWM_CTRL_FUNC_IN_IRAM is not set
-# default:
-CONFIG_MCPWM_OBJ_CACHE_SAFE=y
-# default:
-# CONFIG_MCPWM_ENABLE_DEBUG_LOG is not set
-# end of ESP-Driver:MCPWM Configurations
-
-#
-# ESP-Driver:Parallel IO Configurations
-#
-# default:
-CONFIG_PARLIO_TX_ISR_HANDLER_IN_IRAM=y
-# default:
-CONFIG_PARLIO_RX_ISR_HANDLER_IN_IRAM=y
-# default:
-# CONFIG_PARLIO_TX_ISR_CACHE_SAFE is not set
-# default:
-# CONFIG_PARLIO_RX_ISR_CACHE_SAFE is not set
-# default:
-CONFIG_PARLIO_OBJ_CACHE_SAFE=y
-# default:
-# CONFIG_PARLIO_ENABLE_DEBUG_LOG is not set
-# default:
-# CONFIG_PARLIO_ISR_IRAM_SAFE is not set
-# end of ESP-Driver:Parallel IO Configurations
-
-#
-# ESP-Driver:PCNT Configurations
-#
-# default:
-# CONFIG_PCNT_CTRL_FUNC_IN_IRAM is not set
-# default:
-# CONFIG_PCNT_ISR_IRAM_SAFE is not set
-# default:
-# CONFIG_PCNT_ENABLE_DEBUG_LOG is not set
-# end of ESP-Driver:PCNT Configurations
-
-#
-# ESP-Driver:RMT Configurations
-#
-# default:
-CONFIG_RMT_ENCODER_FUNC_IN_IRAM=y
-# default:
-CONFIG_RMT_TX_ISR_HANDLER_IN_IRAM=y
-# default:
-CONFIG_RMT_RX_ISR_HANDLER_IN_IRAM=y
-# default:
-# CONFIG_RMT_RECV_FUNC_IN_IRAM is not set
-# default:
-# CONFIG_RMT_TX_ISR_CACHE_SAFE is not set
-# default:
-# CONFIG_RMT_RX_ISR_CACHE_SAFE is not set
-# default:
-CONFIG_RMT_OBJ_CACHE_SAFE=y
-# default:
-# CONFIG_RMT_ENABLE_DEBUG_LOG is not set
-# default:
-# CONFIG_RMT_ISR_IRAM_SAFE is not set
-# end of ESP-Driver:RMT Configurations
-
-#
-# ESP-Driver:Sigma Delta Modulator Configurations
-#
-# default:
-# CONFIG_SDM_CTRL_FUNC_IN_IRAM is not set
-# default:
-# CONFIG_SDM_ENABLE_DEBUG_LOG is not set
-# end of ESP-Driver:Sigma Delta Modulator Configurations
-
-#
 # ESP-Driver:SPI Configurations
 #
 # default:
@@ -2033,28 +1246,6 @@ CONFIG_SPI_MASTER_ISR_IN_IRAM=y
 # default:
 CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
 # end of ESP-Driver:SPI Configurations
-
-#
-# ESP-Driver:Temperature Sensor Configurations
-#
-# default:
-# CONFIG_TEMP_SENSOR_ENABLE_DEBUG_LOG is not set
-# default:
-# CONFIG_TEMP_SENSOR_ISR_IRAM_SAFE is not set
-# end of ESP-Driver:Temperature Sensor Configurations
-
-#
-# ESP-Driver:TWAI Configurations
-#
-# default:
-# CONFIG_TWAI_ISR_IN_IRAM is not set
-# default:
-# CONFIG_TWAI_IO_FUNC_IN_IRAM is not set
-# default:
-# CONFIG_TWAI_ISR_CACHE_SAFE is not set
-# default:
-# CONFIG_TWAI_ENABLE_DEBUG_LOG is not set
-# end of ESP-Driver:TWAI Configurations
 
 #
 # ESP-Driver:UART Configurations
@@ -2079,22 +1270,7 @@ CONFIG_SPI_SLAVE_ISR_IN_IRAM=y
 #
 # default:
 CONFIG_USJ_ENABLE_USB_SERIAL_JTAG=y
-# default:
-# CONFIG_USJ_NO_AUTO_LS_ON_CONNECTION is not set
 # end of ESP-Driver:USB Serial/JTAG Configuration
-
-#
-# Ethernet
-#
-# default:
-CONFIG_ETH_ENABLED=y
-# default:
-CONFIG_ETH_USE_SPI_ETHERNET=y
-# default:
-# CONFIG_ETH_USE_OPENETH is not set
-# default:
-# CONFIG_ETH_TRANSMIT_MUTEX is not set
-# end of Ethernet
 
 #
 # Event Loop Library
@@ -2106,92 +1282,6 @@ CONFIG_ESP_EVENT_POST_FROM_ISR=y
 # default:
 CONFIG_ESP_EVENT_POST_FROM_IRAM_ISR=y
 # end of Event Loop Library
-
-#
-# GDB Stub
-#
-# default:
-CONFIG_ESP_GDBSTUB_ENABLED=y
-# default:
-# CONFIG_ESP_SYSTEM_GDBSTUB_RUNTIME is not set
-# default:
-CONFIG_ESP_GDBSTUB_SUPPORT_TASKS=y
-# default:
-CONFIG_ESP_GDBSTUB_MAX_TASKS=32
-# end of GDB Stub
-
-#
-# ESP HID
-#
-# default:
-CONFIG_ESPHID_TASK_SIZE_BT=2048
-# default:
-CONFIG_ESPHID_TASK_SIZE_BLE=4096
-# end of ESP HID
-
-#
-# ESP HTTP client
-#
-# default:
-CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y
-# default:
-# CONFIG_ESP_HTTP_CLIENT_ENABLE_BASIC_AUTH is not set
-# default:
-# CONFIG_ESP_HTTP_CLIENT_ENABLE_DIGEST_AUTH is not set
-# default:
-# CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT is not set
-# default:
-# CONFIG_ESP_HTTP_CLIENT_ENABLE_GET_CONTENT_RANGE is not set
-# default:
-CONFIG_ESP_HTTP_CLIENT_EVENT_POST_TIMEOUT=2000
-# default:
-# CONFIG_ESP_HTTP_CLIENT_SAVE_RESPONSE_HEADERS is not set
-# end of ESP HTTP client
-
-#
-# HTTP Server
-#
-# default:
-CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
-# default:
-CONFIG_HTTPD_MAX_URI_LEN=512
-# default:
-CONFIG_HTTPD_ERR_RESP_NO_DELAY=y
-# default:
-CONFIG_HTTPD_PURGE_BUF_LEN=32
-# default:
-# CONFIG_HTTPD_LOG_PURGE_DATA is not set
-# default:
-# CONFIG_HTTPD_WS_SUPPORT is not set
-# default:
-# CONFIG_HTTPD_QUEUE_WORK_BLOCKING is not set
-# default:
-CONFIG_HTTPD_SERVER_EVENT_POST_TIMEOUT=2000
-# end of HTTP Server
-
-#
-# ESP HTTPS OTA
-#
-# default:
-# CONFIG_ESP_HTTPS_OTA_DECRYPT_CB is not set
-# default:
-# CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP is not set
-# default:
-CONFIG_ESP_HTTPS_OTA_EVENT_POST_TIMEOUT=2000
-# default:
-# CONFIG_ESP_HTTPS_OTA_ENABLE_PARTIAL_DOWNLOAD is not set
-# end of ESP HTTPS OTA
-
-#
-# ESP HTTPS server
-#
-# default:
-# CONFIG_ESP_HTTPS_SERVER_ENABLE is not set
-# default:
-CONFIG_ESP_HTTPS_SERVER_EVENT_POST_TIMEOUT=2000
-# default:
-# CONFIG_ESP_HTTPS_SERVER_CERT_SELECT_HOOK is not set
-# end of ESP HTTPS server
 
 #
 # Hardware Settings
@@ -2276,8 +1366,6 @@ CONFIG_ESP_SLEEP_WAIT_FLASH_READY_EXTRA_DELAY=0
 # CONFIG_ESP_SLEEP_DEBUG is not set
 # default:
 CONFIG_ESP_SLEEP_GPIO_ENABLE_INTERNAL_RESISTORS=y
-# default:
-# CONFIG_ESP_SLEEP_EVENT_CALLBACKS is not set
 # end of Sleep Config
 
 #
@@ -2359,13 +1447,6 @@ CONFIG_ESP_SPI_BUS_LOCK_ISR_FUNCS_IN_IRAM=y
 # default:
 CONFIG_ESP_INTR_IN_IRAM=y
 # end of Hardware Settings
-
-#
-# ESP-Driver:LCD Controller Configurations
-#
-# default:
-# CONFIG_LCD_ENABLE_DEBUG_LOG is not set
-# end of ESP-Driver:LCD Controller Configurations
 
 #
 # LibC
@@ -2457,8 +1538,6 @@ CONFIG_ESP_PHY_MAX_WIFI_TX_POWER=20
 # default:
 CONFIG_ESP_PHY_MAX_TX_POWER=20
 # default:
-# CONFIG_ESP_PHY_MAC_BB_PD is not set
-# default:
 # CONFIG_ESP_PHY_REDUCE_TX_POWER is not set
 # default:
 # CONFIG_ESP_PHY_ENABLE_CERT_TEST is not set
@@ -2489,22 +1568,12 @@ CONFIG_ESP_PHY_ENABLE_VERSION_PRINT=y
 #
 # default:
 CONFIG_PM_SLEEP_FUNC_IN_IRAM=y
-CONFIG_PM_ENABLE=y
-CONFIG_PM_DFS_INIT_AUTO=y
 # default:
-# CONFIG_PM_PROFILING is not set
-# default:
-# CONFIG_PM_TRACE is not set
+# CONFIG_PM_ENABLE is not set
 # default:
 CONFIG_PM_SLP_IRAM_OPT=y
 # default:
-CONFIG_PM_RTOS_IDLE_OPT=y
-# default:
-CONFIG_PM_SLP_DISABLE_GPIO=y
-# default:
 CONFIG_PM_SLP_DEFAULT_PARAMS_OPT=y
-# default:
-CONFIG_PM_LIGHTSLEEP_RTC_OSC_CAL_INTERVAL=1
 # default:
 CONFIG_PM_POWER_DOWN_CPU_IN_LIGHT_SLEEP=y
 # default:
@@ -2515,10 +1584,6 @@ CONFIG_PM_CPU_RETENTION_DYNAMIC=y
 # CONFIG_PM_POWER_DOWN_PERIPHERAL_IN_LIGHT_SLEEP is not set
 # default:
 CONFIG_PM_ESP_SLEEP_POWER_DOWN_CPU=y
-# default:
-# CONFIG_PM_LIGHT_SLEEP_CALLBACKS is not set
-# default:
-# CONFIG_PM_LIGHTSLEEP_TICK_OVERFLOW_PROTECTION is not set
 # end of Power Management
 
 #
@@ -2608,8 +1673,6 @@ CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
 # default:
 # CONFIG_ESP_SYSTEM_PANIC_SILENT_REBOOT is not set
 # default:
-# CONFIG_ESP_SYSTEM_PANIC_GDBSTUB is not set
-# default:
 CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=0
 # default:
 CONFIG_ESP_SYSTEM_SINGLE_CORE_MODE=y
@@ -2633,8 +1696,7 @@ CONFIG_ESP_SYSTEM_MEMPROT_PMP=y
 CONFIG_ESP_SYSTEM_EVENT_QUEUE_SIZE=32
 # default:
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=2304
-# default:
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=3584
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 # default:
 CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
 # default:
@@ -2710,23 +1772,6 @@ CONFIG_ESP_TIMER_ISR_AFFINITY_CPU0=y
 # default:
 CONFIG_ESP_TIMER_IMPL_SYSTIMER=y
 # end of ESP Timer (High Resolution Timer)
-
-#
-# ESP Trace Configuration
-#
-# default:
-# CONFIG_ESP_TRACE_LIB_EXTERNAL is not set
-# default:
-CONFIG_ESP_TRACE_LIB_NONE=y
-# default:
-CONFIG_ESP_TRACE_LIB_NAME="none"
-# default:
-# CONFIG_ESP_TRACE_TRANSPORT_APPTRACE is not set
-# default:
-CONFIG_ESP_TRACE_TRANSPORT_NONE=y
-# default:
-CONFIG_ESP_TRACE_TRANSPORT_NAME="none"
-# end of ESP Trace Configuration
 
 #
 # Wi-Fi
@@ -2858,119 +1903,6 @@ CONFIG_ESP_WIFI_ENTERPRISE_SUPPORT=y
 # end of Wi-Fi
 
 #
-# Core dump
-#
-# default:
-# CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is not set
-# default:
-# CONFIG_ESP_COREDUMP_ENABLE_TO_UART is not set
-# default:
-CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y
-# end of Core dump
-
-#
-# FAT Filesystem support
-#
-# default:
-CONFIG_FATFS_VOLUME_COUNT=2
-# default:
-# CONFIG_FATFS_LFN_NONE is not set
-# default:
-CONFIG_FATFS_LFN_HEAP=y
-# default:
-# CONFIG_FATFS_LFN_STACK is not set
-# default:
-# CONFIG_FATFS_SECTOR_512 is not set
-# default:
-CONFIG_FATFS_SECTOR_4096=y
-# default:
-# CONFIG_FATFS_CODEPAGE_DYNAMIC is not set
-# default:
-CONFIG_FATFS_CODEPAGE_437=y
-# default:
-# CONFIG_FATFS_CODEPAGE_720 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_737 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_771 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_775 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_850 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_852 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_855 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_857 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_860 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_861 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_862 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_863 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_864 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_865 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_866 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_869 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_932 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_936 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_949 is not set
-# default:
-# CONFIG_FATFS_CODEPAGE_950 is not set
-# default:
-CONFIG_FATFS_CODEPAGE=437
-# default:
-CONFIG_FATFS_MAX_LFN=255
-# default:
-CONFIG_FATFS_API_ENCODING_ANSI_OEM=y
-# default:
-# CONFIG_FATFS_API_ENCODING_UTF_8 is not set
-# default:
-CONFIG_FATFS_FS_LOCK=0
-# default:
-CONFIG_FATFS_TIMEOUT_MS=10000
-# default:
-CONFIG_FATFS_PER_FILE_CACHE=y
-# default:
-# CONFIG_FATFS_USE_FASTSEEK is not set
-# default:
-CONFIG_FATFS_USE_STRFUNC_NONE=y
-# default:
-# CONFIG_FATFS_USE_STRFUNC_WITHOUT_CRLF_CONV is not set
-# default:
-# CONFIG_FATFS_USE_STRFUNC_WITH_CRLF_CONV is not set
-# default:
-CONFIG_FATFS_VFS_FSTAT_BLKSIZE=0
-# default:
-# CONFIG_FATFS_IMMEDIATE_FSYNC is not set
-# default:
-# CONFIG_FATFS_USE_LABEL is not set
-# default:
-CONFIG_FATFS_LINK_LOCK=y
-# default:
-CONFIG_FATFS_USE_DYN_BUFFERS=y
-
-#
-# File system free space calculation behavior
-#
-# default:
-CONFIG_FATFS_DONT_TRUST_FREE_CLUSTER_CNT=0
-# default:
-CONFIG_FATFS_DONT_TRUST_LAST_ALLOC=0
-# end of File system free space calculation behavior
-# end of FAT Filesystem support
-
-#
 # FreeRTOS
 #
 
@@ -3021,16 +1953,14 @@ CONFIG_FREERTOS_TIMER_TASK_STACK_DEPTH=2048
 CONFIG_FREERTOS_TIMER_QUEUE_LENGTH=10
 # default:
 CONFIG_FREERTOS_QUEUE_REGISTRY_SIZE=0
-CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=2
+# default:
+CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=1
 # default:
 # CONFIG_FREERTOS_USE_TRACE_FACILITY is not set
 # default:
 # CONFIG_FREERTOS_USE_LIST_DATA_INTEGRITY_CHECK_BYTES is not set
 # default:
 # CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS is not set
-CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
-# default:
-CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
 # default:
 # CONFIG_FREERTOS_USE_APPLICATION_TASK_TAG is not set
 # end of Kernel
@@ -3038,6 +1968,8 @@ CONFIG_FREERTOS_IDLE_TIME_BEFORE_SLEEP=3
 #
 # Port
 #
+# default:
+CONFIG_FREERTOS_TASK_FUNCTION_WRAPPER=y
 # default:
 # CONFIG_FREERTOS_WATCHPOINT_END_OF_STACK is not set
 # default:
@@ -3156,8 +2088,6 @@ CONFIG_IEEE802154_PENDING_TABLE_SIZE=20
 CONFIG_IEEE802154_INTERFACE_NUM=1
 # default:
 CONFIG_IEEE802154_TIMING_OPTIMIZATION=y
-# default:
-# CONFIG_IEEE802154_SLEEP_ENABLE is not set
 # default:
 # CONFIG_IEEE802154_DEBUG is not set
 # end of IEEE 802.15.4
@@ -3652,9 +2582,30 @@ CONFIG_MBEDTLS_X509_RSASSA_PSS_SUPPORT=y
 CONFIG_MBEDTLS_ASN1_PARSE_C=y
 # default:
 CONFIG_MBEDTLS_ASN1_WRITE_C=y
-# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE is not set
+# default:
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+#
+# Certificate Bundle Configuration
+#
+# default:
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+# default:
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN is not set
+# default:
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_NONE is not set
+# default:
+# CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE is not set
+# default:
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEPRECATED_LIST is not set
+# default:
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_MAX_CERTS=200
+# end of Certificate Bundle Configuration
+
 # default:
 # CONFIG_MBEDTLS_ALLOW_WEAK_CERTIFICATE_VERIFICATION is not set
+# default:
+# CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY is not set
 # end of Certificates
 
 # default:
@@ -3766,6 +2717,7 @@ CONFIG_MBEDTLS_CMAC_C=y
 #
 # default:
 CONFIG_MBEDTLS_RSA_C=y
+# default:
 CONFIG_MBEDTLS_ECP_C=y
 
 #
@@ -3785,6 +2737,7 @@ CONFIG_MBEDTLS_ECP_DP_BP256R1_ENABLED=y
 CONFIG_MBEDTLS_ECP_DP_BP384R1_ENABLED=y
 # default:
 CONFIG_MBEDTLS_ECP_DP_BP512R1_ENABLED=y
+# default:
 CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
 # end of Supported Curves
 
@@ -3797,6 +2750,7 @@ CONFIG_MBEDTLS_ECP_NIST_OPTIM=y
 # CONFIG_MBEDTLS_ECP_FIXED_POINT_OPTIM is not set
 # default:
 # CONFIG_MBEDTLS_DHM_C is not set
+# default:
 CONFIG_MBEDTLS_ECDH_C=y
 # default:
 # CONFIG_MBEDTLS_ECJPAKE_C is not set
@@ -3872,7 +2826,7 @@ CONFIG_MBEDTLS_AES_HW_SMALL_DATA_LEN_OPTIM=y
 # default:
 # CONFIG_MBEDTLS_ATCA_HW_ECDSA_VERIFY is not set
 # default:
-CONFIG_MBEDTLS_HARDWARE_RSA_DS_PERIPHERAL=y
+# CONFIG_MBEDTLS_HARDWARE_RSA_DS_PERIPHERAL is not set
 # end of Hardware Acceleration
 
 #
@@ -3904,15 +2858,16 @@ CONFIG_MBEDTLS_PKCS1_V21=y
 #
 # Stream Cipher
 #
-CONFIG_MBEDTLS_CHACHAPOLY_C=y
-CONFIG_MBEDTLS_CHACHA20_C=y
+# default:
+# CONFIG_MBEDTLS_CHACHA20_C is not set
 # end of Stream Cipher
 # end of mbedTLS
 
 #
 # NVS
 #
-CONFIG_NVS_ENCRYPTION=y
+# default:
+# CONFIG_NVS_ENCRYPTION is not set
 # default:
 # CONFIG_NVS_ASSERT_ERROR_CHECK is not set
 # default:
@@ -3922,16 +2877,6 @@ CONFIG_NVS_ENCRYPTION=y
 # default:
 # CONFIG_NVS_FLASH_VERIFY_ERASE is not set
 # end of NVS
-
-#
-# NVS Security Provider
-#
-# default:
-CONFIG_NVS_SEC_KEY_PROTECT_USING_HMAC=y
-# default:
-# CONFIG_NVS_SEC_KEY_PROTECT_NONE is not set
-CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0
-# end of NVS Security Provider
 
 #
 # OpenThread
@@ -3951,19 +2896,6 @@ CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0
 # end of OpenThread
 
 #
-# Protocomm
-#
-# default:
-# CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_0 is not set
-# default:
-# CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_1 is not set
-# default:
-CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_2=y
-# default:
-CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_PATCH_VERSION=y
-# end of Protocomm
-
-#
 # PThreads
 #
 # default:
@@ -3977,13 +2909,6 @@ CONFIG_PTHREAD_TASK_CORE_DEFAULT=-1
 # default:
 CONFIG_PTHREAD_TASK_NAME_DEFAULT="pthread"
 # end of PThreads
-
-#
-# SD Protocol Layer Configuration
-#
-# default:
-CONFIG_SD_ENABLE_SDIO_SUPPORT=y
-# end of SD Protocol Layer Configuration
 
 #
 # MMU Config
@@ -4087,109 +3012,6 @@ CONFIG_SPI_FLASH_ENABLE_ENCRYPTED_READ_WRITE=y
 # end of SPI Flash driver
 
 #
-# SPIFFS Configuration
-#
-# default:
-CONFIG_SPIFFS_MAX_PARTITIONS=3
-
-#
-# SPIFFS Cache Configuration
-#
-# default:
-CONFIG_SPIFFS_CACHE=y
-# default:
-CONFIG_SPIFFS_CACHE_WR=y
-# default:
-# CONFIG_SPIFFS_CACHE_STATS is not set
-# end of SPIFFS Cache Configuration
-
-# default:
-CONFIG_SPIFFS_PAGE_CHECK=y
-# default:
-CONFIG_SPIFFS_GC_MAX_RUNS=10
-# default:
-# CONFIG_SPIFFS_GC_STATS is not set
-# default:
-CONFIG_SPIFFS_PAGE_SIZE=256
-# default:
-CONFIG_SPIFFS_OBJ_NAME_LEN=32
-# default:
-# CONFIG_SPIFFS_FOLLOW_SYMLINKS is not set
-# default:
-CONFIG_SPIFFS_USE_MAGIC=y
-# default:
-CONFIG_SPIFFS_USE_MAGIC_LENGTH=y
-# default:
-CONFIG_SPIFFS_META_LENGTH=4
-# default:
-CONFIG_SPIFFS_USE_MTIME=y
-
-#
-# Debug Configuration
-#
-# default:
-# CONFIG_SPIFFS_DBG is not set
-# default:
-# CONFIG_SPIFFS_API_DBG is not set
-# default:
-# CONFIG_SPIFFS_GC_DBG is not set
-# default:
-# CONFIG_SPIFFS_CACHE_DBG is not set
-# default:
-# CONFIG_SPIFFS_CHECK_DBG is not set
-# default:
-# CONFIG_SPIFFS_TEST_VISUALISATION is not set
-# end of Debug Configuration
-# end of SPIFFS Configuration
-
-#
-# TCP Transport
-#
-
-#
-# Websocket
-#
-# default:
-CONFIG_WS_TRANSPORT=y
-# default:
-CONFIG_WS_BUFFER_SIZE=1024
-# default:
-# CONFIG_WS_DYNAMIC_BUFFER is not set
-# end of Websocket
-# end of TCP Transport
-
-#
-# Ultra Low Power (ULP) Co-processor
-#
-# default:
-# CONFIG_ULP_COPROC_ENABLED is not set
-
-#
-# ULP Debugging Options
-#
-# end of ULP Debugging Options
-# end of Ultra Low Power (ULP) Co-processor
-
-#
-# Unity unit testing library
-#
-# default:
-CONFIG_UNITY_ENABLE_FLOAT=y
-# default:
-CONFIG_UNITY_ENABLE_DOUBLE=y
-# default:
-# CONFIG_UNITY_ENABLE_64BIT is not set
-# default:
-# CONFIG_UNITY_ENABLE_COLOR is not set
-# default:
-CONFIG_UNITY_ENABLE_IDF_TEST_RUNNER=y
-# default:
-# CONFIG_UNITY_ENABLE_FIXTURE is not set
-# default:
-# CONFIG_UNITY_ENABLE_BACKTRACE_ON_FAIL is not set
-# end of Unity unit testing library
-
-#
 # Virtual file system
 #
 # default:
@@ -4221,17 +3043,6 @@ CONFIG_VFS_INITIALIZE_DEV_NULL=y
 # end of Virtual file system
 
 #
-# Wear Levelling
-#
-# default:
-# CONFIG_WL_SECTOR_SIZE_512 is not set
-# default:
-CONFIG_WL_SECTOR_SIZE_4096=y
-# default:
-CONFIG_WL_SECTOR_SIZE=4096
-# end of Wear Levelling
-
-#
 # SDF Config
 #
 
@@ -4244,24 +3055,38 @@ CONFIG_SDF_PLATFORM_ENABLE_LIGHT_SLEEP=y
 # CONFIG_SDF_PLATFORM_ENABLE_DEEP_SLEEP is not set
 # default:
 CONFIG_SDF_PLATFORM_NVS_ENCRYPTION=y
+# default:
 CONFIG_SDF_PLATFORM_WDT_TIMEOUT_MS=15000
+# default:
 CONFIG_SDF_WS2812_LED_GPIO=8
+# default:
 CONFIG_SDF_ENROLLMENT_BTN_GPIO=4
+# default:
 CONFIG_SDF_BATTERY_ADC_PIN=5
 # end of Platform
 
 #
 # Power
 #
+# default:
 CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS=15000
+# default:
 CONFIG_SDF_POWER_IDLE_BEFORE_SLEEP_MS=5000
+# default:
 CONFIG_SDF_POWER_POST_WAKE_GUARD_MS=1500
+# default:
 CONFIG_SDF_POWER_LOOP_INTERVAL_MS=250
+# default:
 CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS=60000
+# default:
 CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT=100
+# default:
 CONFIG_SDF_POWER_FP_WAKE_GPIO=3
+# default:
 CONFIG_SDF_POWER_FP_EN_GPIO=2
+# default:
 CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP=y
+# default:
 CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING=y
 
 #
@@ -4287,46 +3112,66 @@ CONFIG_SDF_POWER_RETENTION_SIZE=256
 #
 # Fingerprint
 #
+# default:
 CONFIG_SDF_FP_TX_PIN=0
+# default:
 CONFIG_SDF_FP_RX_PIN=1
+# default:
 CONFIG_SDF_FP_UART_PORT=1
+# default:
 CONFIG_SDF_FP_BAUD_RATE=115200
+# default:
 CONFIG_SDF_FP_RESPONSE_TIMEOUT_MS=12000
+# default:
 CONFIG_SDF_FP_RX_BUFFER_SIZE=256
+# default:
 CONFIG_SDF_FP_TX_BUFFER_SIZE=256
 # end of Fingerprint
 
 #
 # Security
 #
+# default:
 CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW=8
+# default:
 CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_THRESHOLD=5
+# default:
 CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_WINDOW_MS=60000
+# default:
 CONFIG_SDF_SECURITY_BIOMETRIC_LOCKOUT_MS=120000
+# default:
 CONFIG_SDF_SECURITY_REQUIRE_ENCRYPTED_NVS=y
 # end of Security
 
 #
 # Match
 #
+# default:
 CONFIG_SDF_MATCH_POLL_INTERVAL_MS=400
+# default:
 CONFIG_SDF_MATCH_COOLDOWN_MS=3000
 # end of Match
 
 #
 # OTA
 #
+# default:
 CONFIG_SDF_OTA_ENABLE=y
+# default:
 CONFIG_SDF_OTA_ALLOW_DOWNGRADE=y
+# default:
 CONFIG_SDF_OTA_BOOTLOADER_ROLLBACK=y
+# default:
 CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS=24
 # end of OTA
 
 #
 # BLE
 #
-# CONFIG_SDF_BLE_CONNECTION_MODE_ALWAYS_CONNECTED is not set
-CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND=y
+# default:
+CONFIG_SDF_BLE_CONNECTION_MODE_ALWAYS_CONNECTED=y
+# default:
+# CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND is not set
 # default:
 CONFIG_SDF_BLE_CONNECT_TIMEOUT_MS=10000
 # default:
@@ -4340,8 +3185,11 @@ CONFIG_SDF_BLE_RECONNECT_MAX_RETRIES=10
 #
 # Zigbee
 #
+# default:
 CONFIG_SDF_ZIGBEE_ENABLE=y
+# default:
 CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS=20
+# default:
 CONFIG_SDF_ZIGBEE_SLEEP_ENABLE=y
 # end of Zigbee
 
@@ -4372,53 +3220,6 @@ CONFIG_SDF_CONFIG_VALIDATE_AT_BOOT=y
 # CONFIG_SDF_CONFIG_DEBUG_LOG is not set
 # end of Config
 # end of SDF Config
-
-#
-# IoT Button
-#
-# default:
-CONFIG_BUTTON_PERIOD_TIME_MS=5
-# default:
-CONFIG_BUTTON_DEBOUNCE_TICKS=2
-# default:
-CONFIG_BUTTON_SHORT_PRESS_TIME_MS=180
-# default:
-CONFIG_BUTTON_LONG_PRESS_TIME_MS=1500
-# default:
-CONFIG_BUTTON_LONG_PRESS_HOLD_SERIAL_TIME_MS=20
-# default:
-CONFIG_ADC_BUTTON_MAX_CHANNEL=3
-# default:
-CONFIG_ADC_BUTTON_MAX_BUTTON_PER_CHANNEL=8
-# default:
-CONFIG_ADC_BUTTON_SAMPLE_TIMES=1
-# end of IoT Button
-
-#
-# cJSON
-#
-# default:
-CONFIG_CJSON_NESTING_LIMIT=1000
-# default:
-CONFIG_CJSON_CIRCULAR_LIMIT=10000
-# end of cJSON
-
-#
-# CMake Utilities
-#
-# default:
-# CONFIG_CU_RELINKER_ENABLE is not set
-# default:
-# CONFIG_CU_DIAGNOSTICS_COLOR_NEVER is not set
-# default:
-CONFIG_CU_DIAGNOSTICS_COLOR_ALWAYS=y
-# default:
-# CONFIG_CU_DIAGNOSTICS_COLOR_AUTO is not set
-# default:
-# CONFIG_CU_GCC_LTO_ENABLE is not set
-# default:
-# CONFIG_CU_GCC_STRING_1BYTE_ALIGN is not set
-# end of CMake Utilities
 
 #
 # Zigbee
@@ -4464,11 +3265,11 @@ CONFIG_LOG_BOOTLOADER_LEVEL=3
 CONFIG_FLASHMODE_DIO=y
 # CONFIG_FLASHMODE_DOUT is not set
 CONFIG_MONITOR_BAUD=115200
-# CONFIG_OPTIMIZATION_LEVEL_DEBUG is not set
-# CONFIG_COMPILER_OPTIMIZATION_LEVEL_DEBUG is not set
-# CONFIG_COMPILER_OPTIMIZATION_DEFAULT is not set
-CONFIG_OPTIMIZATION_LEVEL_RELEASE=y
-CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE=y
+CONFIG_OPTIMIZATION_LEVEL_DEBUG=y
+CONFIG_COMPILER_OPTIMIZATION_LEVEL_DEBUG=y
+CONFIG_COMPILER_OPTIMIZATION_DEFAULT=y
+# CONFIG_OPTIMIZATION_LEVEL_RELEASE is not set
+# CONFIG_COMPILER_OPTIMIZATION_LEVEL_RELEASE is not set
 CONFIG_OPTIMIZATION_ASSERTIONS_ENABLED=y
 # CONFIG_OPTIMIZATION_ASSERTIONS_SILENT is not set
 # CONFIG_OPTIMIZATION_ASSERTIONS_DISABLED is not set
@@ -4479,55 +3280,14 @@ CONFIG_STACK_CHECK_NONE=y
 # CONFIG_STACK_CHECK_STRONG is not set
 # CONFIG_STACK_CHECK_ALL is not set
 # CONFIG_WARN_WRITE_STRINGS is not set
-# CONFIG_BLUEDROID_ENABLED is not set
-CONFIG_NIMBLE_ENABLED=y
-CONFIG_NIMBLE_MEM_ALLOC_MODE_INTERNAL=y
-# CONFIG_NIMBLE_MEM_ALLOC_MODE_DEFAULT is not set
-CONFIG_NIMBLE_PINNED_TO_CORE=0
-CONFIG_NIMBLE_TASK_STACK_SIZE=4096
-CONFIG_BT_NIMBLE_TASK_STACK_SIZE=4096
-CONFIG_NIMBLE_ROLE_CENTRAL=y
-CONFIG_NIMBLE_ROLE_PERIPHERAL=y
-CONFIG_NIMBLE_ROLE_BROADCASTER=y
-CONFIG_NIMBLE_ROLE_OBSERVER=y
-CONFIG_NIMBLE_SM_LEGACY=y
-CONFIG_NIMBLE_SM_SC=y
-# CONFIG_NIMBLE_SM_SC_DEBUG_KEYS is not set
-CONFIG_BT_NIMBLE_SM_SC_LVL=0
-CONFIG_NIMBLE_NVS_PERSIST=y
-CONFIG_NIMBLE_MAX_BONDS=3
-CONFIG_NIMBLE_RPA_TIMEOUT=900
-CONFIG_NIMBLE_MAX_CONNECTIONS=3
-CONFIG_NIMBLE_MAX_CCCDS=16
-# CONFIG_NIMBLE_CRYPTO_STACK_MBEDTLS is not set
-CONFIG_NIMBLE_ATT_PREFERRED_MTU=256
-CONFIG_NIMBLE_L2CAP_COC_MAX_NUM=0
-CONFIG_BT_NIMBLE_MSYS1_BLOCK_COUNT=24
-CONFIG_BT_NIMBLE_ACL_BUF_COUNT=24
-CONFIG_BT_NIMBLE_ACL_BUF_SIZE=255
-CONFIG_BT_NIMBLE_HCI_EVT_BUF_SIZE=70
-CONFIG_BT_NIMBLE_HCI_EVT_HI_BUF_COUNT=30
-CONFIG_BT_NIMBLE_HCI_EVT_LO_BUF_COUNT=8
-CONFIG_NIMBLE_SVC_GAP_DEVICE_NAME="nimble"
-CONFIG_NIMBLE_GAP_DEVICE_NAME_MAX_LEN=31
-CONFIG_NIMBLE_SVC_GAP_APPEARANCE=0x0
-# CONFIG_NIMBLE_MESH is not set
-# CONFIG_NIMBLE_DEBUG is not set
-# CONFIG_BT_NIMBLE_COEX_PHY_CODED_TX_RX_TLIM_EN is not set
-CONFIG_BT_NIMBLE_COEX_PHY_CODED_TX_RX_TLIM_DIS=y
 CONFIG_SW_COEXIST_ENABLE=y
 CONFIG_ESP32_WIFI_SW_COEXIST_ENABLE=y
 CONFIG_ESP_WIFI_SW_COEXIST_ENABLE=y
 # CONFIG_EXTERNAL_COEX_ENABLE is not set
 # CONFIG_ESP_WIFI_EXTERNAL_COEXIST_ENABLE is not set
-# CONFIG_GPTIMER_ISR_IRAM_SAFE is not set
-# CONFIG_MCPWM_ISR_IRAM_SAFE is not set
 # CONFIG_EVENT_LOOP_PROFILING is not set
 CONFIG_POST_EVENTS_FROM_ISR=y
 CONFIG_POST_EVENTS_FROM_IRAM_ISR=y
-CONFIG_GDBSTUB_SUPPORT_TASKS=y
-CONFIG_GDBSTUB_MAX_TASKS=32
-# CONFIG_OTA_ALLOW_HTTP is not set
 # CONFIG_ESP_SYSTEM_PD_FLASH is not set
 CONFIG_PERIPH_CTRL_FUNC_IN_IRAM=y
 CONFIG_BROWNOUT_DET=y
@@ -4553,8 +3313,6 @@ CONFIG_ESP32_PHY_CALIBRATION_AND_DATA_STORAGE=y
 # CONFIG_ESP32_PHY_INIT_DATA_IN_PARTITION is not set
 CONFIG_ESP32_PHY_MAX_WIFI_TX_POWER=20
 CONFIG_ESP32_PHY_MAX_TX_POWER=20
-# CONFIG_MAC_BB_PD is not set
-# CONFIG_ESP32_PHY_MAC_BB_PD is not set
 # CONFIG_REDUCE_PHY_TX_POWER is not set
 # CONFIG_ESP32_REDUCE_PHY_TX_POWER is not set
 CONFIG_ESP_SYSTEM_PM_POWER_DOWN_CPU=y
@@ -4571,7 +3329,7 @@ CONFIG_ESP_SYSTEM_MEMPROT_FEATURE=y
 # CONFIG_ESP_SYSTEM_PMP_LP_CORE_RESERVE_MEM_EXECUTABLE is not set
 CONFIG_SYSTEM_EVENT_QUEUE_SIZE=32
 CONFIG_SYSTEM_EVENT_TASK_STACK_SIZE=2304
-CONFIG_MAIN_TASK_STACK_SIZE=3584
+CONFIG_MAIN_TASK_STACK_SIZE=16384
 CONFIG_INT_WDT=y
 CONFIG_INT_WDT_TIMEOUT_MS=300
 CONFIG_TASK_WDT=y
@@ -4582,7 +3340,6 @@ CONFIG_TASK_WDT_CHECK_IDLE_TASK_CPU0=y
 # CONFIG_ESP32_DEBUG_STUBS_ENABLE is not set
 CONFIG_IPC_TASK_STACK_SIZE=1024
 CONFIG_TIMER_TASK_STACK_SIZE=3584
-# CONFIG_ESP32_APPTRACE_ENABLE is not set
 CONFIG_ESP32_WIFI_ENABLED=y
 CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM=10
 CONFIG_ESP32_WIFI_DYNAMIC_RX_BUFFER_NUM=32
@@ -4613,9 +3370,6 @@ CONFIG_WPA_MBEDTLS_TLS_CLIENT=y
 # CONFIG_WPA_WPS_SOFTAP_REGISTRAR is not set
 # CONFIG_WPA_WPS_STRICT is not set
 # CONFIG_WPA_DEBUG_PRINT is not set
-# CONFIG_ESP32_ENABLE_COREDUMP_TO_FLASH is not set
-# CONFIG_ESP32_ENABLE_COREDUMP_TO_UART is not set
-CONFIG_ESP32_ENABLE_COREDUMP_TO_NONE=y
 CONFIG_TIMER_TASK_PRIORITY=1
 CONFIG_TIMER_TASK_STACK_DEPTH=2048
 CONFIG_TIMER_QUEUE_LENGTH=10

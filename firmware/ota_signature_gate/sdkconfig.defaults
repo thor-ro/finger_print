@@ -1,0 +1,51 @@
+CONFIG_IDF_TARGET="esp32c6"
+CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="8MB"
+
+# Custom partition table (D4): own ota_0/ota_1 pair sized like
+# firmware/test_runner's hw variant, plus the `fixtures` data partition that
+# carries the pre-staged images. firmware/partition_table.csv is untouched.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partition_table.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partition_table.csv"
+
+# Same IDF signed-app OTA scheme as firmware/sdkconfig.defaults
+# (adopt-idf-signed-app-ota): CONFIG_SECURE_BOOT stays unset (no eFuse
+# burned), CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT (default y, below)
+# is what actually gates esp_ota_end()'s call into esp_image_verify() -
+# see bootloader/Kconfig.projbuild:608-620. The signing key path is relative
+# to this project directory (firmware/ota_signature_gate/), two levels up
+# from the repo root, unlike firmware/'s "../ota_signing_key.pem" which is
+# only one level up.
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_ECDSA_V2_SCHEME=y
+CONFIG_SECURE_BOOT_ECDSA_KEY_LEN_256_BITS=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="../../ota_signing_key.pem"
+
+# sdf_ota.c's verify_and_commit calls esp_ota_mark_app_valid_cancel_rollback()
+# under CONFIG_SDF_OTA_BOOTLOADER_ROLLBACK (default y); needs the bootloader
+# built with rollback support to behave as production does.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_WDT_ENABLE=y
+CONFIG_BOOTLOADER_WDT_TIME_MS=90000
+
+# sdf_protocol_zigbee.c includes esp_zigbee_core.h unconditionally for any
+# non-linux target (it is pulled in transitively via sdf_config, which
+# sdf_ota PRIV_REQUIRES) - it needs the zigbee stack's own Kconfig answered
+# the same way production answers it, even though this fixture never starts
+# the zigbee stack.
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZED=y
+
+CONFIG_ESP_WIFI_ENABLED=n
+
+# The three signature cases each hold a 4 KB flash-read buffer; give the
+# main task the headroom test_runner's hw config needed for its own
+# multi-KB buffers rather than the ~3.5 KB default.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL=3

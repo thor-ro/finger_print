@@ -1,0 +1,18 @@
+# Name,   Type, SubType, Offset,  Size,  Flags
+#
+# Own partition table for the ble_ota_gate fixture (D4): firmware/
+# partition_table.csv is production's and stays untouched. Layout is an
+# exact copy of production's (firmware/partition_table.csv) - this fixture
+# links the full sdf_app closure with the same footprint (BLE + Zigbee +
+# storage), so it needs the same ota_0/ota_1 sizing and the same nvs_keys
+# partition (CONFIG_NVS_ENCRYPTION=y is carried over unchanged from
+# production's sdkconfig.defaults).
+nvs,      data, nvs,     0x9000,  0x6000,
+phy_init, data, phy,     0xF000,  0x1000,
+otadata,  data, ota,     0x10000,  0x2000,
+# NVS keys partition for encrypted NVS
+nvs_keys, data, nvs_keys, 0x12000,  0x1000,
+ota_0,    app,  ota_0,   0x20000,  0x1F0000,
+ota_1,    app,  ota_1,   0x210000, 0x1EB000,
+zb_storage, data, fat,   0x3FB000, 0x4000,
+zb_fct,     data, fat,   0x3FF000, 0x1000,

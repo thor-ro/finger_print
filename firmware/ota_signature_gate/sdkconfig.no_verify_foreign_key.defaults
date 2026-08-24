@@ -1,0 +1,10 @@
+# Task 4.4 regression check only - never used for the real gate. Layered on
+# top of sdkconfig.defaults and sdkconfig.no_verify.defaults (via
+# -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.no_verify.defaults;
+# sdkconfig.no_verify_foreign_key.defaults"). Selects the self-test mode
+# that runs only the foreign-key case and expects it to be ACCEPTED with
+# signature verification compiled out (design.md D3's discriminating
+# self-test; see main/Kconfig.projbuild for why the tampered and
+# foreign-key cases must run as separate builds/boots rather than
+# together).
+CONFIG_GATE_SELF_TEST_MODE_FOREIGN_KEY_ONLY=y

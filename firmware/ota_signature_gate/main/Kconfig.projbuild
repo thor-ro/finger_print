@@ -1,0 +1,33 @@
+menu "OTA Signature Gate fixture (task 4.4 self-test only)"
+
+    choice GATE_SELF_TEST_MODE
+        prompt "Case scope this build runs"
+        default GATE_SELF_TEST_MODE_FULL
+        help
+            The real gate (default) always runs all three cases in order:
+            reject (tampered), reject (foreign key), accept (valid) - D5.
+
+            Task 4.4 needs a build with signature verification compiled out
+            in which the tampered and foreign-key cases are both *accepted*
+            (design.md D3's discriminating self-test). sdf_ota_verify_and_
+            commit() reboots unconditionally on a successful commit
+            (sdf_ota.c:472) and does not return, so two cases that both
+            accept cannot both run to completion in the same boot. These
+            two extra choices let the self-test exercise the tampered and
+            foreign-key cases as two separate emulator runs of the same
+            no-verify build instead. Never used by the real gate; only
+            selected by scripts/run_ota_signature_gate.sh --no-verify via
+            sdkconfig.no_verify_tampered.defaults / sdkconfig.no_verify_
+            foreign_key.defaults.
+
+        config GATE_SELF_TEST_MODE_FULL
+            bool "Run all three cases (real gate)"
+
+        config GATE_SELF_TEST_MODE_TAMPERED_ONLY
+            bool "Run only the tampered case, expecting ACCEPT (task 4.4)"
+
+        config GATE_SELF_TEST_MODE_FOREIGN_KEY_ONLY
+            bool "Run only the foreign-key case, expecting ACCEPT (task 4.4)"
+    endchoice
+
+endmenu

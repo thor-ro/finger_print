@@ -910,88 +910,12 @@ static int cmd_ota_rollback(int argc, char **argv) {
   return 0;
 }
 
-static int cmd_ota_verify(int argc, char **argv) {
-  (void)argc;
-  (void)argv;
-
-  if (!check_auth())
-    return 0;
-
-  const esp_partition_t *next = esp_ota_get_next_update_partition(NULL);
-  if (next == NULL) {
-    printf("No OTA partition available\n");
-    return 0;
-  }
-
-  printf("Verifying OTA partition: %s\n", next->label);
-  
-  // Check if partition has valid app
-  esp_app_desc_t desc;
-  esp_err_t err = esp_ota_get_partition_description(next, &desc);
-  if (err != ESP_OK) {
-    printf("No valid firmware in next partition: %s\n", esp_err_to_name(err));
-    return 0;
-  }
-  
-  printf("Found firmware: version=%s, project=%s\n", desc.version, desc.project_name);
-  
-  // Compare versions
-  const char *current = sdf_ota_get_version();
-  sdf_ota_version_cmp_t cmp = sdf_ota_version_compare(current, desc.version);
-  
-  if (cmp == SDF_OTA_VERSION_NEWER) {
-    printf("Incoming is NEWER (upgrade)\n");
-  } else if (cmp == SDF_OTA_VERSION_OLDER) {
-    printf("Incoming is OLDER (downgrade)\n");
-  } else {
-    printf("Incoming is SAME version (reinstall)\n");
-  }
-
-#if CONFIG_SDF_OTA_SIGNATURE_VERIFY
-  printf("Verifying signature...\n");
-  /* This command verifies an out-of-band partition (e.g. flashed outside
-   * a tracked sdf_ota_begin()/write() session), so there's no session-
-   * recorded "actual bytes written" to fall back on the way
-   * sdf_ota_verify_and_commit() does. Accept an optional explicit size
-   * ("ota verify <image_size_bytes>"); without it, fall back to the full
-   * partition size, which only works when the image was written to exactly
-   * fill the partition - warn loudly since that's rarely true. */
-  uint32_t image_size = next->size;
-  if (argc >= 3) {
-    image_size = (uint32_t)strtoul(argv[2], NULL, 0);
-  } else {
-    printf("Warning: no image size given, assuming image fills the whole "
-           "partition (%" PRIu32 " bytes). Pass the real size as "
-           "'ota verify <bytes>' for a reliable result.\n",
-           (uint32_t)next->size);
-  }
-  /* No session accumulated a digest for this partition, so recompute it by
-   * reading the committed image back. */
-  uint8_t digest[SDF_OTA_DIGEST_SIZE];
-  err = sdf_ota_compute_partition_digest(next, image_size, digest);
-  if (err != ESP_OK) {
-    printf("Signature verification: FAILED to digest image (%s)\n", esp_err_to_name(err));
-    return 0;
-  }
-  err = sdf_ota_verify_signature(next, image_size, digest);
-  if (err == ESP_OK) {
-    printf("Signature verification: PASSED\n");
-  } else {
-    printf("Signature verification: FAILED (%s)\n", esp_err_to_name(err));
-  }
-#else
-  printf("Signature verification: DISABLED (CONFIG_SDF_OTA_SIGNATURE_VERIFY=n)\n");
-#endif
-
-  return 0;
-}
-
 static int cmd_ota(int argc, char **argv) {
   if (!check_auth())
     return 0;
 
   if (argc < 2) {
-    printf("Usage: ota <version|status|trigger|rollback|verify>\n");
+    printf("Usage: ota <version|status|trigger|rollback>\n");
     return 0;
   }
   const char *action = argv[1];
@@ -1004,11 +928,9 @@ static int cmd_ota(int argc, char **argv) {
     return cmd_ota_trigger(argc, argv);
   } else if (strcmp(action, "rollback") == 0) {
     return cmd_ota_rollback(argc, argv);
-  } else if (strcmp(action, "verify") == 0) {
-    return cmd_ota_verify(argc, argv);
   } else {
     printf("Unknown action: %s\n", action);
-    printf("Usage: ota <version|status|trigger|rollback|verify>\n");
+    printf("Usage: ota <version|status|trigger|rollback>\n");
   }
   return 0;
 }
@@ -1084,7 +1006,7 @@ void sdf_cli_register_commands(void) {
 #ifndef CONFIG_IDF_TARGET_LINUX
   const esp_console_cmd_t ota_cmd = {
       .command = "ota",
-      .help = "Manage OTA updates (version, status, trigger, rollback, verify)",
+      .help = "Manage OTA updates (version, status, trigger, rollback)",
       .hint = "<action>",
       .func = &cmd_ota,
   };

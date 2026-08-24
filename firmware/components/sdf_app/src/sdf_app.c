@@ -12,6 +12,7 @@
 #include "esp_timer.h"
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "esp_task_wdt.h"
+#include "nvs.h"
 #endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -993,10 +994,23 @@ static void sdf_app_on_web_reg_auth_result(const sdf_event_router_event_t *event
   if (decision.should_persist) {
     for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
       sdf_storage_web_user_t existing;
-      if (sdf_storage_web_user_load(i, &existing) == ESP_OK && !existing.valid) {
-        sdf_storage_web_user_save(i, &decision.user);
-        ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
-        break;
+      esp_err_t load_err = sdf_storage_web_user_load(i, &existing);
+      /* A slot is free when it holds an erased record OR when it has never
+       * been written: on a factory-fresh device the namespace/key does not
+       * exist yet and the load fails with NVS_NOT_FOUND. Treating only
+       * loaded-and-erased slots as free made the very first REGISTER on a
+       * fresh device silently drop its user (found by the
+       * add-ble-ota-emulator-harness BLE harness). Any other load error is a
+       * real storage problem, not an empty slot, so it still skips. */
+      bool slot_free =
+          (load_err == ESP_OK && !existing.valid) ||
+          load_err == ESP_ERR_NVS_NOT_FOUND;
+      if (slot_free) {
+        if (sdf_storage_web_user_save(i, &decision.user) == ESP_OK) {
+          ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
+          break;
+        }
+        ESP_LOGE(TAG, "Failed to save web user at index %u", (unsigned)i);
       }
     }
   }

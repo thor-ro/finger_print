@@ -1,0 +1,26 @@
+## IDF Component Manager Manifest File
+##
+## Mirrors firmware/main/idf_component.yml's dependency set: this fixture
+## links the full sdf_app closure, so it needs the same managed components
+## production does (sdf_protocol_zigbee's esp-zigbee-lib/esp-zboss-lib pair,
+## plus sdf_drivers'/sdf_platform's led_strip/button/cjson). Unlike
+## firmware/main's own "=*" (which resolves against firmware/
+## dependencies.lock, itself pinned to 1.6.8/1.6.4), this fixture has no
+## lock file of its own, so "=*" would resolve to whatever is latest in the
+## registry - ESP-IDF v6.0/component-manager registry currently offers
+## 2.0.x, which moved esp_zigbee_core.h under include/compat/ and does not
+## compile against sdf_protocol_zigbee.c's unconditional #include
+## "esp_zigbee_core.h" (confirmed empirically: build failed with "esp_zigbee_
+## core.h: No such file or directory" against the unpinned resolution).
+## Exact-pinned here instead, matching firmware/ota_signature_gate/main/
+## idf_component.yml's same fix. Bump both when firmware/ bumps.
+dependencies:
+  idf:
+    version: '>=4.1.0'
+  espressif/esp-zigbee-lib:
+    version: '==1.6.8'
+  espressif/esp-zboss-lib:
+    version: '==1.6.4'
+  espressif/led_strip: =*
+  espressif/button: =*
+  espressif/cjson: "^1.7.19"

@@ -2,19 +2,19 @@
 
 #include <string.h>
 
-#include "sdf_ota_digest.h"
+#include "sdf_ota.h"
 
-/* sdf_ota_window_capture() is the arithmetic sdf_ota_write() drives three times
- * per chunk - digest range, app-desc window, footer window. It lives in
- * sdf_ota_signature.c rather than sdf_ota.c precisely so it is reachable from
+/* sdf_ota_window_capture() is the arithmetic sdf_ota_write() drives to land the
+ * app-desc window it needs before esp_ota_end() - IDF's own signed-app
+ * verification handles the signature range itself. It lives in
+ * sdf_ota_window.c rather than sdf_ota.c precisely so it is reachable from
  * here: sdf_ota.c is excluded from IDF_TARGET=linux, and chunk-boundary
  * arithmetic left there would be untestable. */
 
-/* A stream shaped like a real transfer: the app-desc window at [32, 288) and
- * the footer window at the very end, with both boundaries landing mid-chunk for
- * the 244-byte writes the BLE companion delivers. */
+/* A stream shaped like a real transfer: the app-desc window at [32, 288),
+ * with both boundaries landing mid-chunk for the 244-byte writes the BLE
+ * companion delivers. */
 #define STREAM_LEN  400u
-#define FOOTER_START (STREAM_LEN - SDF_OTA_FOOTER_SIZE)
 
 #define FILL 0xCD  /* nothing the stream itself produces */
 
@@ -49,7 +49,6 @@ void test_sdf_ota_window_every_split_point_identical(void) {
 
   const uint32_t windows[][2] = {
       {SDF_OTA_APP_DESC_OFFSET, SDF_OTA_APP_DESC_SIZE},  /* app descriptor */
-      {FOOTER_START, SDF_OTA_FOOTER_SIZE},               /* signature footer */
       {0, STREAM_LEN},                                   /* the whole stream */
       {0, 1},                                            /* first byte only */
       {STREAM_LEN - 1, 1},                               /* last byte only */
@@ -85,13 +84,6 @@ void test_sdf_ota_window_spanning_three_chunks(void) {
                                     SDF_OTA_APP_DESC_SIZE);
     }
   }
-
-  /* The 68-byte footer window under real 244-byte BLE chunking: 400 = 244 + 156,
-   * so the window at [332, 400) starts inside the second chunk. */
-  const uint32_t ble_split[1] = {244};
-  uint8_t footer[SDF_OTA_FOOTER_SIZE];
-  capture_with_splits(footer, FOOTER_START, SDF_OTA_FOOTER_SIZE, ble_split, 1);
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(s_stream + FOOTER_START, footer, SDF_OTA_FOOTER_SIZE);
 }
 
 void test_sdf_ota_window_chunks_outside_window_leave_dst_untouched(void) {
@@ -146,15 +138,18 @@ void test_sdf_ota_window_degenerate_inputs_are_no_ops(void) {
   /* Feeding the same chunk twice is harmless - capture is idempotent per byte,
    * which is what makes a resumed transfer that re-sends a chunk boundary
    * safe. */
-  uint8_t once[SDF_OTA_FOOTER_SIZE];
-  uint8_t twice[SDF_OTA_FOOTER_SIZE];
+  uint8_t once[SDF_OTA_APP_DESC_SIZE];
+  uint8_t twice[SDF_OTA_APP_DESC_SIZE];
   memset(once, FILL, sizeof(once));
   memset(twice, FILL, sizeof(twice));
-  sdf_ota_window_capture(once, FOOTER_START, SDF_OTA_FOOTER_SIZE, FOOTER_START,
-                         s_stream + FOOTER_START, SDF_OTA_FOOTER_SIZE);
-  sdf_ota_window_capture(twice, FOOTER_START, SDF_OTA_FOOTER_SIZE, FOOTER_START,
-                         s_stream + FOOTER_START, SDF_OTA_FOOTER_SIZE);
-  sdf_ota_window_capture(twice, FOOTER_START, SDF_OTA_FOOTER_SIZE, FOOTER_START,
-                         s_stream + FOOTER_START, SDF_OTA_FOOTER_SIZE);
-  TEST_ASSERT_EQUAL_UINT8_ARRAY(once, twice, SDF_OTA_FOOTER_SIZE);
+  sdf_ota_window_capture(once, SDF_OTA_APP_DESC_OFFSET, SDF_OTA_APP_DESC_SIZE,
+                         SDF_OTA_APP_DESC_OFFSET, s_stream + SDF_OTA_APP_DESC_OFFSET,
+                         SDF_OTA_APP_DESC_SIZE);
+  sdf_ota_window_capture(twice, SDF_OTA_APP_DESC_OFFSET, SDF_OTA_APP_DESC_SIZE,
+                         SDF_OTA_APP_DESC_OFFSET, s_stream + SDF_OTA_APP_DESC_OFFSET,
+                         SDF_OTA_APP_DESC_SIZE);
+  sdf_ota_window_capture(twice, SDF_OTA_APP_DESC_OFFSET, SDF_OTA_APP_DESC_SIZE,
+                         SDF_OTA_APP_DESC_OFFSET, s_stream + SDF_OTA_APP_DESC_OFFSET,
+                         SDF_OTA_APP_DESC_SIZE);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(once, twice, SDF_OTA_APP_DESC_SIZE);
 }

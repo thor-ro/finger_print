@@ -1,0 +1,20 @@
+## sdf_protocol_zigbee.c (pulled in transitively by sdf_config, which sdf_ota
+## PRIV_REQUIRES) includes esp_zigbee_core.h unconditionally for any
+## non-linux target, so this fixture needs the same managed Zigbee stack
+## firmware/main and firmware/test_runner pull in - even though the fixture
+## never starts it. Version-pinned to match firmware/test_runner/main/
+## idf_component.yml's comment: firmware/dependencies.lock holds the project
+## on 1.6.8/1.6.4, and 2.0.x moved esp_zigbee_core.h under include/compat/,
+## which sdf_protocol_zigbee does not compile against. Bump both here when
+## firmware/ bumps.
+dependencies:
+  idf:
+    version: '>=4.1.0'
+  espressif/esp-zigbee-lib:
+    version: '==1.6.8'
+    rules:
+      - if: "target != linux"
+  espressif/esp-zboss-lib:
+    version: '==1.6.4'
+    rules:
+      - if: "target != linux"
