@@ -113,11 +113,13 @@ jobs:
       - name: Mark repository safe
         run: git config --global --add safe.directory '*'
 
-      - name: idf.py set-target linux && idf.py build
+      - name: idf.py build (linux target)
         working-directory: firmware/test_runner
+        # The committed sdkconfig pins CONFIG_IDF_TARGET=linux (AGENTS.md);
+        # regenerating it via set-target would drop the accumulated working
+        # settings, so build against it directly - same as the host workflow.
         run: |
           . "${IDF_PATH:-/opt/esp/idf}/export.sh" >/dev/null
-          idf.py --preview set-target linux
           idf.py build
 
       - name: Run Unity test suite
