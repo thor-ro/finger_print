@@ -66,3 +66,11 @@ CONFIG_LOG_DEFAULT_LEVEL_WARN=y
 CONFIG_LOG_DEFAULT_LEVEL=2
 CONFIG_BOOTLOADER_LOG_LEVEL_WARN=y
 CONFIG_BOOTLOADER_LOG_LEVEL=2
+
+# IDF's mbedtls port normally routes calloc/free through esp_mbedtls_mem_*()
+# (port/esp_mem.c), but the first referencer - tf-psa-crypto's platform.c -
+# sits in an archive GNU ld will not rescan, so a fresh Linux build (CI) fails
+# to resolve them while macOS ld64 happens to succeed. The host tests never
+# need the ESP heap allocator: with CUSTOM_MEM_ALLOC the STD calloc/free
+# defaults survive and mbedtls uses the system allocator directly.
+CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=y
