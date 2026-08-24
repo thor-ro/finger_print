@@ -8,8 +8,8 @@ bumble.link.LocalLink, each serving an HCI `tcp-server:` transport.
 device-side port; the harness's central Device attaches to the central-side
 port as a plain HCI host.
 
-Two deviations from stock Controller are required and were established by the
-D6 spike (design.md D6):
+Four deviations from stock Bumble (Controller/LocalLink) are required and were
+established by the D6 spike (design.md D6 "Outcome"):
 
   1. Stock Controller has no handler for HCI LE Set Privacy Mode, so it
      answers "Unknown HCI Command". NimBLE tolerates that during discovery,
@@ -19,6 +19,24 @@ D6 spike (design.md D6):
      which NimBLE's ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, ...) refuses with
      BLE_HS_ENOADDR. Both controllers are therefore given explicit non-zero
      public addresses.
+
+  3. Stock LocalLink stamps LE ACL PDUs with the sender controller's
+     *random* address, which the Device host overwrites at power-on, so
+     every PDU arrives stamped with an address that matches no connection's
+     peer and is dropped with "no connection for ..." - SMP stalls forever.
+     PublicAddressLocalLink below routes by the sender's public address,
+     which is what both connections here were established on.
+
+  4. Stock Controller sends Encryption Change without asking the host for
+     its LTK first; NimBLE sits in its SMP LTK_START state, sees an
+     unexpected Encryption Change and aborts pairing with UNSPECIFIED_REASON.
+     PatchedController.on_le_encrypted emits HCI_LE_Long_Term_Key_Request
+     first (its reply/negative-reply handlers complete the handshake).
+
+Additionally, Bumble's default pairing config requests MITM, which a
+NoInputNoOutput central cannot satisfy - create_central() pins the pairing
+config to sc=True, mitm=False, bonding=True to match the firmware's Just
+Works flags (design.md D6, "Outcome").
 
 CI wiring (task 8.3) must use this module rather than a bare
 `bumble.apps.controllers` bridge - see design.md D6's Outcome note.

@@ -12,10 +12,13 @@ firmware/build
 firmware/managed_components
 firmware/ble_ota_gate/build*
 firmware/ble_ota_gate/managed_components
+firmware/ble_ota_gate/sdkconfig
+firmware/ble_ota_gate/sdkconfig.old
 firmware/ota_signature_gate/build*
 firmware/ota_signature_gate/managed_components
-scripts/__pycache__/
-tools/__pycache__/
+firmware/ota_signature_gate/sdkconfig
+firmware/ota_signature_gate/sdkconfig.old
+**/__pycache__/
 breakboard
 doc/UART_Fingerprint_Sensor_(C)_Demo
 case

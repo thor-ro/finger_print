@@ -403,19 +403,34 @@ static void gate_run_reject_cases(const esp_partition_t *fixtures, uint32_t imag
      * Rejected). Structural validity of the foreign-signed artifact is
      * asserted before this run, by scripts/ota_signature_gate_prepare.py
      * (task 3.4) - not here - so that a malformed artifact fails the build
-     * step loudly instead of masquerading as this case's rejection. */
+     * step loudly instead of masquerading as this case's rejection.
+     *
+     * The assertion below is deliberately identical to case 1's, and for the
+     * same reason (spec: "Rejection is attributable to the key, not to
+     * malformation"): merely observing `err != ESP_OK` would let a failing
+     * sdf_ota_begin() - which is exactly the session-recovery break D5 exists
+     * to catch, since this case follows a rejected one - or a partition read
+     * error, or an allocation failure, all report "rejected as expected" and
+     * turn this case green without any signature check having run. A genuine
+     * foreign-key rejection reaches the same code path the tampered case
+     * does: esp_ota_end() returns ESP_ERR_OTA_VALIDATE_FAILED, which
+     * sdf_ota_verify_and_commit() maps onto SDF_ERR_OTA_SIGNATURE_INVALID
+     * after emitting SDF_AUDIT_OTA_SIGNATURE_INVALID (sdf_ota.c:441-445), so
+     * the strict form is available here and nothing weaker is warranted. */
     boot_before = esp_ota_get_boot_partition();
     gate_reset_audit();
     err = gate_run_case(fixtures, image_size, GATE_SOURCE_FOREIGN_KEY);
     boot_after = esp_ota_get_boot_partition();
 
-    if (err != ESP_OK && boot_after == boot_before) {
+    if (err == SDF_ERR_OTA_SIGNATURE_INVALID && s_audit_seen_signature_invalid && boot_after == boot_before) {
         *foreign_out = GATE_CASE_REJECTED;
         ESP_LOGI(TAG, "CASE 2 (foreign key): rejected as expected");
     } else {
         *foreign_out = GATE_CASE_UNEXPECTED;
-        ESP_LOGE(TAG, "CASE 2 (foreign key) DID NOT REJECT AS EXPECTED: err=%s boot_partition_changed=%d",
-                 esp_err_to_name(err), boot_after != boot_before);
+        ESP_LOGE(TAG,
+                 "CASE 2 (foreign key) DID NOT REJECT AS EXPECTED: err=%s audit_signature_invalid_seen=%d "
+                 "boot_partition_changed=%d",
+                 esp_err_to_name(err), s_audit_seen_signature_invalid, boot_after != boot_before);
     }
 }
 

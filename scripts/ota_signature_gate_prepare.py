@@ -96,6 +96,24 @@ def require_tool(name: str) -> str:
     return path
 
 
+def require_any_tool(*names: str) -> str:
+    """Real multi-candidate fallback: return the first candidate found on
+    PATH; only fail once every candidate has been tried, naming them all.
+
+    `require_tool(a) or require_tool(b)` is not a fallback - require_tool()
+    calls fail()/sys.exit() on a miss, so the second candidate was
+    unreachable and an IDF version shipping only `espsecure.py` (the wheel
+    layout) aborted instead of falling back."""
+    for name in names:
+        path = shutil.which(name)
+        if path is not None:
+            return path
+    fail(
+        f"none of the required tools {list(names)} was found on PATH - "
+        "source the ESP-IDF export.sh first"
+    )
+
+
 def build_manifest(image_size: int) -> bytes:
     manifest = MANIFEST_MAGIC + struct.pack("<I", image_size) + b"\x00" * 8
     assert len(manifest) == MANIFEST_SIZE
@@ -179,7 +197,7 @@ def assert_tampered_repair_only_breaks_signature(tampered_repaired_image: bytes,
     actually isolate rejection to the signature check, and this case would
     not demonstrate what design.md D3 / spec "Rejection is not the image
     checksum in disguise" requires."""
-    espsecure = require_tool("espsecure") or require_tool("espsecure.py")
+    espsecure = require_any_tool("espsecure", "espsecure.py")
     tmp = key_dir / "tampered_repaired_for_check.bin"
     tmp.write_bytes(tampered_repaired_image)
 
@@ -289,7 +307,7 @@ def generate_foreign_signature_sector(app_bin: Path, image_size: int, key_dir: P
     foreign_signed = key_dir / "foreign_signed.bin"
 
     openssl = require_tool("openssl")
-    espsecure = require_tool("espsecure") or require_tool("espsecure.py")
+    espsecure = require_any_tool("espsecure", "espsecure.py")
 
     # Fresh every run: this is a throwaway "wrong" key, not a stable secret,
     # and keeping it out of any cache avoids accidentally reusing state

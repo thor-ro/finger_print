@@ -42,8 +42,8 @@ import hashlib
 import hmac as hmac_mod
 import json
 import struct
+from collections.abc import Callable
 
-from bumble import hci
 from bumble.device import Device, Peer
 
 from bumble_espemu import (
@@ -148,6 +148,11 @@ class CompanionClient:
             + username.encode()
             + password_hash
         )
+        # AUTH queue: a stale notification left over from an earlier exchange
+        # could satisfy this REGISTER's result wait below. OTA queue: drains
+        # whatever is left by task 7.4's pre-login rejection test.
+        while not self.auth_queue.empty():
+            self.auth_queue.get_nowait()
         await self.ota_clear_queues()
         await self.auth.write_value(payload, with_response=True)
         value = await self._await_auth_notification(timeout_s)
@@ -193,12 +198,20 @@ class CompanionClient:
         expect_success: bool = True,
         notify_timeout_s: float = 20.0,
         inter_chunk_delay_s: float = 0.0,
+        progress_callback: Callable[[str, int], None] | None = None,
     ) -> dict:
         """BEGIN/CHUNK/END over the OTA characteristic.
 
         Returns the terminal status dict. Asserts (via CompanionError) that no
         chunk is empty or exceeds max_chunk_len(mtu), and surfaces the error
         reason from the failed status rather than just success/failure.
+
+        progress_callback (optional) is invoked synchronously as each stage
+        completes, letting a caller track positive transfer evidence without
+        polling the queues: ("begin_ready", 0) after BEGIN is acknowledged
+        ready; ("chunk_ack", offset) after each chunk acknowledgement is
+        validated against the running offset; ("end_written", offset) after
+        the END write was accepted.
         """
         mtu = self.att_mtu
         max_chunk = max(0, mtu - OTA_MTU_OVERHEAD)
@@ -217,6 +230,8 @@ class CompanionClient:
         ready = await self._next_status(notify_timeout_s)
         if ready.get("status") != "ready":
             raise CompanionError(f"expected ready at BEGIN, got {ready}")
+        if progress_callback is not None:
+            progress_callback("begin_ready", 0)
 
         offset = 0
         while offset < len(image):
@@ -242,9 +257,13 @@ class CompanionClient:
             new_offset = ack.get("offset")
             if not isinstance(new_offset, int) or new_offset != offset + len(chunk):
                 raise CompanionError(f"ack offset {new_offset} != {offset + len(chunk)}")
-            offset += len(chunk)
+            offset = new_offset
+            if progress_callback is not None:
+                progress_callback("chunk_ack", offset)
 
         await self.ota.write_value(bytes([OTA_OPCODE_END]), with_response=True)
+        if progress_callback is not None:
+            progress_callback("end_written", offset)
         final = await self._next_status(notify_timeout_s)
         status = final.get("status")
         if expect_success and status != "success":

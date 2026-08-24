@@ -12,9 +12,12 @@ One boot runs the whole sequence:
   5. foreign-key image -> rejected likewise (8.1 case 2); that both rejected
      sessions are followed by a successful BEGIN/commit proves session
      recovery (8.2)
-  6. valid image -> commit; sdf_ota_verify_and_commit() reboots the device on
-     success and never returns (sdf_ota.c:463-473), so the terminal success is
-     observed as a connection loss without any failure status
+   6. valid image -> commit; sdf_ota_verify_and_commit() reboots the device on
+      success and never returns (sdf_ota.c:463-473), so the terminal success is
+      observed as a connection loss without any failure status; since that loss
+      alone is indistinguishable from a crash or link loss mid-transfer, COMMIT
+      additionally requires positive transfer evidence (BEGIN ready -> every
+      chunk chunk_ack'd up to len(image) -> END written, no failed status)
 
 Emits a machine-checkable terminal line:
   BLE_OTA_HARNESS_RESULT status=PASS cases_run=N/3 prelogin_reject=OK \
@@ -59,6 +62,14 @@ class Harness:
     def __init__(self, args: argparse.Namespace):
         self.args = args
         self.results: dict[str, str] = {}
+
+    def cases_completed(self) -> int:
+        """Completed OTA signature cases only - prelogin_reject also lives in
+        self.results but is not one of the three cases the N/3 denominator of
+        the terminal line counts."""
+        return sum(
+            1 for case in ("tampered", "foreign_key", "valid") if case in self.results
+        )
 
     async def expect_disconnection(self, connection, timeout_s: float) -> bool:
         """Resolve True when the peripheral disconnects (commit reboot)."""
@@ -151,7 +162,8 @@ class Harness:
                 if final.get("error") != SIGNATURE_INVALID_REASON:
                     emit(
                         "FAIL",
-                        f"cases_run={len(self.results)}/3 {case}=REJECTED_WITH_WRONG_REASON "
+                        f"cases_run={self.cases_completed()}/3 "
+                        f"{case}=REJECTED_WITH_WRONG_REASON "
                         f"reason={final.get('error')!r}",
                     )
                     return 1
@@ -160,9 +172,29 @@ class Harness:
 
             # 8.1 case 3: the valid image commits; the device reboots inside
             # sdf_ota_verify_and_commit() before any success notification can
-            # be sent, so success is observed as disconnection without any
-            # prior failed status.
+            # be sent (sdf_ota.c:463-473 esp_restart() precedes any notify),
+            # so unlike Layer 1 - which observes SDF_AUDIT_OTA_COMMITTED in
+            # the emulated UART log - there is no in-band success signal to
+            # wait for here. Disconnection alone is therefore NOT enough: an
+            # emulator crash, panic or link loss mid-transfer would look
+            # identical to a commit reboot (task 8.1 requires "the same
+            # outcomes Layer 1 asserts"). COMMIT is only reported with
+            # positive evidence that the transfer ran through BEGIN-ready ->
+            # every chunk chunk_ack'd up to len(image) -> END written, no
+            # "failed" status arrived, and *then* the peripheral disconnected.
             await client.ota_clear_queues()
+
+            progress = {"begin_ready": False, "acked": 0, "end_written": False}
+
+            def track_progress(stage: str, offset: int = 0) -> None:
+                """Fed by CompanionClient.ota_transfer()'s progress_callback
+                as each stage completes; feeds the COMMIT criteria below."""
+                if stage == "begin_ready":
+                    progress["begin_ready"] = True
+                elif stage == "chunk_ack":
+                    progress["acked"] = offset
+                elif stage == "end_written":
+                    progress["end_written"] = True
 
             async def transfer_valid():
                 await client.ota_transfer(
@@ -170,24 +202,74 @@ class Harness:
                     expect_success=False,
                     notify_timeout_s=self.args.notify_timeout,
                     inter_chunk_delay_s=self.args.inter_chunk_delay,
+                    progress_callback=track_progress,
                 )
 
             transfer_task = asyncio.create_task(transfer_valid())
-            saw_disconnect = await self.expect_disconnection(
-                connection, self.args.reboot_timeout
-            )
-            if not saw_disconnect:
-                transfer_task.cancel()
-                emit("FAIL", "cases_run=2/3 valid=NO_COMMIT (no reboot within timeout)")
+            task_exc: BaseException | None = None
+            failed_notification: bytes | None = None
+            saw_disconnect = False
+            try:
+                saw_disconnect = await self.expect_disconnection(
+                    connection, self.args.reboot_timeout
+                )
+                while not client.ota_queue.empty():
+                    notification = client.ota_queue.get_nowait()
+                    if b'"failed"' in notification:
+                        failed_notification = notification
+                        break
+                complete = (
+                    progress["begin_ready"]
+                    and progress["end_written"]
+                    and progress["acked"] >= len(images["valid"])
+                )
+            finally:
+                # Reap the transfer task on every exit path: on the commit
+                # path it stays parked in _next_status() awaiting a terminal
+                # status the reboot preempts, so cancel-and-await it instead
+                # of leaving a pending task to be destroyed (RuntimeWarning).
+                # CancelledError and TimeoutError are that park's expected
+                # endings; anything else is captured in task_exc so a real
+                # transfer failure cannot vanish unobserved below.
+                if not transfer_task.done():
+                    transfer_task.cancel()
+                try:
+                    await transfer_task
+                except asyncio.CancelledError:
+                    pass
+                except (asyncio.TimeoutError, TimeoutError):
+                    pass
+                except Exception as exc:
+                    task_exc = exc
+
+            if failed_notification is not None:
+                emit(
+                    "FAIL",
+                    f"cases_run=2/3 valid=FAILED unexpectedly: {failed_notification!r}",
+                )
                 return 1
-            while not client.ota_queue.empty():
-                notification = client.ota_queue.get_nowait()
-                if b'"failed"' in notification:
-                    emit(
-                        "FAIL",
-                        f"cases_run=2/3 valid=FAILED unexpectedly: {notification!r}",
-                    )
-                    return 1
+            if task_exc is not None:
+                emit("FAIL", f"cases_run=2/3 valid=TRANSFER_ERROR ({task_exc!r})")
+                return 1
+            if not saw_disconnect:
+                emit(
+                    "FAIL",
+                    "cases_run=2/3 valid=NO_COMMIT (no reboot within timeout)",
+                )
+                return 1
+            if not complete:
+                # The link dropped before the transfer demonstrably ran to
+                # completion - report what was actually transferred rather
+                # than crediting a commit that was never proven.
+                emit(
+                    "FAIL",
+                    f"cases_run=2/3 valid=DISCONNECT_BEFORE_COMPLETE "
+                    f"(acked {progress['acked']}/{len(images['valid'])} bytes, "
+                    f"begin_ready={progress['begin_ready']}, "
+                    f"end_written={progress['end_written']})",
+                )
+                return 1
+
             self.results["valid"] = "COMMIT"
             print("valid image committed (device rebooted into staging partition)", flush=True)
 
