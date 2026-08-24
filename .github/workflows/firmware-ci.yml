@@ -117,7 +117,7 @@ jobs:
         working-directory: firmware/test_runner
         run: |
           . "${IDF_PATH:-/opt/esp/idf}/export.sh" >/dev/null
-          idf.py set-target linux
+          idf.py --preview set-target linux
           idf.py build
 
       - name: Run Unity test suite
