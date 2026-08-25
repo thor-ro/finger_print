@@ -7,6 +7,11 @@ const SDF_OTA_UUID     = '7d5a0004-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 // unauthenticated link, before login). Wire format: 1 byte -
 //   0 setup not started | 1 Admin enrolled | 2 Nuki paired | 3 complete
 const SDF_SETUP_STATE_UUID = '7d5a0005-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
+// Device health report (read + notify). JSON; readable by any authenticated
+// session at any permission level. A zero-length notification is a CHANGE
+// MARKER: the report did not fit one notification at the negotiated MTU, so
+// the client must read the full value (reads are not MTU-bounded).
+const SDF_STATUS_UUID = '7d5a0006-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 
 // Setup-state enumeration (mirrors sdf_services_setup_state_t)
 const SETUP_NOT_STARTED = 0;
@@ -52,6 +57,7 @@ let configChar;
 let enrollChar;
 let otaChar;
 let setupStateChar;
+let statusChar;
 
 const connectBtn = document.getElementById('btn-connect');
 const statusMsg = document.getElementById('connection-status');
@@ -86,6 +92,7 @@ connectBtn.addEventListener('click', async () => {
         enrollChar = await sdfService.getCharacteristic(SDF_ENROLL_UUID);
         otaChar = await sdfService.getCharacteristic(SDF_OTA_UUID);
         setupStateChar = await sdfService.getCharacteristic(SDF_SETUP_STATE_UUID);
+        statusChar = await sdfService.getCharacteristic(SDF_STATUS_UUID);
 
         statusMsg.textContent = 'Connected successfully!';
 
@@ -103,6 +110,12 @@ connectBtn.addEventListener('click', async () => {
         // Subscribe to OTA notifications
         otaChar.addEventListener('characteristicvaluechanged', handleOtaNotification);
         await otaChar.startNotifications();
+
+        // Subscribe to device-health notifications. The device only pushes
+        // to authenticated connections; subscribing here means the health
+        // view starts updating the moment login succeeds.
+        statusChar.addEventListener('characteristicvaluechanged', handleStatusNotification);
+        await statusChar.startNotifications();
 
         /* Read setup state BEFORE login: the wizard is mandatory for an
          * unclaimed device, and resumes at the step the reported state
@@ -203,20 +216,33 @@ function wizardIsActive() {
     return document.getElementById('wizard-view').classList.contains('active');
 }
 
-// Step 1: Admin enrolment - reuses the Enrollment characteristic with
-// user_id=1 (the first admin-permission user), permission=3.
+// Step 1: Admin enrolment - the user-management enrolment verb on the
+// Enrollment characteristic, user_id=1 (the first admin-permission user),
+// permission=3. During first-time setup no admin exists yet to scan, so
+// this request is admitted without an authorizing fingerprint (the device
+// refuses it the moment any user is enrolled).
 document.getElementById('btn-wizard-enroll-admin').addEventListener('click', async () => {
     const statusEl = document.getElementById('wizard-enroll-status');
     try {
         document.getElementById('btn-wizard-enroll-admin').disabled = true;
         statusEl.textContent = 'Starting Admin enrolment...';
-        const payload = new TextEncoder().encode(JSON.stringify({ user_id: 1, permission: 3 }));
-        await enrollChar.writeValue(payload);
-        document.getElementById('wizard-enroll-progress').style.display = 'block';
-        document.getElementById('wizard-enroll-step-text').textContent = 'Step 1 of 3';
-        document.getElementById('wizard-enroll-progress-bar').style.width = '33%';
-        document.getElementById('wizard-enroll-message').textContent =
-            'Place the admin finger on the sensor for each of the 3 scans...';
+        const result = await sendUmRequest({ verb: 'enroll', user_id: 1, permission: 3 });
+        if (result === null) {
+            statusEl.textContent =
+                'No response received from the device - try again.';
+            document.getElementById('btn-wizard-enroll-admin').disabled = false;
+            return;
+        }
+        if (result.result === 'ok') {
+            document.getElementById('wizard-enroll-progress').style.display = 'block';
+            document.getElementById('wizard-enroll-step-text').textContent = 'Step 1 of 3';
+            document.getElementById('wizard-enroll-progress-bar').style.width = '33%';
+            document.getElementById('wizard-enroll-message').textContent =
+                'Place the admin finger on the sensor for each of the 3 scans...';
+            return; // progress notifications take it from here
+        }
+        statusEl.textContent = umResultMessage(result.result);
+        document.getElementById('btn-wizard-enroll-admin').disabled = false;
     } catch (err) {
         console.error(err);
         statusEl.textContent = `Could not start enrolment: ${err.message}`;
@@ -500,6 +526,7 @@ function handleAuthNotification(event) {
         setTimeout(() => {
             switchView('dashboard-view');
             document.getElementById('status-cards').style.display = 'flex';
+            refreshDeviceHealth();
             resumeOtaTransferIfPending();
         }, 500);
     } else if (status === 0x02) {
@@ -530,9 +557,6 @@ document.getElementById('btn-read-config').addEventListener('click', async () =>
         
         displayConfig(config);
         statusMsg.textContent = 'Config read successfully';
-        
-        // Update status cards
-        updateStatusCards(config);
     } catch (err) {
         console.error(err);
         document.getElementById('ota-status').textContent = `Error reading config: ${err.message}`;
@@ -552,15 +576,15 @@ function displayConfig(config) {
         if (typeof value === 'boolean') {
             html += `
                 <tr>
-                    <td><label>${key}</label></td>
-                    <td><input type="checkbox" data-key="${key}" ${checked} ${!isEditable ? 'disabled' : ''}></td>
+                    <td><label>${escapeHtml(key)}</label></td>
+                    <td><input type="checkbox" data-key="${escapeHtml(key)}" ${checked} ${!isEditable ? 'disabled' : ''}></td>
                 </tr>
             `;
         } else {
             html += `
                 <tr>
-                    <td><label>${key}</label></td>
-                    <td><input type="number" data-key="${key}" value="${value}" ${!isEditable ? 'disabled' : ''}></td>
+                    <td><label>${escapeHtml(key)}</label></td>
+                    <td><input type="number" data-key="${escapeHtml(key)}" value="${escapeHtml(value)}" ${!isEditable ? 'disabled' : ''}></td>
                 </tr>
             `;
         }
@@ -612,8 +636,6 @@ function handleConfigNotification(event) {
             pendingBleAdminAction.resolve(config[pendingBleAdminAction.key] === true);
             return;
         }
-
-        updateStatusCards(config);
     } catch (e) {
         console.warn('Config notification not valid JSON:', jsonStr);
     }
@@ -623,11 +645,126 @@ function handleConfigNotification(event) {
 // extra fields (e.g. finish_setup's "step") beyond the boolean value.
 let lastConfigNotifyRaw = null;
 
-function updateStatusCards(config) {
-    if (config.battery_default_percent !== undefined) {
-        document.getElementById('battery-percent').textContent = `${config.battery_default_percent}%`;
+// --- Device health view (companion-device-health) ---------------------------
+//
+// The dashboard shows only values the device actually reported. Every field
+// of the health report is measured, unknown, or not applicable; unknown is
+// displayed as unknown and not-applicable as N/A - never a number, never a
+// carried-over earlier value. The configured default battery percentage is a
+// setting, not a measurement, and is never shown as the battery level.
+
+// Anything the device sends that a person chose - user names above all -
+// is markup until proven otherwise. Escape before it reaches innerHTML.
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+let latestHealthReport = null;
+
+// A reading older than this is surfaced with its age so it cannot pass as
+// current.
+const HEALTH_STALE_AGE_MS = 60000;
+
+function formatAge(ageMs) {
+    if (ageMs < 1000) return `${ageMs} ms`;
+    if (ageMs < 60000) return `${Math.round(ageMs / 1000)} s`;
+    return `${Math.round(ageMs / 60000)} min`;
+}
+
+function healthValue(entry, formatMeasured) {
+    if (!entry || entry.state === 'unknown') return 'Unknown';
+    if (entry.state === 'not_applicable') return 'N/A';
+    return formatMeasured(entry);
+}
+
+function withAgeSuffix(text, ageMs) {
+    if (typeof ageMs !== 'number' || ageMs < HEALTH_STALE_AGE_MS) return text;
+    return `${text} (reading ${formatAge(ageMs)} old)`;
+}
+
+function renderHealthReport(report) {
+    latestHealthReport = report;
+
+    // Status cards: lock state and battery come from the report now.
+    const lockCard = document.getElementById('lock-state');
+    const batteryCard = document.getElementById('battery-percent');
+
+    if (report.lock && report.lock.state && report.lock.state !== 'unknown') {
+        let lockText = report.lock.state.replace(/_/g, ' ');
+        // An assumed state was derived from a command we sent, not from the
+        // lock itself - show it as awaiting confirmation, never as equal to
+        // a confirmed reading.
+        if (report.lock.source === 'assumed') {
+            lockText += ' (awaiting confirmation)';
+        }
+        lockCard.textContent = withAgeSuffix(lockText, report.lock.age_ms);
+    } else {
+        lockCard.textContent = 'Unknown';
     }
-    // Lock state would come from other notifications
+
+    if (report.battery && typeof report.battery.percent === 'number') {
+        batteryCard.textContent = withAgeSuffix(`${report.battery.percent}%`,
+                                                report.battery.age_ms);
+    } else {
+        batteryCard.textContent = 'Unknown';
+    }
+
+    const rows = [
+        ['Lock state', lockCard.textContent],
+        ['Battery', batteryCard.textContent],
+        ['Alarms', report.alarms ? `mask ${report.alarms.mask}` : 'Unknown'],
+        ['Fingerprint sensor', healthValue(
+            report.fingerprint,
+            e => e.ready ? 'Ready' : 'Not responding')],
+        ['Nuki link', healthValue(
+            report.nuki,
+            e => `${e.paired ? 'paired' : 'not paired'}, ` +
+                 `${e.connected ? 'connected' : 'disconnected'}`)],
+        ['Zigbee network', healthValue(
+            report.zigbee,
+            e => e.joined ? 'joined' : 'not joined')],
+        ['Firmware', report.firmware || 'Unknown'],
+        ['OTA state', report.ota || 'Unknown'],
+        ['Setup state', report.setup || 'Unknown'],
+    ];
+
+    const tbody = rows.map(([k, v]) =>
+        `<tr><td><label>${escapeHtml(k)}</label></td><td>${escapeHtml(v)}</td></tr>`).join('');
+    document.getElementById('health-table').innerHTML =
+        `<table class="config-table">${tbody}</table>`;
+}
+
+document.getElementById('btn-refresh-health').addEventListener('click', refreshDeviceHealth);
+
+async function refreshDeviceHealth() {
+    try {
+        const value = await statusChar.readValue();
+        const report = JSON.parse(new TextDecoder().decode(value));
+        renderHealthReport(report);
+    } catch (err) {
+        console.warn('Could not read device health:', err);
+    }
+}
+
+// Notification from the Status characteristic: either a full report, or an
+// empty change marker meaning "the report changed but did not fit one
+// notification at this MTU" - resolve it by reading the full value.
+async function handleStatusNotification(event) {
+    if (event.target.value.byteLength === 0) {
+        await refreshDeviceHealth();
+        return;
+    }
+    try {
+        const report = JSON.parse(new TextDecoder().decode(event.target.value));
+        renderHealthReport(report);
+    } catch (err) {
+        console.warn('Status notification not valid JSON');
+    }
 }
 
 // --- BLE-triggered admin actions (Nuki re-pair, Enroll-Admin, Zigbee Join) ---
@@ -726,29 +863,282 @@ wireBleAdminActionButton(
     "the connection isn't authenticated, or another admin action is already pending"
 );
 
-// Enrollment
+// --- Companion user management (Enrollment characteristic) ---------------
+// The Enrollment characteristic carries a request/reply protocol: every
+// write carries a client-supplied request id ("req") and produces exactly
+// one terminal reply carrying that id - even when refused before any work
+// starts. Replies are correlated by request id (a Map of pending resolvers,
+// not a single slot), so a reply arriving ten seconds after its request -
+// e.g. after the admin walked over and scanned - is attributable.
+//
+// Wire shapes (see doc/sdf_sas.md):
+//   request:   {"req":N,"verb":"list"|"enroll"|"delete"|"set_permission"|"rename",...}
+//   reply:     {"req":N,"result":"<outcome>"}
+//   list part: {"req":N,"verb":"list","part":i,"end":true|false,"users":[...]}
+//   progress:  {"status":"success"|"failed","user_id":..,"step":..,"error_code":..}
+//              plus "req":N when started by a user-management request.
+
+let umNextRequestId = 1;
+const umPendingReplies = new Map(); // req -> { resolve }
+
+const UM_REPLY_TIMEOUT_MS = 15000; // device scan window is 10s
+
+function sendUmRequest(request) {
+    const req = umNextRequestId++;
+    const payload = new TextEncoder().encode(JSON.stringify({ req, ...request }));
+    const replyPromise = new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            umPendingReplies.delete(req);
+            resolve(null); // timed out client-side: ambiguous, not denied
+        }, UM_REPLY_TIMEOUT_MS);
+        umPendingReplies.set(req, {
+            resolve(result) {
+                clearTimeout(timer);
+                umPendingReplies.delete(req);
+                resolve(result);
+            }
+        });
+    });
+    return enrollChar.writeValue(payload).then(() => replyPromise);
+}
+
+// Renders each named refusal specifically rather than as a generic failure.
+const UM_RESULT_MESSAGES = {
+    ok: 'Completed.',
+    not_found: 'No such enrolled user.',
+    id_occupied: 'That user ID is already enrolled.',
+    last_admin: 'Refused: this would leave the device without any admin.',
+    name_taken: 'That name is already used by another user.',
+    busy: 'Device busy with another action - try again shortly.',
+    denied: 'Denied: the fingerprint scanned was not an admin finger.',
+    timeout: 'Timed out: no admin fingerprint was scanned on the device.',
+    invalid: 'The device rejected the request as malformed.',
+};
+
+function umResultMessage(result) {
+    return UM_RESULT_MESSAGES[result] || `Request failed (${result}).`;
+}
+
+// The permission picker offers only Admin and Standard: level 2 stays a
+// reserved placeholder (companion-identity).
+function umPermissionName(p) {
+    if (p === 3) return 'Admin';
+    if (p === 1) return 'Standard';
+    return `Level ${p}`;
+}
+
+let umUsers = []; // last received complete user list
+
+function renderUmUsers() {
+    const container = document.getElementById('um-users');
+    if (!container) return;
+    if (umUsers.length === 0) {
+        container.innerHTML = '<p class="status-msg">No users enrolled.</p>';
+        return;
+    }
+    let html = '<table><tr><th>ID</th><th>Name</th><th>Permission</th><th>Actions</th></tr>';
+    for (const u of umUsers) {
+        const id = Number(u.id);
+        const perm = Number(u.perm);
+        html += `<tr>
+            <td>${id}</td>
+            <td>${u.name ? escapeHtml(u.name) : '<em>—</em>'}</td>
+            <td>${escapeHtml(umPermissionName(u.perm))}</td>
+            <td>
+                <button class="secondary-btn" data-um-action="rename" data-um-id="${id}">Rename</button>
+                <button class="secondary-btn" data-um-action="permission" data-um-id="${id}" data-um-perm="${perm}">Permission</button>
+                <button class="danger-btn" data-um-action="delete" data-um-id="${id}">Delete</button>
+            </td>
+        </tr>`;
+    }
+    html += '</table>';
+    container.innerHTML = html;
+
+    // Names are passed from the row's own record rather than baked into an
+    // onclick attribute, so no name ever has to survive a trip through
+    // HTML-attribute and JavaScript-string parsing.
+    for (const btn of container.querySelectorAll('[data-um-action]')) {
+        const id = Number(btn.dataset.umId);
+        const user = umUsers.find(u => Number(u.id) === id);
+        btn.addEventListener('click', () => {
+            switch (btn.dataset.umAction) {
+            case 'rename':
+                umPromptRename(id, user && user.name ? user.name : '');
+                break;
+            case 'permission':
+                umPromptPermission(id, Number(btn.dataset.umPerm));
+                break;
+            case 'delete':
+                umDelete(id);
+                break;
+            }
+        });
+    }
+}
+
+function umStatus(message) {
+    const el = document.getElementById('um-status');
+    el.textContent = message;
+}
+
+document.getElementById('btn-um-refresh').addEventListener('click', async () => {
+    try {
+        umStatus('Requesting user list...');
+        const result = await sendUmRequest({ verb: 'list' });
+        // The terminal signal is the final list part's end marker; the
+        // resolved value is null only on a client-side timeout.
+        if (result === null) {
+            umStatus('No response received - check the device.');
+            return;
+        }
+        renderUmUsers();
+        umStatus(`Listed ${umUsers.length} user(s).`);
+    } catch (err) {
+        console.error(err);
+        umStatus(`Error: ${err.message}`);
+    }
+});
+
+// An admin may demote or delete themselves; the firmware refuses only the
+// LAST admin. Warn first because the acting session loses its own authority
+// at its next restricted access - which looks like an abrupt logout.
+function umWarnIfSelf(targetId, what) {
+    const self = umUsers.find(u => u.id === targetId);
+    const boundName = document.getElementById('username').value;
+    if (self && self.name && self.name === boundName) {
+        return window.confirm(
+            `You are about to ${what} your OWN user (${boundName}). Your ` +
+            `session will lose its authority immediately. Continue?`);
+    }
+    return true;
+}
+
+window.umDelete = async function (userId) {
+    if (!umWarnIfSelf(userId, 'delete')) {
+        umStatus('Cancelled.');
+        return;
+    }
+    try {
+        umStatus(`Requesting delete of user ${userId}... an Admin must scan ` +
+                 'their fingerprint on the device to authorize it.');
+        const result = await sendUmRequest({ verb: 'delete', user_id: userId });
+        if (result === null) {
+            umStatus('No response received - check the device.');
+            return;
+        }
+        if (result.result === 'ok') {
+            umStatus(`User ${userId} deleted.`);
+        } else {
+            umStatus(umResultMessage(result.result));
+        }
+        await refreshUmUsersSilently();
+    } catch (err) {
+        console.error(err);
+        umStatus(`Error: ${err.message}`);
+    }
+};
+
+async function refreshUmUsersSilently() {
+    const result = await sendUmRequest({ verb: 'list' });
+    if (result !== null) renderUmUsers();
+}
+
+window.umPromptRename = async function (userId, currentName) {
+    const name = window.prompt('New name (must be unique - it is the login identifier):', currentName || '');
+    if (!name) return;
+    try {
+        umStatus(`Requesting rename of user ${userId}... an Admin must scan ` +
+                 'their fingerprint on the device to authorize it.');
+        const result = await sendUmRequest({ verb: 'rename', user_id: userId, name });
+        if (result === null) {
+            umStatus('No response received - check the device.');
+            return;
+        }
+        umStatus(result.result === 'ok'
+            ? `User ${userId} renamed to "${name}".`
+            : umResultMessage(result.result));
+        await refreshUmUsersSilently();
+    } catch (err) {
+        console.error(err);
+        umStatus(`Error: ${err.message}`);
+    }
+};
+
+window.umPromptPermission = async function (userId, currentPerm) {
+    const value = window.prompt(
+        'New permission: 1 = Standard, 3 = Admin', String(currentPerm));
+    const perm = parseInt(value, 10);
+    if (perm !== 1 && perm !== 3) {
+        umStatus('Only Standard (1) and Admin (3) can be assigned.');
+        return;
+    }
+    if (!umWarnIfSelf(userId, 'demote')) {
+        umStatus('Cancelled.');
+        return;
+    }
+    try {
+        umStatus(`Requesting permission change for user ${userId}... an Admin ` +
+                 'must scan their fingerprint on the device to authorize it ' +
+                 '(this can take up to ~15 seconds).');
+        const result = await sendUmRequest({ verb: 'set_permission', user_id: userId, permission: perm });
+        if (result === null) {
+            umStatus('No response received - check the device.');
+            return;
+        }
+        umStatus(result.result === 'ok'
+            ? `Permission updated for user ${userId}.`
+            : umResultMessage(result.result));
+        await refreshUmUsersSilently();
+    } catch (err) {
+        console.error(err);
+        umStatus(`Error: ${err.message}`);
+    }
+};
+
+// Enrollment (dashboard panel). An enrolment now costs FOUR scans: one
+// authorizing admin scan, then the three enrolment scans by the new user.
 document.getElementById('btn-enroll').addEventListener('click', async () => {
     try {
         const userId = parseInt(document.getElementById('enroll-user-id').value, 10);
         const permission = parseInt(document.getElementById('enroll-permission').value, 10);
-        
+
         if (userId < 1 || userId > 10) {
             document.getElementById('enroll-result').textContent = 'User ID must be 1-10';
             document.getElementById('enroll-result').style.display = 'block';
             return;
         }
-        
-        const payloadObj = { user_id: userId, permission };
-        const jsonStr = JSON.stringify(payloadObj);
-        const payload = new TextEncoder().encode(jsonStr);
-        
-        await enrollChar.writeValue(payload);
-        
+        if (permission !== 1 && permission !== 3) {
+            document.getElementById('enroll-result').textContent =
+                'Only Standard (1) and Admin (3) can be assigned.';
+            document.getElementById('enroll-result').style.display = 'block';
+            return;
+        }
+
         document.getElementById('enroll-progress').style.display = 'block';
         document.getElementById('enroll-result').style.display = 'none';
-        document.getElementById('enroll-message').textContent = 'Enrollment started...';
-        document.getElementById('enroll-step-text').textContent = 'Step 1 of 3';
-        document.getElementById('enroll-progress-bar').style.width = '33%';
+        document.getElementById('enroll-message').textContent =
+            'Waiting for the authorizing Admin scan on the device...';
+
+        const result = await sendUmRequest({ verb: 'enroll', user_id: userId, permission });
+        if (result === null) {
+            document.getElementById('enroll-progress').style.display = 'none';
+            document.getElementById('enroll-result').textContent =
+                'No response received - check the device.';
+            document.getElementById('enroll-result').style.display = 'block';
+            return;
+        }
+        if (result.result === 'ok') {
+            // Enrolment started: progress notifications (carrying this
+            // request's id) take it from here.
+            document.getElementById('enroll-message').textContent =
+                'Authorized - follow the prompts: the new user scans three times.';
+        } else {
+            document.getElementById('enroll-progress').style.display = 'none';
+            document.getElementById('enroll-result').textContent =
+                umResultMessage(result.result);
+            document.getElementById('enroll-result').style.color = '#ef4444';
+            document.getElementById('enroll-result').style.display = 'block';
+        }
     } catch (err) {
         console.error(err);
         document.getElementById('enroll-result').textContent = `Error: ${err.message}`;
@@ -802,45 +1192,6 @@ function handleEnrollNotification(event) {
     const decoder = new TextDecoder();
     const jsonStr = decoder.decode(value);
 
-    // Wizard step 1 uses the same enrollment notifications as the dashboard
-    // panel - route them to the wizard UI while the wizard is active.
-    if (wizardIsActive()) {
-        handleWizardEnrollNotification(jsonStr);
-        return;
-    }
-
-    try {
-        const data = JSON.parse(jsonStr);
-        const progressDiv = document.getElementById('enroll-progress');
-        const resultDiv = document.getElementById('enroll-result');
-        const stepText = document.getElementById('enroll-step-text');
-        const progressBar = document.getElementById('enroll-progress-bar');
-        const messageDiv = document.getElementById('enroll-message');
-        
-        if (data.status === 'success') {
-            progressDiv.style.display = 'none';
-            resultDiv.textContent = `Enrollment successful! User ID: ${data.user_id}`;
-            resultDiv.style.color = '#22c55e';
-            resultDiv.style.display = 'block';
-        } else if (data.status === 'failed') {
-            progressDiv.style.display = 'none';
-            resultDiv.textContent = `Enrollment failed at step ${data.step}: error ${data.error_code}`;
-            resultDiv.style.color = '#ef4444';
-            resultDiv.style.display = 'block';
-        } else if (data.step !== undefined) {
-            const step = data.step;
-            const maxSteps = 3;
-            stepText.textContent = `Step ${step} of ${maxSteps}`;
-            progressBar.style.width = `${(step / maxSteps) * 100}%`;
-            messageDiv.textContent = `Place finger for step ${step}...`;
-        }
-    } catch (e) {
-        console.warn('Enroll notification not valid JSON:', jsonStr);
-    }
-}
-
-// Wizard-scoped mirror of the dashboard enrollment notification handling.
-function handleWizardEnrollNotification(jsonStr) {
     let data;
     try {
         data = JSON.parse(jsonStr);
@@ -848,6 +1199,76 @@ function handleWizardEnrollNotification(jsonStr) {
         console.warn('Enroll notification not valid JSON:', jsonStr);
         return;
     }
+
+    // Terminal replies and list parts are correlated by request id.
+    if (data.users !== undefined) {
+        handleUmListPart(data);
+        return;
+    }
+    if (data.result !== undefined) {
+        handleUmReply(data);
+        return;
+    }
+
+    // Wizard step 1 uses the same enrollment notifications as the dashboard
+    // panel - route them to the wizard UI while the wizard is active.
+    if (wizardIsActive()) {
+        handleWizardEnrollNotification(data);
+        return;
+    }
+
+    const progressDiv = document.getElementById('enroll-progress');
+    const resultDiv = document.getElementById('enroll-result');
+
+    if (data.status === 'success') {
+        progressDiv.style.display = 'none';
+        resultDiv.textContent = `Enrollment successful! User ID: ${data.user_id}`;
+        resultDiv.style.color = '#22c55e';
+        resultDiv.style.display = 'block';
+    } else if (data.status === 'failed') {
+        progressDiv.style.display = 'none';
+        resultDiv.textContent = `Enrollment failed at step ${data.step}: error ${data.error_code}`;
+        resultDiv.style.color = '#ef4444';
+        resultDiv.style.display = 'block';
+    } else if (data.step !== undefined) {
+        const step = data.step;
+        const maxSteps = 3;
+        document.getElementById('enroll-step-text').textContent = `Step ${step} of ${maxSteps}`;
+        document.getElementById('enroll-progress-bar').style.width = `${(step / maxSteps) * 100}%`;
+        document.getElementById('enroll-message').textContent =
+            `Place finger for step ${step}...`;
+    }
+}
+
+// --- User-management reply/list-part routing ------------------------------
+
+let umListParts = []; // accumulated users of an in-flight list reply
+
+function handleUmReply(data) {
+    const pending = umPendingReplies.get(data.req);
+    if (pending) {
+        pending.resolve(data);
+    } else {
+        console.warn('UM reply for unknown request id:', data.req);
+    }
+}
+
+function handleUmListPart(data) {
+    if (!Array.isArray(data.users)) return;
+    umListParts.push(...data.users);
+    if (data.end === true) {
+        umUsers = umListParts;
+        umListParts = [];
+        renderUmUsers();
+        // The final part IS the list verb's terminal reply.
+        const pending = umPendingReplies.get(data.req);
+        if (pending) pending.resolve({ req: data.req, result: 'ok' });
+    }
+}
+
+// Wizard-scoped mirror of the dashboard enrollment notification handling.
+// `data` is already parsed by handleEnrollNotification.
+function handleWizardEnrollNotification(data) {
     const statusEl = document.getElementById('wizard-enroll-status');
     const progressDiv = document.getElementById('wizard-enroll-progress');
     const stepText = document.getElementById('wizard-enroll-step-text');
@@ -1140,8 +1561,23 @@ document.getElementById('ota-form').addEventListener('submit', async (e) => {
         return;
     }
 
+    // State the device's REPORTED battery level alongside the warning. When
+    // no measurement is available, say so - never imply the level was
+    // checked, and never substitute the configured default.
+    let batteryLine;
+    if (latestHealthReport && latestHealthReport.battery &&
+        typeof latestHealthReport.battery.percent === 'number') {
+        batteryLine = `The device reports its battery at ` +
+            `${latestHealthReport.battery.percent}%.`;
+    } else {
+        batteryLine = 'The device\'s battery level is currently unknown.';
+    }
+
     const confirmed = window.confirm(
-        'Ensure your battery is above 20%. OTA transfer over Bluetooth draws significant power and firmware is large — keep the app open and the device nearby until it completes.\n\nStart the firmware update now?'
+        `${batteryLine} Ensure your battery is above 20%. OTA transfer over ` +
+        'Bluetooth draws significant power and firmware is large — keep the ' +
+        'app open and the device nearby until it completes.\n\n' +
+        'Start the firmware update now?'
     );
     if (!confirmed) {
         return;

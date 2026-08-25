@@ -1,4 +1,4 @@
-set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage sdf_power sdf_services nvs_flash esp_partition mbedtls sdf_event_router sdf_protocol_zigbee sdf_cli sdf_config sdf_platform sdf_platform_power sdf_ota)
+set(test_reqs unity sdf_state_machines sdf_drivers sdf_protocol_ble sdf_storage sdf_power sdf_services nvs_flash esp_partition mbedtls sdf_event_router sdf_protocol_zigbee sdf_cli sdf_config sdf_platform sdf_platform_power sdf_ota sdf_device_state)
 
 set(test_srcs
          "test_runner_main.c"
@@ -21,6 +21,9 @@ set(test_srcs
          "../../components/sdf_ota/test/test_sdf_ota_window.c"
          "../../components/sdf_ble_companion/test/test_sdf_ble_ota_protocol.c"
          "../../components/sdf_ble_companion/test/test_sdf_ble_companion_bond_state.c"
+         "../../components/sdf_device_state/test/test_sdf_device_state.c"
+         "../../components/sdf_ble_companion/test/test_sdf_ble_companion_status.c"
+         "../../components/sdf_ble_companion/src/sdf_ble_companion_status.c"
 )
 
 set(test_incs ".")
@@ -37,9 +40,11 @@ if(IDF_TARGET STREQUAL "linux")
          "../../components/sdf_event_router/test/test_sdf_event_router.c"
          "../../components/sdf_protocol_zigbee/test/test_sdf_protocol_zigbee.c"
          "../../components/sdf_ble_companion/test/test_sdf_ble_companion_gatt_scratch.c"
+         "../../components/sdf_ble_companion/test/test_sdf_ble_companion_um.c"
          "../../components/sdf_ble_companion/src/sdf_ble_companion_gatt_scratch.c"
          "../../components/sdf_ble_companion/src/sdf_ble_ota_protocol.c"
          "../../components/sdf_ble_companion/src/sdf_ble_companion_bond_state.c"
+         "../../components/sdf_ble_companion/src/sdf_ble_companion_user_mgmt.c"
     )
     # Neither component is registered on the host, so the runner reaches their
     # headers directly.

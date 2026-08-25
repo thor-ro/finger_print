@@ -1,4 +1,4 @@
-idf_component_register(SRCS "src/sdf_ble_companion.c" "src/sdf_ble_companion_ota.c" "src/sdf_ble_ota_protocol.c" "src/sdf_ble_companion_bond_state.c" "src/sdf_ble_companion_gatt_scratch.c"
+idf_component_register(SRCS "src/sdf_ble_companion.c" "src/sdf_ble_companion_ota.c" "src/sdf_ble_ota_protocol.c" "src/sdf_ble_companion_bond_state.c" "src/sdf_ble_companion_gatt_scratch.c" "src/sdf_ble_companion_user_mgmt.c" "src/sdf_ble_companion_status.c"
                     INCLUDE_DIRS "include"
-                    REQUIRES bt espressif__cjson sdf_ota sdf_protocol_ble sdf_storage sdf_event_router sdf_services
+                    REQUIRES bt espressif__cjson sdf_ota sdf_protocol_ble sdf_storage sdf_event_router sdf_services sdf_device_state
                     PRIV_REQUIRES freertos)

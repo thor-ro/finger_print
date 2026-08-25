@@ -188,6 +188,10 @@ bool sdf_services_ble_admin_action_should_resolve_on_action_complete(
     sdf_services_admin_action_t action, esp_err_t result) {
   return (action == SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR ||
           action == SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN ||
-          action == SDF_SERVICES_ADMIN_ACTION_ZB_JOIN) &&
+          action == SDF_SERVICES_ADMIN_ACTION_ZB_JOIN ||
+          /* Remote user-management actions resolve their requesting BLE
+           * client on denial and timeout too (companion-user-mgmt). */
+          action == SDF_SERVICES_ADMIN_ACTION_DELETE_USER ||
+          action == SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL) &&
          result != ESP_OK;
 }

@@ -1,0 +1,3 @@
+# Zigbee-disabled build (companion-device-health verification 8.2)
+CONFIG_ZB_ENABLED=n
+CONFIG_SDF_ZIGBEE_ENABLE=n

@@ -195,6 +195,8 @@ extern void test_web_auth_decide_registration_unbound_refused(void);
 extern void test_web_auth_decide_registration_name_collision_refused(void);
 extern void test_web_reg_auth_authorizer_captured_on_claim(void);
 extern void test_web_reg_auth_authorizer_absent_on_denial(void);
+extern void test_permission_change_denied_by_non_admin_scan(void);
+extern void test_permission_change_untouched_when_no_change_is_pending(void);
 extern void test_web_reg_auth_clear_drops_captured_user_id(void);
 extern void test_web_reg_auth_result_event_carries_no_identity_payload(void);
 extern void test_registration_binds_credential_to_user_id(void);
@@ -223,6 +225,23 @@ extern void test_request_admin_action_ble_pairing_window_sets_pending_action(voi
 extern void test_dispatch_admin_action_on_zero_user_device_sets_pending_action(void);
 extern void test_factory_reset_direct_execution_sets_no_pending_action(void);
 extern void test_button_dispatch_claimed_device_sets_pending_action(void);
+extern void test_um_outcome_names_are_wire_stable(void);
+extern void test_change_permission_outcomes_are_distinguishable(void);
+extern void test_request_enrollment_reports_occupied_id_itself(void);
+extern void test_request_enrollment_busy_while_enrollment_pending(void);
+extern void test_um_format_user_list_shape(void);
+extern void test_um_format_user_list_empty(void);
+extern void test_um_format_user_list_escapes_and_rejects_truncation(void);
+extern void test_request_delete_user_refuses_last_admin_before_arming(void);
+extern void test_request_delete_user_unenrolled_refused_without_arming(void);
+extern void test_request_delete_user_arms_gate_carrying_target(void);
+extern void test_second_remote_request_while_in_flight_answers_busy(void);
+#ifdef CONFIG_IDF_TARGET_LINUX
+extern void test_remote_delete_denied_by_non_admin_scan_resolves_immediately(void);
+extern void test_remote_enroll_denial_never_starts_state_machine(void);
+extern void test_remote_delete_authorized_executes_with_recorded_outcome(void);
+extern void test_remote_delete_timeout_records_named_outcome(void);
+#endif
 extern void test_setup_phase_boot_arms_when_latch_unset_and_not_when_set(void);
 extern void test_setup_phase_arm_window_expiry_wipes_and_disarms(void);
 extern void test_setup_phase_deadline_starts_at_first_connection_and_is_not_extended(void);
@@ -268,6 +287,7 @@ extern void test_sdf_event_router_internal_wake_sentinel_is_zero_and_biometric_m
 extern void test_sdf_power_wakeup_reason_mapping(void);
 extern void test_sdf_power_checkin_clamping(void);
 extern void test_sdf_power_battery_bounds(void);
+extern void test_sdf_power_battery_cb_unavailable_result_keeps_previous(void);
 extern void test_sdf_power_calculate_checkin_interval_disabled_returns_base(void);
 extern void test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery(void);
 extern void test_sdf_power_compute_stay_awake_wait_matches_nearest_deadline(void);
@@ -389,6 +409,28 @@ extern void test_window_timeout_closes_with_no_bond(void);
 extern void test_window_admit_when_not_open_is_a_noop(void);
 extern void test_allow_listed_device_is_allow_listed(void);
 extern void test_allow_list_snapshot_matches_membership(void);
+
+/* BLE Companion user-management protocol tests (companion-user-mgmt) */
+extern void test_um_parse_list_request(void);
+extern void test_um_parse_enroll_request(void);
+extern void test_um_parse_delete_set_permission_rename(void);
+extern void test_um_parse_malformed_json_captures_req_id(void);
+extern void test_um_parse_malformed_json_without_req_id(void);
+extern void test_um_parse_legacy_bare_enroll_payload_rejected(void);
+extern void test_um_parse_unknown_verb_rejected(void);
+extern void test_um_parse_out_of_range_fields_rejected(void);
+extern void test_um_parse_trailing_garbage_rejected(void);
+extern void test_um_format_reply_shape(void);
+extern void test_um_format_reply_too_small_buffer_fails(void);
+extern void test_um_format_list_part_end_marker(void);
+extern void test_um_admission_authority_admits_every_verb(void);
+extern void test_um_admission_setup_phase_no_users_admits_only_enroll(void);
+extern void test_um_admission_setup_phase_closes_once_any_user_enrolled(void);
+extern void test_um_admission_outside_setup_requires_authority(void);
+extern void test_um_parse_rejects_empty_write_and_still_clears_request(void);
+extern void test_um_parse_rejects_null_data_and_still_clears_request(void);
+extern void test_um_parse_rejects_oversized_write_and_still_clears_request(void);
+extern void test_um_parse_rejects_absurd_request_id_rather_than_clamping(void);
 
 /* BLE Companion GATT write staging tests */
 extern void test_gatt_scratch_acquire_release_round_trip(void);
@@ -642,6 +684,8 @@ void app_main(void) {
    * they exercise owned state, storage and the enrolled-user cache only. */
   RUN_TEST(test_web_reg_auth_authorizer_captured_on_claim);
   RUN_TEST(test_web_reg_auth_authorizer_absent_on_denial);
+  RUN_TEST(test_permission_change_denied_by_non_admin_scan);
+  RUN_TEST(test_permission_change_untouched_when_no_change_is_pending);
   RUN_TEST(test_web_reg_auth_clear_drops_captured_user_id);
   RUN_TEST(test_web_reg_auth_result_event_carries_no_identity_payload);
   RUN_TEST(test_registration_binds_credential_to_user_id);
@@ -670,6 +714,26 @@ void app_main(void) {
   RUN_TEST(test_dispatch_admin_action_on_zero_user_device_sets_pending_action);
   RUN_TEST(test_factory_reset_direct_execution_sets_no_pending_action);
   RUN_TEST(test_button_dispatch_claimed_device_sets_pending_action);
+  /* companion-user-mgmt: named outcomes, remote admin-gated actions, the
+   * one user-list serializer. Sensor-dependent ones are host-only (see the
+   * last-admin-delete-guard section in the suite). */
+  RUN_TEST(test_um_outcome_names_are_wire_stable);
+  RUN_TEST(test_change_permission_outcomes_are_distinguishable);
+  RUN_TEST(test_request_enrollment_reports_occupied_id_itself);
+  RUN_TEST(test_request_enrollment_busy_while_enrollment_pending);
+  RUN_TEST(test_um_format_user_list_shape);
+  RUN_TEST(test_um_format_user_list_empty);
+  RUN_TEST(test_um_format_user_list_escapes_and_rejects_truncation);
+  RUN_TEST(test_request_delete_user_refuses_last_admin_before_arming);
+  RUN_TEST(test_request_delete_user_unenrolled_refused_without_arming);
+  RUN_TEST(test_request_delete_user_arms_gate_carrying_target);
+  RUN_TEST(test_second_remote_request_while_in_flight_answers_busy);
+#ifdef CONFIG_IDF_TARGET_LINUX
+  RUN_TEST(test_remote_delete_denied_by_non_admin_scan_resolves_immediately);
+  RUN_TEST(test_remote_enroll_denial_never_starts_state_machine);
+  RUN_TEST(test_remote_delete_authorized_executes_with_recorded_outcome);
+  RUN_TEST(test_remote_delete_timeout_records_named_outcome);
+#endif
   RUN_TEST(test_setup_phase_boot_arms_when_latch_unset_and_not_when_set);
   RUN_TEST(test_setup_phase_arm_window_expiry_wipes_and_disarms);
   RUN_TEST(test_setup_phase_deadline_starts_at_first_connection_and_is_not_extended);
@@ -719,6 +783,7 @@ void app_main(void) {
   RUN_TEST(test_sdf_power_wakeup_reason_mapping);
   RUN_TEST(test_sdf_power_checkin_clamping);
   RUN_TEST(test_sdf_power_battery_bounds);
+  RUN_TEST(test_sdf_power_battery_cb_unavailable_result_keeps_previous);
   RUN_TEST(test_sdf_power_calculate_checkin_interval_disabled_returns_base);
   RUN_TEST(test_sdf_power_calculate_checkin_interval_enabled_scales_with_battery);
   RUN_TEST(test_sdf_power_compute_stay_awake_wait_matches_nearest_deadline);
@@ -843,6 +908,52 @@ void app_main(void) {
   RUN_TEST(test_allow_listed_device_is_allow_listed);
   RUN_TEST(test_allow_list_snapshot_matches_membership);
 
+  /* Device health / Status characteristic (companion-device-health). */
+  extern void test_status_unauthenticated_read_refused(void);
+  extern void test_status_standard_user_read_permitted(void);
+  extern void test_status_admin_read_admitted_by_the_same_rule(void);
+  extern void test_status_deleted_bound_user_loses_access(void);
+  extern void test_status_unbound_authenticated_connection_refused(void);
+  extern void test_report_fitting_notification_is_sent_whole(void);
+  extern void test_oversized_report_gets_change_marker_not_truncation(void);
+  extern void test_fresh_boot_reports_unknown_everywhere(void);
+  extern void test_assumed_lock_state_replaced_by_confirmation(void);
+  extern void test_cache_records_with_zigbee_disabled(void);
+  extern void test_ages_advance(void);
+  extern void test_unavailable_battery_clears_previous_reading_and_is_never_100(void);
+  extern void test_low_battery_warning_gates_on_measured_reading(void);
+  extern void test_fingerprint_readiness_three_conditions(void);
+  extern void test_nuki_link_measured_and_unknown(void);
+  extern void test_alarm_mask_recorded(void);
+  extern void test_serializer_sources_version_ota_setup_and_is_stable(void);
+  extern void test_oversized_buffer_reports_does_not_fit(void);
+  extern void test_change_cb_fires_once_per_actual_change(void);
+  extern void test_repeated_unavailable_battery_notifies_once(void);
+  extern void test_change_cb_covers_every_recorder(void);
+  extern void test_no_change_cb_registered_is_safe(void);
+  RUN_TEST(test_status_unauthenticated_read_refused);
+  RUN_TEST(test_status_standard_user_read_permitted);
+  RUN_TEST(test_status_admin_read_admitted_by_the_same_rule);
+  RUN_TEST(test_status_deleted_bound_user_loses_access);
+  RUN_TEST(test_status_unbound_authenticated_connection_refused);
+  RUN_TEST(test_report_fitting_notification_is_sent_whole);
+  RUN_TEST(test_oversized_report_gets_change_marker_not_truncation);
+  RUN_TEST(test_fresh_boot_reports_unknown_everywhere);
+  RUN_TEST(test_assumed_lock_state_replaced_by_confirmation);
+  RUN_TEST(test_cache_records_with_zigbee_disabled);
+  RUN_TEST(test_ages_advance);
+  RUN_TEST(test_unavailable_battery_clears_previous_reading_and_is_never_100);
+  RUN_TEST(test_low_battery_warning_gates_on_measured_reading);
+  RUN_TEST(test_fingerprint_readiness_three_conditions);
+  RUN_TEST(test_nuki_link_measured_and_unknown);
+  RUN_TEST(test_alarm_mask_recorded);
+  RUN_TEST(test_serializer_sources_version_ota_setup_and_is_stable);
+  RUN_TEST(test_oversized_buffer_reports_does_not_fit);
+  RUN_TEST(test_change_cb_fires_once_per_actual_change);
+  RUN_TEST(test_repeated_unavailable_battery_notifies_once);
+  RUN_TEST(test_change_cb_covers_every_recorder);
+  RUN_TEST(test_no_change_cb_registered_is_safe);
+
   /* BLE Companion GATT write staging tests. Host-only: they reset the staging
    * buffer between cases via sdf_ble_companion_gatt_scratch_reset_for_test(),
    * which is compiled for the Linux target only. */
@@ -861,6 +972,29 @@ void app_main(void) {
   RUN_TEST(test_seed_intersection_abandoned_setup_bond_is_not_seeded);
   RUN_TEST(test_seed_intersection_admitted_and_bonded_peer_is_seeded);
   RUN_TEST(test_seed_intersection_admission_without_bond_grants_nothing);
+
+  /* BLE Companion user-management protocol tests (companion-user-mgmt):
+   * pure parse/format/admit logic, compiled into the runner on the host. */
+  RUN_TEST(test_um_parse_list_request);
+  RUN_TEST(test_um_parse_enroll_request);
+  RUN_TEST(test_um_parse_delete_set_permission_rename);
+  RUN_TEST(test_um_parse_malformed_json_captures_req_id);
+  RUN_TEST(test_um_parse_malformed_json_without_req_id);
+  RUN_TEST(test_um_parse_legacy_bare_enroll_payload_rejected);
+  RUN_TEST(test_um_parse_unknown_verb_rejected);
+  RUN_TEST(test_um_parse_out_of_range_fields_rejected);
+  RUN_TEST(test_um_parse_trailing_garbage_rejected);
+  RUN_TEST(test_um_format_reply_shape);
+  RUN_TEST(test_um_format_reply_too_small_buffer_fails);
+  RUN_TEST(test_um_format_list_part_end_marker);
+  RUN_TEST(test_um_admission_authority_admits_every_verb);
+  RUN_TEST(test_um_admission_setup_phase_no_users_admits_only_enroll);
+  RUN_TEST(test_um_admission_setup_phase_closes_once_any_user_enrolled);
+  RUN_TEST(test_um_admission_outside_setup_requires_authority);
+  RUN_TEST(test_um_parse_rejects_empty_write_and_still_clears_request);
+  RUN_TEST(test_um_parse_rejects_null_data_and_still_clears_request);
+  RUN_TEST(test_um_parse_rejects_oversized_write_and_still_clears_request);
+  RUN_TEST(test_um_parse_rejects_absurd_request_id_rather_than_clamping);
 #endif
 
   /* sdf_app suites. Target-only: sdf_app is not built for the Linux host

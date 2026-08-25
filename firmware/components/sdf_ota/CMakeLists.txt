@@ -10,6 +10,8 @@ if(IDF_TARGET STREQUAL "linux")
     # IDF_TARGET=linux regardless.
     idf_component_register(SRCS "src/sdf_ota_version.c"
                            "src/sdf_ota_window.c"
+                           "src/sdf_ota_linux.c"
+                           ${SDF_VERSION_C}
                            INCLUDE_DIRS "include"
                            REQUIRES sdf_common esp_app_format)
 else()

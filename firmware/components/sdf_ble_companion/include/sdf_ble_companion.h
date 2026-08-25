@@ -49,6 +49,10 @@ typedef struct {
     uint16_t config_value_len;
     uint8_t enroll_value[512];
     uint16_t enroll_value_len;
+    /* Set while this connection has a user-management request in flight
+     * (companion-user-mgmt): a second request is answered busy rather than
+     * queued or dropped. */
+    bool um_in_flight;
     uint8_t ota_value[512];
     uint16_t ota_value_len;
 } sdf_ble_companion_connection_t;
@@ -62,9 +66,61 @@ typedef void (*sdf_ble_companion_config_write_cb)(void *ctx,
                                                    const uint8_t *data,
                                                    size_t len);
 
-typedef void (*sdf_ble_companion_enroll_write_cb)(void *ctx,
-                                                   const uint8_t *data,
-                                                   size_t len);
+/* User-management verbs carried by the Enrollment characteristic's
+ * request/reply protocol (companion-user-mgmt). */
+typedef enum {
+    SDF_BLE_COMPANION_UM_VERB_LIST = 0,
+    SDF_BLE_COMPANION_UM_VERB_ENROLL = 1,
+    SDF_BLE_COMPANION_UM_VERB_DELETE = 2,
+    SDF_BLE_COMPANION_UM_VERB_SET_PERMISSION = 3,
+    SDF_BLE_COMPANION_UM_VERB_RENAME = 4,
+} sdf_ble_companion_um_verb_t;
+
+#define SDF_BLE_COMPANION_UM_NAME_MAX SDF_STORAGE_WEB_USER_NAME_MAX
+
+/* A parsed user-management request. req_id is client-supplied and echoed on
+ * every reply, including a rejection of the rest of the payload (where
+ * req_id_valid is false but req_id may still carry whatever was parsed so
+ * the invalid-request reply can correlate; 0 otherwise). */
+typedef struct {
+    uint32_t req_id;
+    bool req_id_valid;
+    sdf_ble_companion_um_verb_t verb;
+    uint16_t user_id;
+    uint8_t permission;
+    char name[SDF_BLE_COMPANION_UM_NAME_MAX];
+} sdf_ble_companion_um_request_t;
+
+/* Parses a user-management request. Returns false for a malformed payload,
+ * an unknown verb, or an out-of-range field - the caller answers those with
+ * an invalid-request reply rather than dropping them (req_id captures any
+ * request id seen before the failure). */
+bool sdf_ble_companion_um_parse_request(const uint8_t *data, size_t len,
+                                        sdf_ble_companion_um_request_t *req);
+
+/* Formats the terminal reply {"req":N,"result":"<outcome>"}. `result` is a
+ * sdf_services_um_outcome_name() string. Returns the length written, or -1
+ * if it did not fit. */
+int sdf_ble_companion_um_format_reply(uint32_t req_id, const char *result,
+                                      char *buf, size_t cap);
+
+/* Formats one chunk of a list reply:
+ * {"req":N,"verb":"list","part":i,"end":true|false,"users":[...]}.
+ * The final part carries end=true, so a truncated list is never
+ * indistinguishable from a complete one. */
+int sdf_ble_companion_um_format_list_part(uint32_t req_id, int part, bool end,
+                                          const char *users_json, char *buf,
+                                          size_t cap);
+
+/* Admission decision for a write to the Enrollment characteristic: live
+ * admin authority admits every verb; a setup-phase connection to a device
+ * with no enrolled users admits ONLY enrolment (no account and no admin
+ * exists yet to scan). The other arguments come from the caller so this
+ * stays a pure, host-testable function. */
+bool sdf_ble_companion_um_admits(const sdf_ble_companion_um_request_t *req,
+                                 bool conn_has_admin_authority,
+                                 bool setup_phase_armed,
+                                 bool no_users_enrolled);
 
 /**
  * Fired when an already-authenticated GATT client requests one of the
@@ -114,16 +170,29 @@ typedef void (*sdf_ble_companion_setup_complete_cb)(void *ctx,
 typedef void (*sdf_ble_companion_setup_nuki_pair_cb)(void *ctx,
                                                       uint16_t conn_handle);
 
+/**
+ * Fired when a write to the Enrollment characteristic parses as a
+ * user-management request AND the connection is admitted (live admin
+ * authority, or the setup-phase enrolment case). Runs on the NimBLE host
+ * task: the implementer must hand the request to a task that may wait and
+ * return without blocking - no user-management verb, and no wait for its
+ * result, may happen here (companion-user-mgmt). The terminal reply is
+ * notified later via sdf_ble_companion_reply_um().
+ */
+typedef void (*sdf_ble_companion_um_request_cb)(void *ctx,
+                                                uint16_t conn_handle,
+                                                const sdf_ble_companion_um_request_t *request);
+
 
 typedef struct {
     void *ctx;
     sdf_ble_companion_auth_request_cb on_auth_request;
     sdf_ble_companion_config_write_cb on_config_write;
-    sdf_ble_companion_enroll_write_cb on_enroll_write;
     sdf_ble_companion_ota_write_cb on_ota_write;
     sdf_ble_companion_admin_action_request_cb on_admin_action_request;
     sdf_ble_companion_setup_complete_cb on_setup_complete;
     sdf_ble_companion_setup_nuki_pair_cb on_setup_nuki_pair;
+    sdf_ble_companion_um_request_cb on_um_request;
 } sdf_ble_companion_callbacks_t;
 
 esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks);
@@ -152,6 +221,50 @@ esp_err_t sdf_ble_companion_reply_admin_action(uint16_t conn_handle,
 esp_err_t sdf_ble_companion_notify_config(uint16_t conn_handle, const uint8_t *data, size_t len);
 esp_err_t sdf_ble_companion_notify_enroll(uint16_t conn_handle, const uint8_t *data, size_t len);
 esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data, size_t len);
+
+/**
+ * Signals that a reported device-health value changed (companion-device-
+ * health). Coalesces bursts: changes arriving within a short window produce
+ * one Status notification carrying the latest report, pushed to every
+ * subscribed authenticated connection. A report too large for one
+ * notification at the negotiated MTU is delivered as an empty change marker;
+ * the client obtains the full value with a read.
+ */
+esp_err_t sdf_ble_companion_notify_status_change(void);
+
+/**
+ * Notifies a user-management reply or list part on the Enrollment
+ * characteristic. Unlike notify_enroll(), this admits any connected
+ * connection: the setup-phase connection that may send user-management
+ * requests is deliberately unauthenticated (no account exists yet), and its
+ * requests must still be answered.
+ */
+esp_err_t sdf_ble_companion_notify_um(uint16_t conn_handle, const uint8_t *data, size_t len);
+
+/**
+ * Formats and notifies a terminal reply {"req":N,"result":"<outcome>"} for
+ * `req_id` on the Enrollment characteristic. Also clears the connection's
+ * in-flight marker set when the request was accepted (see
+ * sdf_ble_companion_um_set_in_flight()).
+ */
+esp_err_t sdf_ble_companion_reply_um(uint16_t conn_handle, uint32_t req_id,
+                                     const char *result);
+
+/**
+ * Marks/clears a connection's single in-flight user-management request. A
+ * second request from the same connection while the marker is set is
+ * answered busy rather than queued or dropped.
+ */
+void sdf_ble_companion_um_set_in_flight(uint16_t conn_handle, bool in_flight);
+
+/**
+ * Request id attributed to enrolment progress notifications (task 4.3):
+ * set by the app layer when it starts an enrolment on behalf of a
+ * user-management request; the Enrollment characteristic's progress,
+ * complete and failed notifications carry `"req":<id>` while this is
+ * non-zero. The complete/failed handlers clear it after broadcasting.
+ */
+void sdf_ble_companion_um_set_active_enroll_request(uint32_t req_id);
 
 /**
  * Broadcast data to all authenticated connections.

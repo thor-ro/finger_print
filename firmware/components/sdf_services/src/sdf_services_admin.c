@@ -329,6 +329,10 @@ void sdf_admin_task(void *arg) {
                     sdf_services_admin_action_t timed_out = s->pending_admin_action;
                     s->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
                     s->pending_admin_action_start_us = 0;
+                    /* A remote delete/enroll records its named outcome here
+                     * so sdf_app can answer the requesting client with
+                     * timeout (companion-user-mgmt). */
+                    sdf_services_record_um_action_timeout_locked(timed_out);
                     xSemaphoreGive(s->lock);
 
                     led_flash_red();

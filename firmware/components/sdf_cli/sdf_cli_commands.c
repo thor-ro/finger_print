@@ -5,6 +5,7 @@
 #include "esp_partition.h"
 #include "fingerprint.h"
 #include "sdf_cli.h"
+#include "sdf_device_state.h"
 #include "sdf_protocol_zigbee.h"
 #include "sdf_services.h"
 #include "sdf_storage.h"
@@ -155,14 +156,26 @@ static int cmd_user_set_name(int argc, char **argv) {
     return 0;
   }
 
-  esp_err_t err = sdf_services_set_user_name(user_id, name);
-  if (err == ESP_OK) {
+  sdf_services_um_outcome_t outcome = sdf_services_set_user_name(user_id, name);
+  /* Rendered from the named outcome the services layer reported - never
+   * re-derived from local context (companion-user-mgmt). */
+  switch (outcome) {
+  case SDF_SERVICES_UM_OK:
     printf("Name '%s' set for user %u.\n", name, (unsigned)user_id);
-  } else if (err == ESP_ERR_INVALID_STATE) {
+    break;
+  case SDF_SERVICES_UM_NOT_FOUND:
+    printf("User %u is not enrolled.\n", (unsigned)user_id);
+    break;
+  case SDF_SERVICES_UM_NAME_TAKEN:
     printf("Cannot set name '%s': another enrolled user already holds it.\n",
            name);
-  } else {
-    printf("Failed to save name: %s\n", esp_err_to_name(err));
+    break;
+  case SDF_SERVICES_UM_INVALID:
+    printf("Invalid user ID or name.\n");
+    break;
+  default:
+    printf("Failed to save name: %s\n", sdf_services_um_outcome_name(outcome));
+    break;
   }
   return 0;
 }
@@ -270,22 +283,22 @@ static int cmd_user_del(int argc, char **argv) {
     return 0;
   }
 
-  esp_err_t err = sdf_services_delete_user(user_id);
-  if (err == ESP_OK) {
+  sdf_services_um_outcome_t outcome = sdf_services_delete_user(user_id);
+  switch (outcome) {
+  case SDF_SERVICES_UM_OK:
     printf("User %u deleted.\n", (unsigned)user_id);
-  } else if (err == ESP_ERR_NOT_FOUND) {
+    break;
+  case SDF_SERVICES_UM_NOT_FOUND:
     printf("User %u not found.\n", (unsigned)user_id);
-  } else if (err == ESP_ERR_INVALID_STATE) {
-    /* sdf_services_delete_user() returns INVALID_STATE for two causes: an
-     * uninitialized services module and the last-admin guard. check_auth()
-     * above has already required a CLI login, which cannot succeed before
-     * services are up, so only the guard is reachable here - state it
-     * plainly rather than repeating the raw code. */
+    break;
+  case SDF_SERVICES_UM_LAST_ADMIN:
     printf("Cannot delete user %u: this is the last remaining admin.\n",
            (unsigned)user_id);
-  } else {
+    break;
+  default:
     printf("Failed to delete user %u: %s\n", (unsigned)user_id,
-           esp_err_to_name(err));
+           sdf_services_um_outcome_name(outcome));
+    break;
   }
   return 0;
 }
@@ -314,35 +327,30 @@ static int cmd_user_add(int argc, char **argv) {
     return 0;
   }
 
-  // Check if user_id is already occupied
-  const size_t max_users = SDF_CLI_MAX_USERS;
-  uint16_t user_ids[SDF_CLI_MAX_USERS];
-  uint8_t permissions[SDF_CLI_MAX_USERS];
-  size_t count = 0;
-  esp_err_t err = sdf_services_query_users(user_ids, permissions, &count, max_users);
-  if (err != ESP_OK) {
-    printf("Failed to check existing users: %s\n", esp_err_to_name(err));
-    return 0;
-  }
-  for (size_t i = 0; i < count; i++) {
-    if (user_ids[i] == user_id) {
-      printf("User ID %u already enrolled.\n", (unsigned)user_id);
-      return 0;
-    }
-  }
-
-  // Request enrollment
-  printf("Scan an admin fingerprint to authorize enrollment of user %" PRIu16
-         " with permission %u...\n",
+  // Request enrollment. The already-enrolled check now lives in the
+  // services layer (ID_OCCUPIED), so every caller gets it - the CLI used to
+  // run its own query loop here. `user add` arms the enrolment directly,
+  // without an admin gate: the three scans below ARE the authorization.
+  printf("Enrolling user %" PRIu16 " with permission %u: 3 fingerprint "
+         "scans required.\n",
          user_id, (unsigned)permission);
-  err = sdf_services_request_enrollment(user_id, permission);
-  if (err != ESP_OK) {
-    if (err == ESP_ERR_INVALID_STATE) {
+  sdf_services_um_outcome_t outcome =
+      sdf_services_request_enrollment(user_id, permission);
+  if (outcome != SDF_SERVICES_UM_OK) {
+    switch (outcome) {
+    case SDF_SERVICES_UM_ID_OCCUPIED:
+      printf("User ID %u already enrolled.\n", (unsigned)user_id);
+      break;
+    case SDF_SERVICES_UM_BUSY:
       printf("Enrollment request rejected: service busy or invalid state.\n");
-    } else if (err == ESP_ERR_INVALID_ARG) {
+      break;
+    case SDF_SERVICES_UM_INVALID:
       printf("Invalid user ID or permission.\n");
-    } else {
-      printf("Failed to request enrollment: %s\n", esp_err_to_name(err));
+      break;
+    default:
+      printf("Failed to request enrollment: %s\n",
+             sdf_services_um_outcome_name(outcome));
+      break;
     }
     return 0;
   }
@@ -422,20 +430,31 @@ static int cmd_user(int argc, char **argv) {
     printf("Scan an admin fingerprint to authorize user %" PRIu16
            " permission -> %u...\n",
            user_id, (unsigned)permission);
-    esp_err_t err = sdf_services_change_user_permission(user_id, permission);
-    if (err == ESP_OK) {
+    sdf_services_um_outcome_t outcome =
+        sdf_services_change_user_permission(user_id, permission);
+    switch (outcome) {
+    case SDF_SERVICES_UM_OK:
       printf("Permission updated for user %" PRIu16 " to level %u.\n", user_id,
              (unsigned)permission);
-    } else if (err == ESP_ERR_NOT_FOUND) {
+      break;
+    case SDF_SERVICES_UM_NOT_FOUND:
       printf("User %" PRIu16 " is not enrolled.\n", user_id);
-    } else if (err == ESP_ERR_INVALID_STATE) {
-      printf("Permission change rejected. The service may be busy, or this "
-             "would remove the last admin fingerprint.\n");
-    } else if (err == ESP_ERR_TIMEOUT) {
+      break;
+    case SDF_SERVICES_UM_LAST_ADMIN:
+      printf("Permission change refused: this would remove the last admin "
+             "fingerprint.\n");
+      break;
+    case SDF_SERVICES_UM_BUSY:
+      printf("Permission change rejected: another admin action, permission "
+             "change or enrollment is in flight.\n");
+      break;
+    case SDF_SERVICES_UM_TIMEOUT:
       printf("Timed out waiting for admin authorization or sensor response.\n");
-    } else {
+      break;
+    default:
       printf("Failed to change permission for user %" PRIu16 ": %s\n", user_id,
-             esp_err_to_name(err));
+             sdf_services_um_outcome_name(outcome));
+      break;
     }
   } else if (strcmp(action, "add") == 0) {
     return cmd_user_add(argc, argv);
@@ -484,9 +503,40 @@ static int cmd_nuki_status(int argc, char **argv) {
   }
   printf("  BLE Transport: %s\n", ble_ready ? "ready" : "disconnected");
 
-  // Try to get last known keyturner state from sdf_app if available
-  // (This would need access to sdf_app internal state, for now we show unknown)
-  printf("  Last Keyturner State: unknown\n");
+  /* Last-known lock state and battery come from the transport-independent
+   * cache (companion-device-health) - the same copy the companion's Status
+   * characteristic reads, so console and companion cannot disagree. */
+  sdf_device_state_snapshot_t snap = sdf_device_state_snapshot();
+  const char *lock_name = "unknown";
+  if (snap.lock.condition == SDF_DEVICE_STATE_CONDITION_MEASURED) {
+    switch (snap.lock.state) {
+    case SDF_DEVICE_STATE_LOCK_LOCKED:
+      lock_name = "locked";
+      break;
+    case SDF_DEVICE_STATE_LOCK_UNLOCKED:
+      lock_name = "unlocked";
+      break;
+    case SDF_DEVICE_STATE_LOCK_NOT_FULLY_LOCKED:
+      lock_name = "not fully locked";
+      break;
+    default:
+      lock_name = "unknown";
+      break;
+    }
+  }
+  printf("  Last Keyturner State: %s", lock_name);
+  if (snap.lock.condition == SDF_DEVICE_STATE_CONDITION_MEASURED &&
+      snap.lock.source == SDF_DEVICE_STATE_LOCK_SOURCE_ASSUMED) {
+    printf(" (assumed - awaiting confirmation)");
+  }
+  printf("\n");
+
+  /* Battery is a measurement or unknown - never a substitute number. */
+  if (snap.battery.condition == SDF_DEVICE_STATE_CONDITION_MEASURED) {
+    printf("  Battery: %d%%\n", (int)snap.battery.percent);
+  } else {
+    printf("  Battery: unknown\n");
+  }
   printf("  Signal RSSI: N/A\n");
 
   return 0;

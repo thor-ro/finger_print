@@ -69,13 +69,13 @@ esp_err_t sdf_drivers_battery_adc_init(int adc_pin) {
 
 int sdf_drivers_battery_get_percent(void) {
   if (s_adc_handle == NULL) {
-    return 100;
+    return SDF_BATTERY_UNAVAILABLE;
   }
 
   int raw = 0;
   esp_err_t err = adc_oneshot_read(s_adc_handle, s_adc_channel, &raw);
   if (err != ESP_OK) {
-    return 100;
+    return SDF_BATTERY_UNAVAILABLE;
   }
 
   int voltage_mv = 0;
@@ -105,5 +105,5 @@ esp_err_t sdf_drivers_battery_adc_init(int adc_pin) {
   return ESP_OK;
 }
 
-int sdf_drivers_battery_get_percent(void) { return 100; }
+int sdf_drivers_battery_get_percent(void) { return SDF_BATTERY_UNAVAILABLE; }
 #endif

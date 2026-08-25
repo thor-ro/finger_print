@@ -31,7 +31,46 @@ typedef enum {
    * Gated Device Pairing Window (see sdf_ble_companion_open_pairing_window())
    * once an Admin fingerprint authorizes it. No BLE client to reply to. */
   SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW = 9,
+  /* Remote (companion-originated) user-management actions
+   * (companion-user-mgmt). Both carry their target in the pending-action
+   * state (user id, and permission for REMOTE_ENROLL); both resolve through
+   * the ordinary admin-fingerprint gate and record a named
+   * sdf_services_um_outcome_t for the requesting client (see
+   * sdf_services_take_um_action_result()). */
+  SDF_SERVICES_ADMIN_ACTION_DELETE_USER = 10,
+  SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL = 11,
+  /* Rename is a mutating verb too, and under companion-identity the name
+   * is a login identifier - so it joins the same admin-fingerprint gate
+   * carrying its target id and the new name. */
+  SDF_SERVICES_ADMIN_ACTION_RENAME_USER = 12,
 } sdf_services_admin_action_t;
+
+/* Named outcome of a user-management verb (companion-user-mgmt). Produced
+ * where the condition is known - inside sdf_services - rather than decoded
+ * by callers from an esp_err_t whose values are shared across unrelated
+ * conditions (last-admin vs busy vs uninitialised all used to be
+ * ESP_ERR_INVALID_STATE). The first nine values are carried on the wire as
+ * the reply's "result" string exactly as spelled here (lowercase); FAILED
+ * and UNAVAILABLE are firmware-internal only and render as a generic
+ * failure at any surface. */
+typedef enum {
+  SDF_SERVICES_UM_OK = 0,           /* the verb completed */
+  SDF_SERVICES_UM_NOT_FOUND = 1,    /* no such enrolled user */
+  SDF_SERVICES_UM_ID_OCCUPIED = 2,  /* enrolment target id already enrolled */
+  SDF_SERVICES_UM_LAST_ADMIN = 3,   /* refused: would leave no admin */
+  SDF_SERVICES_UM_NAME_TAKEN = 4,   /* refused: another user holds that name */
+  SDF_SERVICES_UM_BUSY = 5,         /* another action/permission-change/enrolment in flight */
+  SDF_SERVICES_UM_DENIED = 6,       /* the authorizing scan did not match an admin */
+  SDF_SERVICES_UM_TIMEOUT = 7,      /* no authorizing scan within the window */
+  SDF_SERVICES_UM_INVALID = 8,      /* malformed request / out-of-range field */
+  /* Firmware-internal outcomes below are never carried on the wire. */
+  SDF_SERVICES_UM_FAILED = 9,       /* sensor or storage operation failed */
+  SDF_SERVICES_UM_UNAVAILABLE = 10, /* services not initialised */
+} sdf_services_um_outcome_t;
+
+/* Wire-stable name of an outcome ("ok", "not_found", ...) - the exact
+ * string the companion protocol carries in a reply's "result" field. */
+const char *sdf_services_um_outcome_name(sdf_services_um_outcome_t outcome);
 
 /* Device setup progress. Completion is latched (persisted via
  * sdf_storage_setup_complete_save()); the intermediate steps remain derived
@@ -83,6 +122,13 @@ typedef enum {
 typedef void (*sdf_services_admin_action_cb)(
     void *ctx, sdf_services_admin_action_t action);
 
+/* Published by the fingerprint path after it performed sensor I/O for its
+ * own reasons (a match scan or an enrolment step): ready=true when the
+ * sensor answered, false when it timed out or errored. Never invoked on
+ * behalf of a reader - health reads must not probe the sensor. May be NULL.
+ * Runs on the match/enroll task context; the implementer must not block. */
+typedef void (*sdf_services_fingerprint_ready_cb)(void *ctx, bool ready);
+
 typedef struct {
   sdf_fingerprint_driver_config_t fingerprint;
   uint32_t match_poll_interval_ms;
@@ -92,6 +138,8 @@ typedef struct {
   uint32_t lockout_duration_ms;
   sdf_services_admin_action_cb admin_action_cb;
   void *admin_action_ctx;
+  sdf_services_fingerprint_ready_cb fingerprint_ready_cb;
+  void *fingerprint_ready_ctx;
   gpio_num_t wake_gpio;
   gpio_num_t power_en_gpio;
   gpio_num_t enrollment_btn_gpio;
@@ -108,12 +156,53 @@ bool sdf_services_is_ready(void);
 esp_err_t sdf_services_start_tasks(void);
 esp_err_t sdf_services_stop_tasks(void);
 
-esp_err_t sdf_services_delete_user(uint16_t user_id);
 esp_err_t sdf_services_clear_all_users(void);
 esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
                                    size_t *count, size_t max_count);
-esp_err_t sdf_services_change_user_permission(uint16_t user_id,
-                                              uint8_t permission);
+
+/* One serialized shape for the enrolled-user list (companion-user-mgmt "The
+ * User List Has One Serialized Shape"): a JSON array
+ * `[{"id":1,"perm":3,"name":"Alice"},{"id":5,"perm":1}]`. Every consumer
+ * that reports the list - the Zigbee report and the companion reply -
+ * builds its entries and calls this same serializer, so neither can drift
+ * into its own field names or value shapes. A user holding no name is
+ * represented by the absence of the name, never an empty string. */
+/* Capacity of any consumer's user-list staging: ids run 1..MAX. */
+#define SDF_SERVICES_USER_LIST_MAX SDF_FINGERPRINT_USER_ID_MAX
+
+typedef struct {
+  uint16_t id;
+  uint8_t permission;
+  const char *name; /* NULL or empty omits the "name" field */
+} sdf_services_user_list_entry_t;
+
+/* Serializes `count` entries into `buf` (at most buf_size bytes including
+ * the terminating NUL). Returns the number of bytes written excluding the
+ * NUL, or 0 when the buffer was too small - callers treat 0 as "does not
+ * fit" rather than as an empty list, which always serializes to at least
+ * "[]" (2 bytes). */
+size_t sdf_services_format_user_list(
+    const sdf_services_user_list_entry_t *entries, size_t count, char *buf,
+    size_t buf_size);
+
+/* User-management verbs report a named outcome (sdf_services_um_outcome_t)
+ * decided here, where each condition is known - callers render what these
+ * return rather than decoding an esp_err_t from their own context
+ * (companion-user-mgmt). */
+
+/* Deletes an enrolled user. Refuses an unenrolled id with NOT_FOUND and the
+ * only enrolled admin with LAST_ADMIN, both before any sensor traffic. */
+sdf_services_um_outcome_t sdf_services_delete_user(uint16_t user_id);
+
+/* Changes an enrolled user's permission. Arms the CHANGE_PERMISSION admin
+ * action and waits up to SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS for the
+ * authorizing Admin fingerprint; a scan that never arrives resolves as
+ * TIMEOUT, a non-admin match is refused by the gate (the caller observes
+ * TIMEOUT - the gate itself reports DENIED to its own resolution path).
+ * Written for a task that may block: do not call from the NimBLE host
+ * task. */
+sdf_services_um_outcome_t sdf_services_change_user_permission(uint16_t user_id,
+                                                              uint8_t permission);
 
 /* True when `user_id` is currently enrolled AND its cached permission is
  * admin (3). Reads only the in-memory enrolled-user cache - this is the
@@ -121,6 +210,11 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
  * (companion-identity "Session Authority Is Derived Live From The Bound
  * User"): a demotion or deletion of the bound user takes effect on open
  * sessions at their next decision, with no cascade. */
+/* Live enrolment check regardless of permission level: used by the Status
+ * characteristic's admission rule, where any authenticated bound user may
+ * read but a deleted bound user must lose access (companion-device-health).
+ * Mirrors user_is_enrolled_admin()'s live-resolution contract. */
+bool sdf_services_user_is_enrolled(uint16_t user_id);
 bool sdf_services_user_is_enrolled_admin(uint16_t user_id);
 
 /* Resolves which enrolled user currently holds `name`, scanning every
@@ -132,9 +226,9 @@ esp_err_t sdf_services_find_name_holder(const char *name, uint16_t *holder_id_ou
 
 /* Sets (renames) an enrolled user's name inside their unified record,
  * preserving any stored credential. Refuses an unenrolled id with
- * ESP_ERR_NOT_FOUND and a name already held by a different enrolled user
- * with ESP_ERR_INVALID_STATE, leaving every record unchanged. */
-esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name);
+ * NOT_FOUND and a name already held by a different enrolled user with
+ * NAME_TAKEN, leaving every record unchanged. */
+sdf_services_um_outcome_t sdf_services_set_user_name(uint16_t user_id, const char *name);
 
 esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action);
 
@@ -143,9 +237,37 @@ void sdf_services_trigger_low_battery_warning(void);
 esp_err_t sdf_services_reset_state(void);
 
 /* Enrollment API - event-driven */
-esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission);
+/* Arms the enrolment state machine directly (no admin-fingerprint gate):
+ * for the physical button path, the Zigbee programming commands and the
+ * setup phase's first enrolment, which have their own authorization. A
+ * target id that is already enrolled is refused with ID_OCCUPIED here -
+ * the check lives in the services layer so every caller gets it - and a
+ * busy device (enrolment or admin action already in flight) with BUSY. */
+sdf_services_um_outcome_t sdf_services_request_enrollment(uint16_t user_id,
+                                                          uint8_t permission);
 bool sdf_services_is_enrollment_active(void);
 sdf_enrollment_sm_t sdf_services_get_enrollment_state(void);
+
+/* Remote (companion-originated) user-management actions: arms the pending
+ * admin action (carrying the target id/permission) and returns immediately.
+ * The action resolves through the admin-fingerprint gate; its outcome is
+ * recorded and retrieved with sdf_services_take_um_action_result().
+ * Immediate refusals - guards evaluated BEFORE the gate is armed, so an
+ * impossible request never asks anyone to scan - return the named outcome
+ * without arming anything; OK means the gate is now armed and waiting. */
+
+sdf_services_um_outcome_t sdf_services_request_delete_user(uint16_t user_id);
+sdf_services_um_outcome_t sdf_services_request_remote_enrollment(
+    uint16_t user_id, uint8_t permission);
+sdf_services_um_outcome_t sdf_services_request_rename_user(uint16_t user_id,
+                                                           const char *name);
+
+/* Pops the outcome of the most recently resolved DELETE_USER or
+ * REMOTE_ENROLL admin action (authorized-executed, denied, or timed out).
+ * Returns false when no unresolved result is waiting. */
+bool sdf_services_take_um_action_result(uint16_t *user_id_out,
+                                        uint8_t *permission_out,
+                                        sdf_services_um_outcome_t *outcome_out);
 
 /* Admin Action API */
 esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action);

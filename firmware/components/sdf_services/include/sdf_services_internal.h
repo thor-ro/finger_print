@@ -45,6 +45,24 @@ typedef struct {
   int64_t lockout_until_us;
   sdf_services_admin_action_t pending_admin_action;
   int64_t pending_admin_action_start_us;
+  /* Target carried by the remote user-management actions DELETE_USER,
+   * REMOTE_ENROLL and RENAME_USER (companion-user-mgmt). Read by
+   * execute_admin_action() when the authorizing scan claims the action. */
+  uint16_t pending_admin_action_user_id;
+  uint8_t pending_admin_action_permission;
+  char pending_admin_action_name[SDF_STORAGE_WEB_USER_NAME_MAX];
+  /* Resolution of the most recent remote delete/enroll action, recorded by
+   * execute_admin_action() (authorized path), try_claim_admin_action()
+   * (denied) and the admin-task timeout sweep (timed out), and popped once
+   * by sdf_app via sdf_services_take_um_action_result(). Target id and
+   * permission are snapshotted at record time, not read back from the
+   * pending-action fields (which the next armed action overwrites).
+   * Single slot: the single-pending-admin-action invariant guarantees at
+   * most one of these actions can be in flight. */
+  sdf_services_um_outcome_t um_action_result;
+  uint16_t um_action_result_user_id;
+  uint8_t um_action_result_permission;
+  bool um_action_result_valid;
   bool permission_change_pending;
   uint16_t permission_change_user_id;
   uint8_t permission_change_permission;
@@ -85,6 +103,16 @@ void sdf_services_execute_admin_action(sdf_services_admin_action_t action,
                                        sdf_services_admin_action_cb action_cb,
                                        void *action_ctx);
 void sdf_services_pulse_pending_action_led(sdf_services_admin_action_t action);
+
+/* True for the remote user-management actions (DELETE_USER, REMOTE_ENROLL)
+ * whose denial and timeout must resolve immediately with a named outcome
+ * (companion-user-mgmt "Pending BLE-Originated Admin Actions Always
+ * Resolve"). */
+bool sdf_services_um_action_is_remote(sdf_services_admin_action_t action);
+/* Records TIMEOUT as the outcome of a timed-out remote user-management
+ * action. Callable with or without the lock held (the admin-task timeout
+ * sweep calls it while holding s_state.lock). */
+void sdf_services_record_um_action_timeout_locked(sdf_services_admin_action_t action);
 
 /* Task declarations */
 void sdf_match_task(void *arg);

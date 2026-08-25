@@ -119,10 +119,18 @@ The Web App SHALL log a user in using a two-step challenge-response exchange rat
 ### Requirement: OTA Battery Warning
 The Web App SHALL warn the user before triggering an OTA update about potential battery drain and SHALL stream the selected firmware image as a chunked binary transfer over the OTA characteristic using the begin/chunk/end opcode contract.
 
+The warning SHALL state the device's reported battery level, taken from the device health report, rather than asking the user to establish it by other means. Where the battery level is unknown, the warning SHALL say so, and SHALL NOT imply that the level has been checked.
+
 #### Scenario: OTA Warning
 - **WHEN** user selects a firmware file and starts an OTA update
 - **THEN** app displays a warning: "Ensure your battery is above 20%. OTA transfer over Bluetooth draws significant power and firmware is large — keep the app open and the device nearby until it completes."
 - **AND** app writes a begin-transfer message (`0x01`, 4-byte little-endian image size) to the OTA characteristic after user confirmation
+- **AND** the warning states the device's reported battery level alongside that text
+
+#### Scenario: Unknown battery stated as unknown
+- **WHEN** user starts an OTA update and the device reports no battery measurement
+- **THEN** app states that the battery level is unknown
+- **AND** app does not display a battery percentage in the warning
 
 #### Scenario: Chunked transfer with progress
 - **WHEN** the begin-transfer message is acknowledged with a `ready` status
@@ -169,3 +177,137 @@ The Web App SHALL inform the user that the setup phase is time-bounded and that 
 #### Scenario: Lapsed setup is reported
 - **WHEN** the device disconnects and stops advertising without setup having completed
 - **THEN** the app reports that the setup window elapsed, that progress was discarded, and that the user must press the device button to start again
+
+### Requirement: User Management View
+
+The Web App SHALL provide a user-management view for an authenticated admin session that lists every enrolled user with their id, name and permission, and that offers enrolling a new user, deleting a user, changing a user's permission, and renaming a user.
+
+The view SHALL be reachable after setup completes, not only during the wizard, since it is the only remote surface for these operations.
+
+#### Scenario: Enrolled users listed
+- **WHEN** an authenticated admin opens the user-management view
+- **THEN** the app lists each enrolled user with id, name and permission
+
+#### Scenario: Verbs offered
+- **WHEN** the user-management view is shown
+- **THEN** the app offers enrol, delete, permission change and rename
+
+#### Scenario: View available on a claimed device
+- **WHEN** an authenticated admin connects to a device whose setup is complete
+- **THEN** the user-management view is reachable without re-running the wizard
+
+### Requirement: Each Verb States The Physical Action It Requires
+
+Before submitting a verb that requires a fingerprint scan, the Web App SHALL tell the user which scans are needed and in what order — the authorizing admin scan, and for enrolment the three enrolment scans that follow — so that a user standing away from the device knows the request cannot complete without them.
+
+The app SHALL indicate that a request is waiting for a scan, rather than presenting it as finished, until the device reports its outcome.
+
+#### Scenario: Authorizing scan announced
+- **WHEN** the user submits a delete, permission change or rename
+- **THEN** the app states that an admin fingerprint scan at the device is required to authorize it
+
+#### Scenario: Enrolment scan sequence announced
+- **WHEN** the user submits an enrolment
+- **THEN** the app states that an admin scan authorizes the request and that the new user then scans three times
+
+#### Scenario: Pending request is not shown as complete
+- **WHEN** a request is waiting for an authorizing scan
+- **THEN** the app shows it as awaiting the scan
+- **AND** it does not report success until the device reports the outcome
+
+### Requirement: Refusals Are Rendered Specifically
+
+The Web App SHALL render the specific reason a user-management request was refused — that it would leave no admin, that the name is taken, that the target id is already enrolled, that the device is busy, that the scan was denied, or that no scan arrived in time — rather than a generic failure message.
+
+#### Scenario: Last-admin refusal explained
+- **WHEN** the device refuses a delete or demotion because it would leave no admin
+- **THEN** the app says so, rather than reporting a generic error
+
+#### Scenario: Name conflict explained
+- **WHEN** the device refuses a rename or enrolment because another user holds that name
+- **THEN** the app says the name is already in use
+
+#### Scenario: Busy explained as retryable
+- **WHEN** the device reports it is busy with another action
+- **THEN** the app says so and invites the user to retry, rather than reporting a failure
+
+#### Scenario: Denied and timed-out scans explained differently
+- **WHEN** an authorizing scan is denied
+- **THEN** the app's message differs from the one it shows when no scan arrived in time
+
+### Requirement: Self-Affecting Changes Are Warned Before Submission
+
+The Web App SHALL warn the user before submitting a change that deletes or demotes the user their own session is bound to, stating that their session will lose its authority. It SHALL NOT block the change, since another admin correcting a mistake needs the same operation.
+
+#### Scenario: Self-demotion warned
+- **WHEN** the user submits a permission change targeting their own bound user, lowering it below admin
+- **THEN** the app warns that their session will lose admin authority before submitting
+
+#### Scenario: Self-deletion warned
+- **WHEN** the user submits a delete targeting their own bound user
+- **THEN** the app warns that their session will lose authority and their account will be destroyed
+
+#### Scenario: Warning does not prevent the change
+- **WHEN** the user confirms the warning
+- **THEN** the app submits the request
+
+### Requirement: Device Health View
+
+The Web App SHALL present the device health report to an authenticated session, covering the lock state, the battery level, active alarms, fingerprint sensor readiness, the lock link, the radio's network state, the running firmware version and the OTA state.
+
+The view SHALL update from the device's health notifications rather than by polling, and SHALL be available to any authenticated user, not only an admin.
+
+#### Scenario: Health shown after authentication
+- **WHEN** a user authenticates
+- **THEN** the app presents the device health report
+
+#### Scenario: View updates on notification
+- **WHEN** the device notifies a changed health report
+- **THEN** the displayed values update without the user reloading or re-requesting
+
+#### Scenario: Available to a standard user
+- **WHEN** a user whose bound user holds standard permission authenticates
+- **THEN** the health view is available to them
+
+### Requirement: The App Displays Only Values The Device Measured
+
+The Web App SHALL display a device value only where the device reported it as a measurement. Where the device reports a value as unknown or not applicable, the app SHALL display that condition, and SHALL NOT display a number, a placeholder reading, or a value carried over from an earlier report as though it were current.
+
+The app SHALL NOT display any configuration setting as a device measurement. In particular it SHALL NOT display the configured default battery percentage as the device's battery level.
+
+#### Scenario: Unknown displayed as unknown
+- **WHEN** the device reports a value as unknown
+- **THEN** the app displays it as unknown
+- **AND** the app displays no number for it
+
+#### Scenario: Not applicable distinguished from unknown
+- **WHEN** the device reports a subsystem as not applicable
+- **THEN** the app's display of it differs from how it displays an unknown value
+
+#### Scenario: Configuration is not displayed as measurement
+- **WHEN** the app displays the device's battery level
+- **THEN** the value shown came from the health report
+- **AND** it did not come from the configured default battery percentage
+
+#### Scenario: Stale value is not shown as current
+- **WHEN** a previously reported value is no longer available
+- **THEN** the app stops presenting the earlier value as the current one
+
+### Requirement: Assumed Lock State Is Shown As Unconfirmed
+
+Where the device reports a lock state it has assumed from a command rather than one the lock confirmed, the Web App SHALL show it as awaiting confirmation. It SHALL NOT present an assumed state identically to a confirmed one.
+
+Where the device reports the age of a reading and that reading is old enough to be misleading, the app SHALL show how old it is.
+
+#### Scenario: Assumed state marked
+- **WHEN** the device reports a lock state marked as assumed
+- **THEN** the app shows it as awaiting confirmation from the lock
+
+#### Scenario: Confirmed state not marked
+- **WHEN** the device reports a lock state confirmed by the lock
+- **THEN** the app shows it without the awaiting-confirmation marking
+
+#### Scenario: Old reading's age surfaced
+- **WHEN** the device reports a reading old enough to be misleading
+- **THEN** the app shows how old the reading is
+

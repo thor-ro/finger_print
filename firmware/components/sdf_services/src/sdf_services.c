@@ -57,6 +57,15 @@
   ((uint32_t)CONFIG_SDF_SECURITY_BIOMETRIC_LOCKOUT_MS)
 #define SDF_SERVICES_ADMIN_ACTION_TIMEOUT_MS 10000u
 #define SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS 15000u
+/* The permission-change wait is served in slices, feeding the caller's task
+ * watchdog between them. A single 15 s block is exactly the configured TWDT
+ * window (sdf_config wdt_timeout_ms), so a scan that never arrives used to
+ * panic-reboot the device from the sdf_app task, which subscribes to the
+ * watchdog and feeds it only at the top of its loop. The slice is short
+ * enough that any plausible window is fed many times over, and
+ * sdf_platform_time_wdt_reset() is a no-op for a task that never
+ * subscribed - so this is safe for every caller, not just sdf_app. */
+#define SDF_SERVICES_PERMISSION_CHANGE_SLICE_MS 500u
 
 /* Maximum users supported by firmware. Aliased to the fingerprint driver's
  * own limit (fingerprint.h) rather than a separate hardcoded literal, so
@@ -166,6 +175,124 @@ esp_err_t sdf_services_fingerprint_result_to_err(
   }
 }
 
+const char *sdf_services_um_outcome_name(sdf_services_um_outcome_t outcome) {
+  switch (outcome) {
+  case SDF_SERVICES_UM_OK:
+    return "ok";
+  case SDF_SERVICES_UM_NOT_FOUND:
+    return "not_found";
+  case SDF_SERVICES_UM_ID_OCCUPIED:
+    return "id_occupied";
+  case SDF_SERVICES_UM_LAST_ADMIN:
+    return "last_admin";
+  case SDF_SERVICES_UM_NAME_TAKEN:
+    return "name_taken";
+  case SDF_SERVICES_UM_BUSY:
+    return "busy";
+  case SDF_SERVICES_UM_DENIED:
+    return "denied";
+  case SDF_SERVICES_UM_TIMEOUT:
+    return "timeout";
+  case SDF_SERVICES_UM_INVALID:
+    return "invalid";
+  case SDF_SERVICES_UM_FAILED:
+    return "failed";
+  case SDF_SERVICES_UM_UNAVAILABLE:
+    return "unavailable";
+  default:
+    return "failed";
+  }
+}
+
+bool sdf_services_um_action_is_remote(sdf_services_admin_action_t action) {
+  return action == SDF_SERVICES_ADMIN_ACTION_DELETE_USER ||
+         action == SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL ||
+         action == SDF_SERVICES_ADMIN_ACTION_RENAME_USER;
+}
+
+void sdf_services_record_um_action_timeout_locked(
+    sdf_services_admin_action_t action) {
+  if (!sdf_services_um_action_is_remote(action)) {
+    return;
+  }
+  s_state.um_action_result = SDF_SERVICES_UM_TIMEOUT;
+  s_state.um_action_result_user_id = s_state.pending_admin_action_user_id;
+  s_state.um_action_result_permission = s_state.pending_admin_action_permission;
+  s_state.um_action_result_valid = true;
+}
+
+/* Records a resolved remote delete/enroll outcome for
+ * sdf_services_take_um_action_result(). Takes the lock itself - callers run
+ * on the match task with no lock held. */
+static void sdf_services_record_um_result(uint16_t user_id, uint8_t permission,
+                                          sdf_services_um_outcome_t outcome) {
+  if (s_state.lock == NULL) {
+    return;
+  }
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+    s_state.um_action_result = outcome;
+    s_state.um_action_result_user_id = user_id;
+    s_state.um_action_result_permission = permission;
+    s_state.um_action_result_valid = true;
+    xSemaphoreGive(s_state.lock);
+  }
+}
+
+/* Shared guard evaluation for the remote delete/enroll requests: refuses
+ * with a named outcome before the gate is armed, so an impossible or
+ * premature request never pulses the pending-action LED or asks anyone to
+ * scan (companion-user-mgmt). `is_enroll` selects which direction the
+ * enrolled-state check applies (delete requires the target enrolled;
+ * enrol requires it free). Callable with s_state.lock held. */
+static sdf_services_um_outcome_t
+sdf_services_um_remote_guards_locked(bool initialized, uint16_t user_id,
+                                     uint8_t permission, bool is_enroll) {
+  if (!initialized) {
+    return SDF_SERVICES_UM_UNAVAILABLE;
+  }
+
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
+      user_id > SDF_SERVICES_MAX_USERS ||
+      (is_enroll && (permission < 1u || permission > 3u))) {
+    return SDF_SERVICES_UM_INVALID;
+  }
+
+  if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE ||
+      s_state.permission_change_pending ||
+      s_state.enrollment_request_pending ||
+      sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+    return SDF_SERVICES_UM_BUSY;
+  }
+
+  bool enrolled = SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, user_id);
+  if (!is_enroll && !enrolled) {
+    /* delete: the target must be enrolled */
+    return SDF_SERVICES_UM_NOT_FOUND;
+  }
+  if (is_enroll && enrolled) {
+    /* enrol: the target id must be free */
+    return SDF_SERVICES_UM_ID_OCCUPIED;
+  }
+
+  /* Last-admin guard, from the same cached snapshot every other user-scoped
+   * guard uses - only a deletion can hit this. */
+  if (!is_enroll) {
+    size_t admin_count = 0;
+    for (uint16_t id = 1; id <= SDF_SERVICES_MAX_USERS; id++) {
+      if (SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, id) &&
+          sdf_services_perm_get(s_state.enrolled_perm_packed, id) == 3u) {
+        admin_count++;
+      }
+    }
+    if (sdf_services_perm_get(s_state.enrolled_perm_packed, user_id) == 3u &&
+        admin_count <= 1u) {
+      return SDF_SERVICES_UM_LAST_ADMIN;
+    }
+  }
+
+  return SDF_SERVICES_UM_OK;
+}
+
 void sdf_services_complete_permission_change(esp_err_t result) {
   SemaphoreHandle_t done_sem = NULL;
   bool should_signal = false;
@@ -265,12 +392,14 @@ sdf_services_start_local_enrollment_with_permission(
     return;
   }
 
-  err = sdf_services_request_enrollment(new_id, permission);
-  if (err != ESP_OK) {
+  sdf_services_um_outcome_t enroll_outcome =
+      sdf_services_request_enrollment(new_id, permission);
+  if (enroll_outcome != SDF_SERVICES_UM_OK) {
     ESP_LOGW(TAG,
              "Failed to queue local enrollment for user_id=%u permission=%u: "
              "%s",
-             (unsigned)new_id, (unsigned)permission, esp_err_to_name(err));
+             (unsigned)new_id, (unsigned)permission,
+             sdf_services_um_outcome_name(enroll_outcome));
     led_flash_red();
   }
 }
@@ -299,6 +428,13 @@ void sdf_services_pulse_pending_action_led(sdf_services_admin_action_t action) {
     case SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR:
     case SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW:
       led_pulse_cyan();
+      break;
+    case SDF_SERVICES_ADMIN_ACTION_DELETE_USER:
+    case SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL:
+    case SDF_SERVICES_ADMIN_ACTION_RENAME_USER:
+      /* A user-scoped, scan-gated action; white like WEB_REG_AUTH. The
+       * mapping stays exhaustive over the action set (sdf-services-tasks). */
+      led_pulse_white();
       break;
     default:
       break;
@@ -411,6 +547,112 @@ void sdf_services_execute_admin_action(
     return;
   }
 
+  if (action == SDF_SERVICES_ADMIN_ACTION_DELETE_USER) {
+    uint16_t user_id = 0;
+    {
+      SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+      if (guard.acquired == pdTRUE) {
+        user_id = s_state.pending_admin_action_user_id;
+      }
+    }
+
+    /* The last-admin guard lives inside delete_user() and is evaluated
+     * from the cache snapshot BEFORE any sensor operation - re-checked
+     * here at execution time because enrolled state may have changed since
+     * the request armed the gate (companion-user-mgmt). */
+    sdf_services_um_outcome_t outcome = sdf_services_delete_user(user_id);
+    ESP_LOGI(TAG, "Remote delete user_id=%u resolved: %s", (unsigned)user_id,
+             sdf_services_um_outcome_name(outcome));
+    if (outcome == SDF_SERVICES_UM_OK) {
+      led_flash_green();
+    } else {
+      led_flash_red();
+    }
+    sdf_services_record_um_result(user_id, 0, outcome);
+    /* Falls through to action_cb so sdf_app routes the terminal reply to
+     * the requesting BLE connection. */
+  }
+
+  if (action == SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL) {
+    uint16_t user_id = 0;
+    uint8_t permission = 0;
+    bool start_ok = false;
+    {
+      SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+      if (guard.acquired != pdTRUE) {
+        sdf_services_record_um_result(0, 0, SDF_SERVICES_UM_FAILED);
+        if (action_cb != NULL) {
+          action_cb(action_ctx, action);
+        }
+        return;
+      }
+      user_id = s_state.pending_admin_action_user_id;
+      permission = s_state.pending_admin_action_permission;
+
+      /* Only NOW does the enrolment state machine start - a remote
+       * enrolment waits for its authorizing scan first (companion-user-mgmt
+       * "Remote Enrolment Cannot Bypass The Admin Fingerprint Gate"). The
+       * occupied-id guard was checked before arming and is re-checked by
+       * the state machine's own start. */
+      esp_err_t err =
+          sdf_enrollment_sm_start(&s_state.enrollment, user_id, permission);
+      if (err == ESP_OK) {
+        s_state.enrollment_request_pending = false;
+        start_ok = true;
+      } else {
+        ESP_LOGW(TAG, "Remote enrollment start failed user_id=%u: %s",
+                 (unsigned)user_id, esp_err_to_name(err));
+      }
+    }
+
+    if (!start_ok) {
+      led_flash_red();
+      sdf_services_record_um_result(user_id, permission, SDF_SERVICES_UM_FAILED);
+    } else {
+      ESP_LOGI(TAG, "Remote enrollment started user_id=%u permission=%u",
+               (unsigned)user_id, (unsigned)permission);
+      esp_err_t power_hold_err = fp_set_keep_power_on(true);
+      if (power_hold_err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to enable enrollment power hold: %s",
+                 esp_err_to_name(power_hold_err));
+      }
+      led_pulse_blue();
+      sdf_services_emit_enrollment_event(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                                         &s_state.enrollment);
+      sdf_services_record_um_result(user_id, permission, SDF_SERVICES_UM_OK);
+    }
+    /* Falls through to action_cb so sdf_app routes the terminal reply. */
+  }
+
+  if (action == SDF_SERVICES_ADMIN_ACTION_RENAME_USER) {
+    uint16_t user_id = 0;
+    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
+    {
+      SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+      if (guard.acquired == pdTRUE) {
+        user_id = s_state.pending_admin_action_user_id;
+        strncpy(name, s_state.pending_admin_action_name, sizeof(name) - 1);
+        name[sizeof(name) - 1] = '\0';
+      } else {
+        name[0] = '\0';
+      }
+    }
+
+    /* set_user_name() re-applies every guard (enrolled, name uniqueness)
+     * at execution time from current state. */
+    sdf_services_um_outcome_t outcome =
+        sdf_services_set_user_name(user_id, name);
+    ESP_LOGI(TAG, "Remote rename user_id=%u resolved: %s", (unsigned)user_id,
+             sdf_services_um_outcome_name(outcome));
+    if (outcome == SDF_SERVICES_UM_OK) {
+      led_flash_green();
+    } else {
+      led_flash_red();
+    }
+    sdf_services_record_um_result(user_id, 0, outcome);
+    /* Falls through to action_cb so sdf_app routes the terminal reply. */
+  }
+
   if (action_cb != NULL) {
     action_cb(action_ctx, action);
   }
@@ -459,6 +701,9 @@ bool sdf_services_try_claim_admin_action(
   void *action_ctx = NULL;
   bool has_pending = false;
   bool authorized = false;
+  bool um_denied = false;
+  bool perm_denied = false;
+  SemaphoreHandle_t perm_denied_sem = NULL;
 
   if (xSemaphoreTake(s_state.lock,
                      pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
@@ -478,6 +723,41 @@ bool sdf_services_try_claim_admin_action(
         s_state.request_web_authorizing_user_id = match->user_id;
       }
       authorized = true;
+    } else if (has_pending &&
+               sdf_services_um_action_is_remote(s_state.pending_admin_action)) {
+      /* A non-admin finger cannot leave a remote delete/enroll pending for
+       * retry the way other actions can: the requesting BLE client needs
+       * its terminal reply, so the action resolves immediately with DENIED
+       * (companion-user-mgmt "Pending BLE-Originated Admin Actions Always
+       * Resolve"). ADMIN_ACTION_COMPLETE below carries the denial to
+       * sdf_app, which pops the recorded outcome. */
+      action = s_state.pending_admin_action;
+      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+      s_state.pending_admin_action_start_us = 0;
+      s_state.um_action_result = SDF_SERVICES_UM_DENIED;
+      s_state.um_action_result_user_id = s_state.pending_admin_action_user_id;
+      s_state.um_action_result_permission =
+          s_state.pending_admin_action_permission;
+      s_state.um_action_result_valid = true;
+      um_denied = true;
+    } else if (has_pending && s_state.pending_admin_action ==
+                                  SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION &&
+               s_state.permission_change_pending) {
+      /* Same reasoning for the permission change, which has a caller
+       * blocked on admin_action_done_sem rather than a recorded outcome:
+       * resolve it here as denied instead of leaving it to time out, so
+       * "the scan was refused" and "no one scanned" stay distinguishable
+       * (companion-user-mgmt "Denied and timed-out scans are
+       * distinguishable"). The waiter maps ESP_ERR_NOT_ALLOWED to DENIED. */
+      action = s_state.pending_admin_action;
+      s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+      s_state.pending_admin_action_start_us = 0;
+      s_state.permission_change_result = ESP_ERR_NOT_ALLOWED;
+      s_state.permission_change_pending = false;
+      s_state.permission_change_user_id = 0;
+      s_state.permission_change_permission = 0;
+      perm_denied_sem = s_state.admin_action_done_sem;
+      perm_denied = true;
     }
     xSemaphoreGive(s_state.lock);
   }
@@ -493,6 +773,30 @@ bool sdf_services_try_claim_admin_action(
              (unsigned)match->permission);
     led_admin_auth_green();
     sdf_services_execute_admin_action(action, action_cb, action_ctx);
+  } else if (um_denied) {
+    ESP_LOGW(TAG,
+             "Remote user-management action %d denied by non-admin scan "
+             "user_id=%u",
+             (int)action, (unsigned)match->user_id);
+    led_admin_auth_red();
+    sdf_event_router_event_t evt = {
+        .type = SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE,
+        .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        .payload.admin_action_complete = {.action = action,
+                                          .result = ESP_ERR_INVALID_STATE},
+    };
+    sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
+  } else if (perm_denied) {
+    ESP_LOGW(TAG,
+             "Permission change denied by non-admin scan user_id=%u",
+             (unsigned)match->user_id);
+    led_admin_auth_red();
+    /* Signalled outside the lock: the waiter re-takes it to read the
+     * result it was left. */
+    if (perm_denied_sem != NULL) {
+      xSemaphoreGive(perm_denied_sem);
+    }
   } else {
     ESP_LOGW(TAG,
              "Admin auth rejected: user_id=%u permission=%u != ADMIN(3)",
@@ -897,9 +1201,9 @@ esp_err_t sdf_services_persist_enrolled_users_locked(void) {
   return err;
 }
 
-esp_err_t sdf_services_delete_user(uint16_t user_id) {
+sdf_services_um_outcome_t sdf_services_delete_user(uint16_t user_id) {
   if (s_state.lock == NULL)
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_UNAVAILABLE;
 
   /* Snapshot the authoritative enrolled-user record before touching the
    * sensor: both guards below are decided from the cached bitmap + packed
@@ -912,7 +1216,7 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired != pdTRUE) {
-      return ESP_ERR_TIMEOUT;
+      return SDF_SERVICES_UM_FAILED;
     }
     snap_user_bmp = s_state.enrolled_user_bmp;
     memcpy(snap_perm_packed, s_state.enrolled_perm_packed,
@@ -925,7 +1229,7 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
   if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
       user_id > SDF_SERVICES_MAX_USERS ||
       !SDF_SERVICES_BMP_TEST(snap_user_bmp, user_id)) {
-    return ESP_ERR_NOT_FOUND;
+    return SDF_SERVICES_UM_NOT_FOUND;
   }
 
   /* Count admins from the same snapshot - identical derivation to
@@ -945,11 +1249,12 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
      * re-pair, Zigbee join, Web Registration Authorization): enrolment of a
      * replacement requires the physical finger, and there is no sensor-side
      * rollback once fp_delete_user() runs. Refuse before the sensor call so
-     * a rejected delete is free. ESP_ERR_INVALID_STATE rather than a new
-     * code mirrors change_user_permission()'s last-admin guard;
-     * clear_all_users() stays deliberately exempt - losing the last admin
-     * is the point of the factory-reset bulk wipe. */
-    return ESP_ERR_INVALID_STATE;
+     * a rejected delete is free, under the distinct LAST_ADMIN outcome
+     * (companion-user-mgmt) rather than the overloaded INVALID_STATE this
+     * guard used to share with "busy". clear_all_users() stays deliberately
+     * exempt - losing the last admin is the point of the factory-reset bulk
+     * wipe. */
+    return SDF_SERVICES_UM_LAST_ADMIN;
   }
 
   /* fp_delete_user() is a blocking UART round-trip (up to the ~12s sensor
@@ -960,7 +1265,7 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
    * update + synchronous NVS persist below. */
   sdf_fingerprint_op_result_t res = fp_delete_user(user_id);
   if (res != SDF_FINGERPRINT_OP_OK) {
-    return ESP_FAIL;
+    return SDF_SERVICES_UM_FAILED;
   }
 
   bool persisted = false;
@@ -982,7 +1287,7 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
     ESP_LOGE(TAG, "Failed to persist enrolled-user cache after deleting user_id=%u",
              (unsigned)user_id);
     led_flash_red();
-    return ESP_FAIL;
+    return SDF_SERVICES_UM_FAILED;
   }
 
   /* Deleting the user destroys their unified record - name and any bound
@@ -991,7 +1296,7 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
    * the same clear; there is no separate reclamation step. Best-effort: a
    * storage failure here must not fail an already-committed sensor delete. */
   sdf_storage_web_user_clear(user_id);
-  return ESP_OK;
+  return SDF_SERVICES_UM_OK;
 }
 
 esp_err_t sdf_services_clear_all_users(void) {
@@ -1061,23 +1366,90 @@ esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
   return ESP_OK;
 }
 
-esp_err_t sdf_services_change_user_permission(uint16_t user_id,
-                                              uint8_t permission) {
+/* The one user-list serializer (see sdf_services.h). Plain snprintf rather
+ * than cJSON so it stays host-testable and allocation-free; the minimal
+ * JSON string escaping below keeps names containing quotes, backslashes or
+ * control characters valid JSON. */
+size_t sdf_services_format_user_list(
+    const sdf_services_user_list_entry_t *entries, size_t count, char *buf,
+    size_t buf_size) {
+  if (buf == NULL || buf_size < 3) {
+    return 0;
+  }
+
+  size_t pos = 0;
+  buf[pos++] = '[';
+
+  for (size_t i = 0; i < count; i++) {
+    char entry[SDF_STORAGE_WEB_USER_NAME_MAX * 6 + 32];
+    const char *name = entries[i].name;
+    bool has_name = name != NULL && name[0] != '\0';
+
+    if (has_name) {
+      /* Escape into a scratch big enough for any legal name
+       * (SDF_STORAGE_WEB_USER_NAME_MAX caps names well below this). */
+      char escaped[SDF_STORAGE_WEB_USER_NAME_MAX * 6 + 1];
+      size_t e = 0;
+      for (const char *p = name; *p != '\0'; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (e + 6 >= sizeof(escaped)) {
+          break;
+        }
+        if (c == '"' || c == '\\') {
+          escaped[e++] = '\\';
+          escaped[e++] = (char)c;
+        } else if (c < 0x20) {
+          e += (size_t)snprintf(escaped + e, sizeof(escaped) - e, "\\u%04x", c);
+        } else {
+          escaped[e++] = (char)c;
+        }
+      }
+      escaped[e] = '\0';
+      int n = snprintf(entry, sizeof(entry), "%s{\"id\":%u,\"perm\":%u,\"name\":\"%s\"}",
+                       i == 0 ? "" : ",", (unsigned)entries[i].id,
+                       (unsigned)entries[i].permission, escaped);
+      if (n <= 0 || (size_t)n >= sizeof(entry)) {
+        return 0;
+      }
+    } else {
+      int n = snprintf(entry, sizeof(entry), "%s{\"id\":%u,\"perm\":%u}",
+                       i == 0 ? "" : ",", (unsigned)entries[i].id,
+                       (unsigned)entries[i].permission);
+      if (n <= 0 || (size_t)n >= sizeof(entry)) {
+        return 0;
+      }
+    }
+
+    size_t len = strlen(entry);
+    if (pos + len + 2 > buf_size) {
+      return 0;
+    }
+    memcpy(buf + pos, entry, len);
+    pos += len;
+  }
+
+  buf[pos++] = ']';
+  buf[pos] = '\0';
+  return pos;
+}
+
+sdf_services_um_outcome_t sdf_services_change_user_permission(uint16_t user_id,
+                                                              uint8_t permission) {
   if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
       user_id > SDF_FINGERPRINT_USER_ID_MAX || permission < 1u ||
       permission > 3u) {
-    return ESP_ERR_INVALID_ARG;
+    return SDF_SERVICES_UM_INVALID;
   }
 
   if (s_state.lock == NULL || s_state.admin_action_done_sem == NULL) {
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_UNAVAILABLE;
   }
 
   bool initialized = false;
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired != pdTRUE) {
-      return ESP_ERR_TIMEOUT;
+      return SDF_SERVICES_UM_FAILED;
     }
 
     initialized = s_state.initialized;
@@ -1085,12 +1457,13 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
         s_state.permission_change_pending ||
         s_state.enrollment_request_pending ||
         sdf_enrollment_sm_is_active(&s_state.enrollment)) {
-      return ESP_ERR_INVALID_STATE;
+      return s_state.initialized ? SDF_SERVICES_UM_BUSY
+                                 : SDF_SERVICES_UM_UNAVAILABLE;
     }
   }
 
   if (!initialized) {
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_UNAVAILABLE;
   }
 
   const size_t query_capacity = (size_t)SDF_SERVICES_MAX_USERS;
@@ -1100,7 +1473,7 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
   if (esp_get_free_heap_size() < 4096) {
     ESP_LOGE(TAG, "Insufficient heap for permission change query");
     sdf_app_emit_audit(SDF_AUDIT_PROTOCOL_ERROR, 0, ESP_ERR_NO_MEM, 0);
-    return ESP_ERR_NO_MEM;
+    return SDF_SERVICES_UM_FAILED;
   }
 
   /* Use local temp arrays for query, then pack into compact format */
@@ -1112,7 +1485,7 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
 
   err = sdf_services_query_users(user_ids, perms, &count, query_capacity);
   if (err != ESP_OK) {
-    return err;
+    return SDF_SERVICES_UM_FAILED;
   }
 
   /* Pack results into compact bitmap + packed permissions format */
@@ -1133,28 +1506,28 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
   }
 
   if (!found) {
-    return ESP_ERR_NOT_FOUND;
+    return SDF_SERVICES_UM_NOT_FOUND;
   }
 
   if (current_permission == permission) {
-    return ESP_OK;
+    return SDF_SERVICES_UM_OK;
   }
 
   if (current_permission == 3u && permission != 3u && admin_count <= 1u) {
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_LAST_ADMIN;
   }
 
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired != pdTRUE) {
-      return ESP_ERR_TIMEOUT;
+      return SDF_SERVICES_UM_FAILED;
     }
 
     if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE ||
         s_state.permission_change_pending ||
         s_state.enrollment_request_pending ||
         sdf_enrollment_sm_is_active(&s_state.enrollment)) {
-      return ESP_ERR_INVALID_STATE;
+      return SDF_SERVICES_UM_BUSY;
     }
 
     while (xSemaphoreTake(s_state.admin_action_done_sem, 0) == pdTRUE) {
@@ -1174,19 +1547,55 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
     xSemaphoreGive(s_state.wake_sem);
   }
 
-  if (xSemaphoreTake(s_state.admin_action_done_sem,
-                     pdMS_TO_TICKS(SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS)) !=
-      pdTRUE) {
-    return ESP_ERR_TIMEOUT;
+  bool resolved = false;
+  for (uint32_t waited_ms = 0;
+       waited_ms < SDF_SERVICES_PERMISSION_CHANGE_WAIT_MS;
+       waited_ms += SDF_SERVICES_PERMISSION_CHANGE_SLICE_MS) {
+    sdf_platform_time_wdt_reset();
+    if (xSemaphoreTake(s_state.admin_action_done_sem,
+                       pdMS_TO_TICKS(SDF_SERVICES_PERMISSION_CHANGE_SLICE_MS)) ==
+        pdTRUE) {
+      resolved = true;
+      break;
+    }
+  }
+  sdf_platform_time_wdt_reset();
+
+  if (!resolved) {
+    return SDF_SERVICES_UM_TIMEOUT;
   }
 
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired != pdTRUE) {
-      return ESP_ERR_TIMEOUT;
+      return SDF_SERVICES_UM_FAILED;
     }
-    return s_state.permission_change_result;
+    switch (s_state.permission_change_result) {
+    case ESP_OK:
+      return SDF_SERVICES_UM_OK;
+    case ESP_ERR_TIMEOUT:
+      return SDF_SERVICES_UM_TIMEOUT;
+    case ESP_ERR_NOT_ALLOWED:
+      /* The gate resolved the action against a non-admin scan. */
+      return SDF_SERVICES_UM_DENIED;
+    default:
+      return SDF_SERVICES_UM_FAILED;
+    }
   }
+}
+
+bool sdf_services_user_is_enrolled(uint16_t user_id) {
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
+      user_id > SDF_SERVICES_MAX_USERS || s_state.lock == NULL) {
+    return false;
+  }
+
+  bool enrolled = false;
+  SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+  if (guard.acquired == pdTRUE) {
+    enrolled = SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, user_id);
+  }
+  return enrolled;
 }
 
 bool sdf_services_user_is_enrolled_admin(uint16_t user_id) {
@@ -1225,15 +1634,15 @@ esp_err_t sdf_services_find_name_holder(const char *name, uint16_t *holder_id_ou
   return ESP_ERR_NOT_FOUND;
 }
 
-esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name) {
+sdf_services_um_outcome_t sdf_services_set_user_name(uint16_t user_id, const char *name) {
   if (user_id < SDF_FINGERPRINT_USER_ID_MIN || user_id > SDF_SERVICES_MAX_USERS ||
       name == NULL || name[0] == '\0' ||
       strlen(name) >= SDF_STORAGE_WEB_USER_NAME_MAX) {
-    return ESP_ERR_INVALID_ARG;
+    return SDF_SERVICES_UM_INVALID;
   }
 
   if (s_state.lock == NULL) {
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_UNAVAILABLE;
   }
 
   /* Enrolled check from the authoritative cache, same as every other
@@ -1242,12 +1651,12 @@ esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name) {
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired != pdTRUE) {
-      return ESP_ERR_TIMEOUT;
+      return SDF_SERVICES_UM_FAILED;
     }
     enrolled = SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, user_id);
   }
   if (!enrolled) {
-    return ESP_ERR_NOT_FOUND;
+    return SDF_SERVICES_UM_NOT_FOUND;
   }
 
   /* Uniqueness: refuse a rename onto a name another enrolled user already
@@ -1256,7 +1665,7 @@ esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name) {
   uint16_t holder_id = 0;
   if (sdf_services_find_name_holder(name, &holder_id) == ESP_OK &&
       holder_id != user_id) {
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_NAME_TAKEN;
   }
 
   /* Merge into the existing record so any stored credential survives the
@@ -1264,7 +1673,7 @@ esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name) {
   sdf_storage_web_user_t rec = {0};
   esp_err_t err = sdf_storage_web_user_load(user_id, &rec);
   if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-    return err;
+    return SDF_SERVICES_UM_FAILED;
   }
 
   strncpy(rec.name, name, SDF_STORAGE_WEB_USER_NAME_MAX - 1);
@@ -1272,7 +1681,9 @@ esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name) {
   /* A written name means a record exists; has_credential keeps whatever the
    * previous record said (name-only records stay name-only). */
   rec.valid = true;
-  return sdf_storage_web_user_save(user_id, &rec);
+  return sdf_storage_web_user_save(user_id, &rec) == ESP_OK
+             ? SDF_SERVICES_UM_OK
+             : SDF_SERVICES_UM_FAILED;
 }
 
 esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action) {
@@ -1358,6 +1769,13 @@ esp_err_t sdf_services_reset_state(void) {
   s_state.failed_attempt_window_start_us = 0;
   s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
   s_state.pending_admin_action_start_us = 0;
+  s_state.pending_admin_action_user_id = 0;
+  s_state.pending_admin_action_permission = 0;
+  s_state.pending_admin_action_name[0] = '\0';
+  s_state.um_action_result = SDF_SERVICES_UM_OK;
+  s_state.um_action_result_user_id = 0;
+  s_state.um_action_result_permission = 0;
+  s_state.um_action_result_valid = false;
   s_state.match_cooldown_until_us = 0;
   s_state.enrollment_request_pending = false;
   s_state.request_user_id = 0;
@@ -1405,25 +1823,39 @@ void sdf_services_reset_enrolled_user_cache(void) {
   }
 }
 
-esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission) {
+sdf_services_um_outcome_t sdf_services_request_enrollment(uint16_t user_id,
+                                                          uint8_t permission) {
   if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
       user_id > SDF_FINGERPRINT_USER_ID_MAX || permission < 1u ||
       permission > 3u) {
-    return ESP_ERR_INVALID_ARG;
+    return SDF_SERVICES_UM_INVALID;
   }
 
   if (s_state.lock == NULL) {
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_UNAVAILABLE;
   }
 
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
-    return ESP_ERR_TIMEOUT;
+    return SDF_SERVICES_UM_FAILED;
   }
 
-  if (!s_state.initialized || s_state.enrollment_request_pending ||
+  if (!s_state.initialized) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_SERVICES_UM_UNAVAILABLE;
+  }
+
+  /* Occupied-id check, performed here so every caller gets it - the CLI
+   * used to run its own query loop for exactly this and other callers got
+   * nothing (companion-user-mgmt). */
+  if (SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, user_id)) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_SERVICES_UM_ID_OCCUPIED;
+  }
+
+  if (s_state.enrollment_request_pending ||
       sdf_enrollment_sm_is_active(&s_state.enrollment)) {
     xSemaphoreGive(s_state.lock);
-    return ESP_ERR_INVALID_STATE;
+    return SDF_SERVICES_UM_BUSY;
   }
 
   s_state.request_user_id = user_id;
@@ -1434,7 +1866,166 @@ esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission) 
   if (s_state.wake_sem != NULL) {
     xSemaphoreGive(s_state.wake_sem);
   }
-  return ESP_OK;
+  return SDF_SERVICES_UM_OK;
+}
+
+sdf_services_um_outcome_t sdf_services_request_delete_user(uint16_t user_id) {
+  if (s_state.lock == NULL) {
+    return SDF_SERVICES_UM_UNAVAILABLE;
+  }
+
+  sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_OK;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return SDF_SERVICES_UM_FAILED;
+  }
+
+  /* Guards before the gate: a deletion that can never be permitted does
+   * not arm anything, pulse the pending-action LED, or ask anyone to scan
+   * (companion-user-mgmt "User Deletion Is An Admin-Fingerprint-Gated
+   * Action"). */
+  outcome = sdf_services_um_remote_guards_locked(
+      s_state.initialized, user_id, 0, false);
+  if (outcome != SDF_SERVICES_UM_OK) {
+    xSemaphoreGive(s_state.lock);
+    return outcome;
+  }
+
+  s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_DELETE_USER;
+  s_state.pending_admin_action_user_id = user_id;
+  s_state.pending_admin_action_permission = 0;
+  s_state.pending_admin_action_start_us = esp_timer_get_time();
+  sdf_services_pulse_pending_action_led(s_state.pending_admin_action);
+  sdf_admin_task_wake();
+  xSemaphoreGive(s_state.lock);
+
+  if (s_state.wake_sem != NULL) {
+    xSemaphoreGive(s_state.wake_sem);
+  }
+  return SDF_SERVICES_UM_OK;
+}
+
+sdf_services_um_outcome_t sdf_services_request_remote_enrollment(
+    uint16_t user_id, uint8_t permission) {
+  if (s_state.lock == NULL) {
+    return SDF_SERVICES_UM_UNAVAILABLE;
+  }
+
+  sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_OK;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return SDF_SERVICES_UM_FAILED;
+  }
+
+  /* Guards before the gate, including ID_OCCUPIED: a remote enrolment that
+   * cannot proceed never arms the gate. The enrolment state machine itself
+   * is NOT started here - only an authorizing admin scan claiming
+   * REMOTE_ENROLL starts it (see execute_admin_action()). */
+  outcome = sdf_services_um_remote_guards_locked(
+      s_state.initialized, user_id, permission, true);
+  if (outcome != SDF_SERVICES_UM_OK) {
+    xSemaphoreGive(s_state.lock);
+    return outcome;
+  }
+
+  s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL;
+  s_state.pending_admin_action_user_id = user_id;
+  s_state.pending_admin_action_permission = permission;
+  s_state.pending_admin_action_start_us = esp_timer_get_time();
+  sdf_services_pulse_pending_action_led(s_state.pending_admin_action);
+  sdf_admin_task_wake();
+  xSemaphoreGive(s_state.lock);
+
+  if (s_state.wake_sem != NULL) {
+    xSemaphoreGive(s_state.wake_sem);
+  }
+  return SDF_SERVICES_UM_OK;
+}
+
+sdf_services_um_outcome_t sdf_services_request_rename_user(uint16_t user_id,
+                                                           const char *name) {
+  if (name == NULL || name[0] == '\0' ||
+      strlen(name) >= SDF_STORAGE_WEB_USER_NAME_MAX) {
+    return SDF_SERVICES_UM_INVALID;
+  }
+
+  if (s_state.lock == NULL) {
+    return SDF_SERVICES_UM_UNAVAILABLE;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return SDF_SERVICES_UM_FAILED;
+  }
+
+  if (!s_state.initialized) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_SERVICES_UM_UNAVAILABLE;
+  }
+
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
+      user_id > SDF_SERVICES_MAX_USERS) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_SERVICES_UM_INVALID;
+  }
+
+  if (s_state.pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE ||
+      s_state.permission_change_pending ||
+      s_state.enrollment_request_pending ||
+      sdf_enrollment_sm_is_active(&s_state.enrollment)) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_SERVICES_UM_BUSY;
+  }
+
+  if (!SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, user_id)) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_SERVICES_UM_NOT_FOUND;
+  }
+
+  /* Name-uniqueness guard before the gate: a rename that can never be
+   * permitted does not ask anyone to scan. */
+  uint16_t holder_id = 0;
+  if (sdf_services_find_name_holder(name, &holder_id) == ESP_OK &&
+      holder_id != user_id) {
+    xSemaphoreGive(s_state.lock);
+    return SDF_SERVICES_UM_NAME_TAKEN;
+  }
+
+  s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_RENAME_USER;
+  s_state.pending_admin_action_user_id = user_id;
+  s_state.pending_admin_action_permission = 0;
+  strncpy(s_state.pending_admin_action_name, name,
+          sizeof(s_state.pending_admin_action_name) - 1);
+  s_state.pending_admin_action_name[sizeof(s_state.pending_admin_action_name) - 1] = '\0';
+  s_state.pending_admin_action_start_us = esp_timer_get_time();
+  sdf_services_pulse_pending_action_led(s_state.pending_admin_action);
+  sdf_admin_task_wake();
+  xSemaphoreGive(s_state.lock);
+
+  if (s_state.wake_sem != NULL) {
+    xSemaphoreGive(s_state.wake_sem);
+  }
+  return SDF_SERVICES_UM_OK;
+}
+
+bool sdf_services_take_um_action_result(uint16_t *user_id_out,
+                                        uint8_t *permission_out,
+                                        sdf_services_um_outcome_t *outcome_out) {
+  if (user_id_out == NULL || permission_out == NULL || outcome_out == NULL ||
+      s_state.lock == NULL) {
+    return false;
+  }
+
+  bool valid = false;
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+    if (s_state.um_action_result_valid) {
+      *user_id_out = s_state.um_action_result_user_id;
+      *permission_out = s_state.um_action_result_permission;
+      *outcome_out = s_state.um_action_result;
+      s_state.um_action_result_valid = false;
+      s_state.um_action_result = SDF_SERVICES_UM_OK;
+      valid = true;
+    }
+    xSemaphoreGive(s_state.lock);
+  }
+  return valid;
 }
 
 sdf_services_setup_state_t sdf_services_get_setup_state(void) {

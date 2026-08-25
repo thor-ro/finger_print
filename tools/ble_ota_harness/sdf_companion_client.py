@@ -51,6 +51,7 @@ from bumble_espemu import (
     CONFIG_UUID,
     ENROLL_UUID,
     OTA_UUID,
+    STATUS_UUID,
     SVC_UUID,
 )
 
@@ -88,10 +89,17 @@ class CompanionClient:
         self.peer = Peer(connection)
         self.auth_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self.ota_queue: asyncio.Queue[bytes] = asyncio.Queue()
+        # User-management replies/list-parts/progress (JSON) from the
+        # Enrollment characteristic (companion-user-mgmt).
+        self.enroll_queue: asyncio.Queue[dict] = asyncio.Queue()
+        # Device-health reports / change markers from the Status
+        # characteristic (companion-device-health).
+        self.status_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self.auth = None
         self.ota = None
         self.config = None
         self.enroll = None
+        self.status = None
         self.att_mtu = 23
 
     async def discover(self) -> None:
@@ -110,6 +118,7 @@ class CompanionClient:
         # asserts on it via require_config_discovered().
         self.config = uuid_strs.get(CONFIG_UUID)
         self.enroll = uuid_strs.get(ENROLL_UUID)
+        self.status = uuid_strs.get(STATUS_UUID)
 
     def require_config_discovered(self) -> None:
         if self.config is None:
@@ -126,6 +135,38 @@ class CompanionClient:
         if self.enroll is None:
             raise CompanionError("Enrollment characteristic not discovered")
 
+    # --- device health (companion-device-health) ------------------------------
+
+    def require_status_discovered(self) -> None:
+        if self.status is None:
+            raise CompanionError("Status characteristic not discovered")
+
+    async def read_status(self) -> bytes:
+        """Read the Status characteristic. Pre-login this raises bumble
+        ProtocolError 0x05 (INSUFFICIENT_AUTHENTICATION); post-login it
+        returns the health-report JSON."""
+        self.require_status_discovered()
+        return await self.status.read_value()
+
+    async def subscribe_status(self) -> None:
+        """Subscribe to Status notifications (health report updates)."""
+        self.require_status_discovered()
+        await self.status.subscribe(self._on_status_notify)
+
+    def _on_status_notify(self, value: bytes) -> None:
+        self.status_queue.put_nowait(bytes(value))
+
+    async def next_status_notification(self, timeout_s: float = 5.0) -> bytes:
+        """Resolves with the raw payload of the next Status notification -
+        a JSON health report, or an empty change marker."""
+        return await asyncio.wait_for(self.status_queue.get(), timeout=timeout_s)
+
+    async def drain_status_notifications(self) -> list[bytes]:
+        items: list[bytes] = []
+        while not self.status_queue.empty():
+            items.append(self.status_queue.get_nowait())
+        return items
+
     async def read_enroll(self) -> bytes:
         """Read the Enrollment characteristic - a minimal-packet authority
         probe (its value is empty unless an enrollment is in progress), so it
@@ -137,6 +178,8 @@ class CompanionClient:
     async def subscribe(self) -> None:
         await self.auth.subscribe(self._on_auth_notify)
         await self.ota.subscribe(self._on_ota_notify)
+        if self.enroll is not None:
+            await self.enroll.subscribe(self._on_enroll_notify)
 
     async def negotiate_mtu(self, mtu: int = 247) -> int:
         """Exchange ATT MTU; returns the negotiated value."""
@@ -148,6 +191,40 @@ class CompanionClient:
 
     def _on_ota_notify(self, value: bytes) -> None:
         self.ota_queue.put_nowait(value)
+
+    def _on_enroll_notify(self, value: bytes) -> None:
+        try:
+            self.enroll_queue.put_nowait(json.loads(bytes(value).decode()))
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise CompanionError(f"bad enroll notification: {exc}") from exc
+
+    # --- user management (companion-user-mgmt wire format) --------------------
+
+    async def um_write(self, request: dict) -> None:
+        """Writes one user-management request without waiting for its reply."""
+        await self.enroll.write_value(
+            json.dumps(request).encode(), with_response=True
+        )
+
+    async def um_wait_reply(self, req_id: int, timeout_s: float = 15.0) -> dict:
+        """Resolves with the terminal message for `req_id` - a {"req":N,
+        "result":...} reply, or the final list part ("end":true) for a list.
+        Messages belonging to other requests (e.g. stale progress) are
+        skipped."""
+        deadline = asyncio.get_running_loop().time() + timeout_s
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise CompanionError(f"timeout waiting for UM reply req={req_id}")
+            try:
+                msg = await asyncio.wait_for(self.enroll_queue.get(),
+                                             timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                raise CompanionError(
+                    f"timeout waiting for UM reply req={req_id}"
+                ) from exc
+            if isinstance(msg, dict) and msg.get("req") == req_id:
+                return msg
 
     # --- auth -----------------------------------------------------------------
 

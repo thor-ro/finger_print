@@ -1,6 +1,8 @@
 #include "sdf_ble_companion.h"
 #include "sdf_ble_companion_bond_state.h"
 #include "sdf_ble_companion_gatt_scratch.h"
+#include "sdf_ble_companion_status.h"
+#include "sdf_device_state.h"
 #include "sdf_storage.h"
 #include "sdf_event_router.h"
 #include "sdf_nuki_ble_transport.h"
@@ -16,6 +18,7 @@
 #include "esp_bt.h"
 #include "esp_random.h"
 #include "host/ble_hs.h"
+#include "host/ble_hs_mbuf.h"
 #include "host/ble_uuid.h"
 #include "host/ble_gatt.h"
 #include "host/ble_gap.h"
@@ -111,6 +114,18 @@
     0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
     0x8a, 0x4f, 0x2b, 0x5c, 0x05, 0x00, 0x5a, 0x7d
 
+#define SDF_BLE_COMPANION_STATUS_UUID128 \
+    0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
+    0x8a, 0x4f, 0x2b, 0x5c, 0x06, 0x00, 0x5a, 0x7d
+
+/* Upper bound for a serialized health report (companion-device-health).
+ * The read path is not MTU-bound (ATT read-blob), so this only sizes the
+ * serialization buffer, not any wire constraint. */
+#define SDF_BLE_COMPANION_STATUS_REPORT_MAX 512
+/* A burst of recorded changes within this window produces one notification
+ * carrying the latest report, not one per change. */
+#define SDF_BLE_COMPANION_STATUS_COALESCE_MS 150
+
 /* Default-mode advertising: sparse and allow-list-filtered (see
  * sdf_ble_companion_start_advertising_sparse() and design.md "Sparse,
  * Allow-List-Filtered Default Advertising"). Replaces the old
@@ -149,6 +164,7 @@ static uint16_t s_config_val_handle = 0;
 static uint16_t s_enroll_val_handle = 0;
 static uint16_t s_ota_val_handle = 0;
 static uint16_t s_setup_state_val_handle = 0;
+static uint16_t s_status_val_handle = 0;
 
 
 
@@ -159,6 +175,13 @@ static esp_timer_handle_t s_pairing_window_timer;
 
 static uint8_t s_adv_data[31];
 static uint8_t s_adv_data_len = 0;
+
+/* Request id attributed to enrolment progress notifications while non-zero
+ * (companion-user-mgmt). Set by the app layer when it starts an enrolment
+ * for a user-management request; cleared after the complete/failed
+ * broadcast so a later button- or setup-driven enrolment carries no stale
+ * id. */
+static volatile uint32_t s_um_active_enroll_req_id = 0;
 
 // Forward declarations
 static void sdf_ble_companion_pairing_window_timer_cb(void *arg);
@@ -171,6 +194,8 @@ void sdf_ble_companion_start_advertising_setup(void);
 
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_conn(uint16_t conn_handle);
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_free_conn(void);
+static bool sdf_ble_companion_conn_has_admin_authority(
+    const sdf_ble_companion_connection_t *conn);
 
 static void sdf_ble_companion_pairing_window_timer_cb(void *arg) {
     (void)arg;
@@ -224,6 +249,13 @@ static void sdf_ble_companion_enrollment_complete_handler(void *ctx,
     if (!root) return;
     cJSON_AddStringToObject(root, "status", "success");
     cJSON_AddNumberToObject(root, "user_id", user_id);
+    /* Attribution (companion-user-mgmt): carry the id of the request that
+     * started this enrolment, when one did. */
+    if (s_um_active_enroll_req_id != 0) {
+        cJSON_AddNumberToObject(root, "req",
+                                (double)s_um_active_enroll_req_id);
+        s_um_active_enroll_req_id = 0;
+    }
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
@@ -254,6 +286,12 @@ static void sdf_ble_companion_enrollment_failed_handler(void *ctx,
     cJSON_AddStringToObject(root, "status", "failed");
     cJSON_AddNumberToObject(root, "step", step);
     cJSON_AddNumberToObject(root, "error_code", error_code);
+    /* Attribution (companion-user-mgmt): see the complete handler. */
+    if (s_um_active_enroll_req_id != 0) {
+        cJSON_AddNumberToObject(root, "req",
+                                (double)s_um_active_enroll_req_id);
+        s_um_active_enroll_req_id = 0;
+    }
     char *json_str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
 
@@ -726,9 +764,72 @@ static int sdf_ble_companion_dispatch_config_write(
 static int sdf_ble_companion_dispatch_enroll_write(
     uint16_t conn_handle, const sdf_ble_companion_callbacks_t *cb,
     const uint8_t *data, size_t len) {
-    (void)conn_handle;
-    if (cb->on_enroll_write) {
-        cb->on_enroll_write(cb->ctx, data, len);
+    /* User-management request/reply protocol (companion-user-mgmt): parse
+     * here on the host task - parsing does not block - answer every
+     * malformed request with an invalid reply rather than dropping it, and
+     * hand admitted requests to the app layer, which owns all execution and
+     * waiting. Nothing below waits on a fingerprint scan. */
+    sdf_ble_companion_um_request_t req;
+    if (!sdf_ble_companion_um_parse_request(data, len, &req)) {
+        uint32_t req_id = req.req_id_valid ? req.req_id : 0;
+        ESP_LOGW(TAG, "UM write: invalid request (req=%lu)",
+                 (unsigned long)req_id);
+        char payload[64];
+        int n = sdf_ble_companion_um_format_reply(req_id, "invalid", payload,
+                                                  sizeof(payload));
+        if (n > 0) {
+            sdf_ble_companion_notify_um(conn_handle, (const uint8_t *)payload,
+                                        (size_t)n);
+        }
+        return 0;
+    }
+
+    /* Admission: live admin authority admits every verb; a setup-phase
+     * connection to a device with no enrolled users admits only enrolment
+     * (no account and no admin exists yet to scan). Everything else gets
+     * the ordinary insufficient-authentication ATT error, exactly like any
+     * other restricted characteristic access. */
+    bool authority = false;
+    bool already_in_flight = false;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+        sdf_ble_companion_connection_t *conn =
+            sdf_ble_companion_get_conn(conn_handle);
+        authority = sdf_ble_companion_conn_has_admin_authority(conn);
+        already_in_flight = conn != NULL && conn->um_in_flight;
+        xSemaphoreGive(s_lock);
+    }
+
+    if (!authority &&
+        !sdf_ble_companion_um_admits(
+            &req, false, sdf_services_setup_phase_is_armed(),
+            sdf_services_get_setup_state() ==
+                SDF_SERVICES_SETUP_STATE_NOT_STARTED)) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    }
+
+    /* One in-flight request per connection: a second is answered busy, not
+     * queued or dropped (the device's single pending-admin-action gate
+     * would refuse it anyway, but answering here keeps the client's own
+     * correlation simple). Cleared when the terminal reply goes out
+     * (sdf_ble_companion_reply_um()) - or by the app layer replying busy if
+     * its queue refused the handoff. */
+    if (already_in_flight) {
+        ESP_LOGW(TAG, "UM request %lu refused busy on conn %u",
+                 (unsigned long)req.req_id, (unsigned)conn_handle);
+        char payload[64];
+        int n = sdf_ble_companion_um_format_reply(req.req_id, "busy", payload,
+                                                  sizeof(payload));
+        if (n > 0) {
+            sdf_ble_companion_notify_um(conn_handle, (const uint8_t *)payload,
+                                        (size_t)n);
+        }
+        return 0;
+    }
+
+    sdf_ble_companion_um_set_in_flight(conn_handle, true);
+
+    if (cb->on_um_request != NULL) {
+        cb->on_um_request(cb->ctx, conn_handle, &req);
     }
     return 0;
 }
@@ -970,6 +1071,77 @@ static int sdf_ble_companion_setup_state_access(uint16_t conn_handle,
     return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
+/* Status characteristic (companion-device-health): read + notify, carrying
+ * the device health report. Restricted to AUTHENTICATED connections at any
+ * permission level - deliberately NOT the admin gate Config/Enrollment/OTA
+ * use (see sdf_ble_companion_status_admits()). The read is served entirely
+ * from recorded state: no wait on another task, no sensor or bus operation,
+ * so it can never stall the host task behind an enrolment or a lock action.
+ * A long value is served by ATT read-blob transparently. */
+static int sdf_ble_companion_status_access(uint16_t conn_handle,
+                                           uint16_t attr_handle,
+                                           struct ble_gatt_access_ctxt *ctxt,
+                                           void *arg) {
+    (void)attr_handle;
+    (void)arg;
+
+    /* See the equivalent guard in sdf_ble_companion_auth_access(). */
+    if (!s_initialized) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+
+    /* Any GATT access counts as activity for the setup phase's connection
+     * idle timer. */
+    sdf_services_setup_phase_notify_gatt_activity();
+
+    bool authenticated = false;
+    uint16_t bound_user_id = 0;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+        sdf_ble_companion_connection_t *conn =
+            sdf_ble_companion_get_conn(conn_handle);
+        if (conn != NULL) {
+            authenticated =
+                conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED;
+            bound_user_id = conn->bound_user_id;
+        }
+        xSemaphoreGive(s_lock);
+    } else {
+        ESP_LOGW(TAG, "status_access: lock contention");
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    /* Live enrolment resolution (companion-identity): a deleted bound user
+     * loses access on this next access, without any cascade. */
+    bool enrolled = bound_user_id != 0 &&
+                    sdf_services_user_is_enrolled(bound_user_id);
+    if (!sdf_ble_companion_status_admits(
+            authenticated ? SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED
+                          : SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED,
+            bound_user_id, enrolled)) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    }
+
+    char *report = malloc(SDF_BLE_COMPANION_STATUS_REPORT_MAX);
+    if (report == NULL) {
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    size_t len = sdf_device_state_format_health_report(
+        report, SDF_BLE_COMPANION_STATUS_REPORT_MAX,
+        (uint32_t)(esp_timer_get_time() / 1000ULL));
+    if (len == 0) {
+        free(report);
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+
+    int rc = os_mbuf_append(ctxt->om, report, len);
+    free(report);
+    return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
 static const struct ble_gatt_chr_def s_characteristics[] = {
     {
         .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_AUTH_UUID128),
@@ -1031,6 +1203,18 @@ static const struct ble_gatt_chr_def s_characteristics[] = {
          * exists. No WRITE and no NOTIFY - see the callback's comment. */
         .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
         .val_handle = &s_setup_state_val_handle,
+    },
+    {
+        .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_STATUS_UUID128),
+        .access_cb = sdf_ble_companion_status_access,
+        /* Read + notify on an encrypted link, like the other restricted
+         * characteristics; admission (authenticated, any permission level)
+         * is enforced in the access callback and mirrored in the notify
+         * path. The fifth NOTIFY-capable characteristic is accounted for
+         * against CONFIG_BT_NIMBLE_MAX_CCCDS in sdkconfig.defaults. */
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC |
+                 BLE_GATT_CHR_F_NOTIFY,
+        .val_handle = &s_status_val_handle,
     },
     { 0 }
 };
@@ -1657,6 +1841,117 @@ static int sdf_ble_companion_register_gatt(void *ctx) {
     return rc;
 }
 
+/* --- Status change notification (companion-device-health) --------------
+ *
+ * sdf_app records device state changes and calls
+ * sdf_ble_companion_notify_status_change() after each actual value change.
+ * Bursts are coalesced: the first change arms a one-shot timer, later
+ * changes within the window find it already armed, and a single expiry
+ * serializes ONE report - the latest - and pushes it to every subscribed
+ * authenticated connection. A report too large for one notification at a
+ * connection's negotiated MTU is never truncated: that connection receives
+ * an empty change marker instead, and obtains the full value with a read.
+ * No change is silently dropped: every burst ends in either a full report
+ * or a marker per connection. */
+
+static esp_timer_handle_t s_status_coalesce_timer = NULL;
+
+static void sdf_ble_companion_status_push_to_conn(uint16_t conn_handle,
+                                                  const uint8_t *report,
+                                                  size_t len) {
+    uint16_t mtu = ble_att_mtu(conn_handle);
+    struct os_mbuf *om;
+    if (sdf_ble_companion_status_fits_notification(len, mtu)) {
+        om = ble_hs_mbuf_from_flat(report, len);
+    } else {
+        /* Oversized: empty change marker, no partial data on the wire. */
+        static const uint8_t empty = 0;
+        om = ble_hs_mbuf_from_flat(&empty, 0);
+    }
+    if (!om) {
+        return;
+    }
+    int rc = ble_gatts_notify_custom(conn_handle, s_status_val_handle, om);
+    if (rc != 0) {
+        ESP_LOGD(TAG, "Status notify to conn %u dropped (rc=%d)", conn_handle, rc);
+    }
+}
+
+static void sdf_ble_companion_status_coalesce_cb(void *arg) {
+    (void)arg;
+
+    if (!s_initialized || s_status_val_handle == 0) {
+        return;
+    }
+
+    char *report = malloc(SDF_BLE_COMPANION_STATUS_REPORT_MAX);
+    if (report == NULL) {
+        return;
+    }
+    size_t len = sdf_device_state_format_health_report(
+        report, SDF_BLE_COMPANION_STATUS_REPORT_MAX,
+        (uint32_t)(esp_timer_get_time() / 1000ULL));
+    if (len == 0) {
+        free(report);
+        return;
+    }
+
+    /* Snapshot the connection table under s_lock, then resolve enrolment
+     * outside it. sdf_services_user_is_enrolled() takes the services lock,
+     * and the read path deliberately calls it with s_lock released - doing
+     * it under s_lock here would be the one place that nests the two. */
+    struct {
+        uint16_t conn_handle;
+        sdf_ble_companion_auth_state_t auth_state;
+        uint16_t bound_user_id;
+    } candidates[SDF_BLE_COMPANION_MAX_CONNECTIONS];
+    size_t n_candidates = 0;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+        for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+            sdf_ble_companion_connection_t *conn = &s_connections[i];
+            if (!conn->connected) {
+                continue;
+            }
+            candidates[n_candidates].conn_handle = conn->conn_handle;
+            candidates[n_candidates].auth_state = conn->auth_state;
+            candidates[n_candidates].bound_user_id = conn->bound_user_id;
+            n_candidates++;
+        }
+        xSemaphoreGive(s_lock);
+    }
+
+    for (size_t i = 0; i < n_candidates; i++) {
+        if (!sdf_ble_companion_status_admits(
+                candidates[i].auth_state, candidates[i].bound_user_id,
+                candidates[i].bound_user_id != 0 &&
+                    sdf_services_user_is_enrolled(candidates[i].bound_user_id))) {
+            continue;
+        }
+        sdf_ble_companion_status_push_to_conn(candidates[i].conn_handle,
+                                              (const uint8_t *)report, len);
+    }
+    free(report);
+}
+
+esp_err_t sdf_ble_companion_notify_status_change(void) {
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_status_coalesce_timer == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Already-armed means a burst is in flight: this change is covered by
+     * the pending expiry, which will serialize the latest report. */
+    esp_err_t err =
+        esp_timer_start_once(s_status_coalesce_timer,
+                             SDF_BLE_COMPANION_STATUS_COALESCE_MS * 1000ULL);
+    if (err == ESP_ERR_INVALID_STATE) {
+        return ESP_OK;
+    }
+    return err;
+}
+
 esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks) {
     if (s_initialized) {
         return ESP_OK;
@@ -1694,6 +1989,22 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
     esp_err_t err = esp_timer_create(&timer_args, &s_pairing_window_timer);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to create pairing window timer: %s", esp_err_to_name(err));
+        vSemaphoreDelete(s_lock);
+        s_lock = NULL;
+        return err;
+    }
+
+    /* Coalescing timer for Status change notifications. */
+    esp_timer_create_args_t status_timer_args = {
+        .callback = sdf_ble_companion_status_coalesce_cb,
+        .arg = NULL,
+        .name = "sdf_ble_stat_timer",
+    };
+    err = esp_timer_create(&status_timer_args, &s_status_coalesce_timer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to create status coalesce timer: %s", esp_err_to_name(err));
+        esp_timer_delete(s_pairing_window_timer);
+        s_pairing_window_timer = NULL;
         vSemaphoreDelete(s_lock);
         s_lock = NULL;
         return err;
@@ -2004,6 +2315,76 @@ esp_err_t sdf_ble_companion_notify_enroll(uint16_t conn_handle, const uint8_t *d
 
     int rc = ble_gatts_notify_custom(conn_handle, s_enroll_val_handle, om);
     return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t sdf_ble_companion_notify_um(uint16_t conn_handle, const uint8_t *data, size_t len) {
+    if (!data || len == 0 || len >= SDF_BLE_COMPANION_ATTR_MAX_LEN) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
+    /* Any connected connection may receive user-management replies: the
+     * setup-phase connection is deliberately unauthenticated (no account
+     * exists yet) but its requests must still be answered. Admission of the
+     * REQUEST was enforced at write time; delivery here only needs the
+     * connection to exist. */
+    if (!conn || !conn->connected) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    memcpy(conn->enroll_value, data, len);
+    conn->enroll_value_len = len;
+    xSemaphoreGive(s_lock);
+
+    struct os_mbuf *om = ble_hs_mbuf_from_flat(data, len);
+    if (!om) {
+        return ESP_ERR_NO_MEM;
+    }
+
+    int rc = ble_gatts_notify_custom(conn_handle, s_enroll_val_handle, om);
+    return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t sdf_ble_companion_reply_um(uint16_t conn_handle, uint32_t req_id,
+                                     const char *result) {
+    char payload[64];
+    int n = sdf_ble_companion_um_format_reply(req_id, result, payload,
+                                              sizeof(payload));
+    if (n <= 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* The request has a terminal reply now - free the connection's
+     * in-flight slot whether or not the notify below still finds it. */
+    sdf_ble_companion_um_set_in_flight(conn_handle, false);
+    esp_err_t err =
+        sdf_ble_companion_notify_um(conn_handle, (const uint8_t *)payload,
+                                    (size_t)n);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "UM reply for req=%lu dropped (conn gone?)",
+                 (unsigned long)req_id);
+    }
+    return err;
+}
+
+void sdf_ble_companion_um_set_in_flight(uint16_t conn_handle, bool in_flight) {
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+        return;
+    }
+    sdf_ble_companion_connection_t *conn =
+        sdf_ble_companion_get_conn(conn_handle);
+    if (conn != NULL) {
+        conn->um_in_flight = in_flight;
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void sdf_ble_companion_um_set_active_enroll_request(uint32_t req_id) {
+    s_um_active_enroll_req_id = req_id;
 }
 
 esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data, size_t len) {

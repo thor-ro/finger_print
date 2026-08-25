@@ -71,7 +71,7 @@ Notification payloads emitted outside the GATT request path SHALL NOT use GATT w
 - **AND** neither the notification payload nor the staged write payload is corrupted
 
 ### Requirement: BLE GATT Authentication
-The system SHALL expose an Authentication characteristic supporting a two-step challenge-response LOGIN and a single-step REGISTER. Until a LOGIN challenge is successfully verified on this characteristic, all other restricted characteristics (Config, Enrollment, OTA) SHALL return insufficient authentication errors.
+The system SHALL expose an Authentication characteristic supporting a two-step challenge-response LOGIN and a single-step REGISTER. Until a LOGIN challenge is successfully verified on this characteristic, all other restricted characteristics (Config, Enrollment, OTA) SHALL return insufficient authentication errors, with the single exception stated in "Setup-Phase Admission To The Enrollment Characteristic" - which exists because the first Admin must be enrolled before any account exists to log in with.
 
 REGISTER SHALL accept a name and a client-computed password hash. On successful registration, the system SHALL generate a random per-user salt and derive a stretched credential from the received hash using a key-derivation function; the system SHALL persist only the salt and stretched credential, never the raw received hash. The persisted credential SHALL be bound to the fingerprint user whose scan authorized the registration, and SHALL replace that user's existing credential if they already hold one. The submitted name SHALL become that user's name, subject to the uniqueness rule in the `companion-identity` capability.
 
@@ -173,6 +173,11 @@ The Authentication characteristic's per-command wire format SHALL be documented,
 #### Scenario: Documented wire format matches enforcement
 - **WHEN** the Authentication characteristic's documented per-command lengths are compared against the lengths the system accepts
 - **THEN** they agree for every command, including commands that carry no operands
+
+#### Scenario: Enrollment characteristic refused without admin authority outside setup
+- **WHEN** an unauthenticated client that is not a setup-phase connection writes to the Enrollment characteristic
+- **THEN** system returns an insufficient authentication error
+- **AND** no user-management verb is performed
 
 ### Requirement: OTA Triggering via BLE
 The system SHALL expose an OTA characteristic that accepts a chunked binary firmware transfer from an authenticated client over the existing BLE GATT connection. The firmware SHALL NOT establish any Wi-Fi or network connection to perform an OTA update, and SHALL stream the received bytes through the existing signed OTA verification flow.
@@ -392,3 +397,177 @@ Exposing setup state SHALL NOT expose any other restricted information, and SHAL
 #### Scenario: Setup state reported on a completed device
 - **WHEN** an authenticated client reads setup state on a device whose setup-completion latch is set
 - **THEN** the reported state is setup complete
+
+### Requirement: Enrollment Characteristic Carries A User-Management Request/Reply Protocol
+
+The Enrollment characteristic SHALL accept writes that carry a user-management verb and a client-supplied request id, and SHALL answer every accepted write with exactly one terminal reply notification carrying that same request id.
+
+A reply SHALL be produced for every request, including a request rejected before any work is attempted — malformed payload, unknown verb, or an out-of-range field. The only condition under which no reply is produced SHALL be the loss of the connection that made the request.
+
+Enrolment progress notifications SHALL carry the request id of the request that started the enrolment, so that a client can attribute them without inferring from ordering.
+
+The characteristic SHALL NOT accept a bare enrolment payload carrying only a user id and permission; such a write SHALL be answered as an invalid request.
+
+#### Scenario: Every request is answered
+- **WHEN** a client writes a well-formed user-management request
+- **THEN** system eventually notifies exactly one terminal reply carrying that request's id
+
+#### Scenario: Malformed request is answered, not dropped
+- **WHEN** a client writes a payload that cannot be parsed as a user-management request
+- **THEN** system notifies a reply reporting an invalid request
+- **AND** no user-management verb is performed
+
+#### Scenario: Unknown verb is answered
+- **WHEN** a client writes a request whose verb the system does not implement
+- **THEN** system notifies a reply reporting an invalid request
+
+#### Scenario: Enrolment progress is attributable
+- **WHEN** an enrolment started by a request emits a step-progress notification
+- **THEN** that notification carries the id of the request that started the enrolment
+
+#### Scenario: Legacy bare enrolment payload rejected
+- **WHEN** a client writes a payload carrying only a user id and a permission, with no verb and no request id
+- **THEN** system answers it as an invalid request
+- **AND** no enrolment is started
+
+### Requirement: User-Management Verbs Never Block The BLE Host Task
+
+The system SHALL NOT perform any user-management verb, or wait for its result, on the thread that services GATT access callbacks. A verb whose completion depends on a fingerprint scan SHALL be handed to a task that may wait, and its reply SHALL be delivered by notification when it resolves.
+
+#### Scenario: Permission change does not stall the host task
+- **WHEN** a client requests a permission change, which waits for an authorizing admin scan
+- **THEN** the GATT write completes without waiting for that scan
+- **AND** other characteristics remain serviceable while the scan is outstanding
+
+#### Scenario: Result delivered asynchronously
+- **WHEN** the authorizing scan for an outstanding verb resolves
+- **THEN** system notifies the terminal reply for that request
+
+### Requirement: Mutating User-Management Verbs Require An Admin Fingerprint Scan
+
+Every user-management verb that changes device state — enrol, delete, change permission, rename — SHALL be authorized by a live admin fingerprint scan resolved through the pending-admin-action gate, in addition to the connection's live admin authority. A verb that only reads state SHALL NOT require a scan.
+
+An authenticated connection alone SHALL NOT be sufficient to enrol a user at any permission level. This closes the path by which a session could create an admin-permission user with nobody present at the device.
+
+A request arriving while another admin action, permission change or enrolment is in flight SHALL be answered as busy rather than queued or discarded.
+
+#### Scenario: Enrolment requires an authorizing scan
+- **WHEN** an authenticated admin session requests an enrolment
+- **THEN** system arms the admin-fingerprint gate and does not start the enrolment state machine
+- **AND** the enrolment begins only after an admin fingerprint scan authorizes it
+
+#### Scenario: Enrolment refused without a matching scan
+- **WHEN** the pending admin action for a requested enrolment is denied or times out
+- **THEN** no enrolment is started
+- **AND** system replies with the denial or timeout reason
+
+#### Scenario: Deletion requires an authorizing scan
+- **WHEN** an authenticated admin session requests a deletion
+- **THEN** the deletion is performed only after an admin fingerprint scan authorizes it
+
+#### Scenario: Listing requires no scan
+- **WHEN** an authenticated admin session requests the user list
+- **THEN** system replies without arming the admin-fingerprint gate
+
+#### Scenario: Concurrent request reported as busy
+- **WHEN** a client requests a mutating verb while another admin-gated action is already in flight
+- **THEN** system replies that the device is busy
+- **AND** the in-flight action is unaffected
+
+### Requirement: Setup-Phase Admission To The Enrollment Characteristic
+
+While the device is in the setup phase and no user is enrolled, the Enrollment characteristic SHALL admit the enrolment verb from the setup connection without authentication and without an admin fingerprint scan, because neither an account nor an admin exists yet.
+
+That admission SHALL be limited to the enrolment verb, and SHALL cease as soon as any user is enrolled. Every other verb SHALL be refused on such a connection, and every verb including enrolment SHALL be refused once the device holds an enrolled user or has left the setup phase.
+
+#### Scenario: Wizard enrols the first Admin
+- **WHEN** a setup-phase connection to a device with no enrolled users writes an enrolment request
+- **THEN** system accepts it and starts the enrolment
+
+#### Scenario: Admission closes after the first enrolment
+- **WHEN** the same connection writes a second enrolment request after a user has been enrolled
+- **THEN** system refuses it with an insufficient authentication error
+
+#### Scenario: Other verbs are not admitted
+- **WHEN** a setup-phase connection to a device with no enrolled users writes a delete, rename, permission-change or list request
+- **THEN** system refuses it with an insufficient authentication error
+
+#### Scenario: Admission does not apply to a claimed device
+- **WHEN** a connection to a device whose setup is complete writes an enrolment request without live admin authority
+- **THEN** system refuses it with an insufficient authentication error
+
+### Requirement: Device Status Characteristic
+
+The system SHALL expose a Status characteristic on the Companion Service supporting read and notify, carrying the device health report defined by the `companion-device-health` capability.
+
+The Status characteristic SHALL be a restricted characteristic: until a LOGIN challenge has been successfully verified on the Authentication characteristic, a read of Status SHALL return an insufficient authentication error, in the same way as Config, Enrollment and OTA.
+
+Unlike Config, Enrollment and OTA, Status SHALL NOT additionally require the connection's bound user to hold admin permission. Any authenticated connection SHALL be able to read it, at any permission level, because the report carries no secret material and no ability to change anything.
+
+A connection whose bound user has been deleted SHALL lose access to Status along with its authentication, per `BLE GATT Authentication`.
+
+Notification subscription state (CCCD) is owned by the BLE stack and SHALL NOT be treated as the point where admission is decided: a client may hold a subscription without being entitled to anything. Admission SHALL instead be enforced at delivery. The system SHALL NOT send a Status notification to a connection that is not authenticated, or whose bound user is no longer enrolled, whatever that connection's subscription state. Admission SHALL be re-evaluated per connection for every notification, never captured at the moment a subscription was made.
+
+#### Scenario: Unauthenticated read refused
+- **WHEN** an unauthenticated client reads the Status characteristic
+- **THEN** system returns an insufficient authentication error
+
+#### Scenario: Unauthenticated subscriber receives no report
+- **WHEN** an unauthenticated client holds a Status notification subscription and a reported value changes
+- **THEN** system sends that connection no notification and no change indication
+- **AND** the client learns nothing about the device state from its subscription
+
+#### Scenario: Authority lost after subscribing stops delivery
+- **WHEN** a subscribed connection loses its authentication, or the user it is bound to is deleted, and a reported value afterwards changes
+- **THEN** system sends that connection no further notifications
+- **AND** the still-open subscription does not keep the report flowing
+
+#### Scenario: Non-admin authenticated read permitted
+- **WHEN** an authenticated connection whose bound user holds standard permission reads Status
+- **THEN** system returns the health report
+
+#### Scenario: Admin read returns the same report
+- **WHEN** an authenticated admin connection reads Status
+- **THEN** system returns the same report a standard user receives
+
+#### Scenario: Deleted user loses status access
+- **WHEN** the user bound to an open authenticated connection is deleted
+- **THEN** subsequent reads of Status on that connection are refused
+
+### Requirement: Status Access Never Blocks The BLE Host Task
+
+A read of the Status characteristic SHALL be served without waiting on any other task, semaphore held across I/O, sensor operation or bus transaction. The access callback SHALL serialize recorded state and return. Producing a notification SHALL be subject to the same rule.
+
+The system SHALL NOT satisfy this by returning an error under contention where a value is available; it SHALL be structured so that the value is available without waiting.
+
+#### Scenario: Read returns without waiting
+- **WHEN** a client reads Status
+- **THEN** the access callback serializes recorded state and returns
+- **AND** it does not wait on another task to produce the value
+
+#### Scenario: Read during a long-running operation still returns
+- **WHEN** a client reads Status while an enrolment, a lock action or an OTA transfer is in progress
+- **THEN** the read returns the current report without waiting for that operation
+
+### Requirement: Status Notifications Are Coalesced And Never Truncated
+
+When several reported values change in quick succession, the system SHALL notify the latest report rather than one notification per change, following the coalescing rule `zigbee-attribute-reporting — Attribute updates are coalesced to the latest value` states for the other transport.
+
+A notification SHALL NOT carry a partial report. Where the report does not fit a single notification at the connection's negotiated MTU, the system SHALL notify a change indication that carries no truncated data, and the client SHALL obtain the full report with a read, which is not bounded by the MTU.
+
+The system SHALL NOT drop a change silently: every change SHALL result in either an updated report or a change indication reaching a subscribed connection.
+
+#### Scenario: Burst of changes coalesced
+- **WHEN** several reported values change within a short interval
+- **THEN** a subscribed client receives the latest report
+- **AND** it does not receive one notification per intermediate value
+
+#### Scenario: Oversized report is indicated, not truncated
+- **WHEN** the report does not fit a single notification at the negotiated MTU
+- **THEN** system notifies a change indication carrying no partial report
+- **AND** a subsequent read returns the full report
+
+#### Scenario: No change is silently dropped
+- **WHEN** a reported value changes while a client is subscribed
+- **THEN** the client receives either the updated report or a change indication
+

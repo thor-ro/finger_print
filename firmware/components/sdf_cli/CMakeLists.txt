@@ -1,4 +1,4 @@
-set(cli_priv_reqs console esp_timer log nvs_flash sdf_services sdf_storage sdf_drivers sdf_protocol_zigbee sdf_platform)
+set(cli_priv_reqs console esp_timer log nvs_flash sdf_services sdf_storage sdf_drivers sdf_protocol_zigbee sdf_platform sdf_device_state)
 
 if(NOT IDF_TARGET STREQUAL "linux")
     # sdf_ota unconditionally requires app_update, which isn't built for

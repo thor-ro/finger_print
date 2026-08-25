@@ -97,6 +97,16 @@ When `s_adc_handle` is NULL (line 71-72) or `adc_oneshot_read` fails (line 77-78
 
 **Fix:** Return -1 on error (the power manager already handles `battery_cb_result < 0` at line 231 by not updating):
 
+> **RESOLVED (companion-device-health):** implemented as recommended, plus the
+> host-build stub. `sdf_drivers_battery_get_percent()` now returns
+> `SDF_BATTERY_UNAVAILABLE` (-1) for a null ADC handle, a failed
+> `adc_oneshot_read()`, and on builds without battery sensing — see the return
+> contract in `firmware/components/sdf_drivers/include/battery.h`. Consumers:
+> `sdf_power` keeps its previous value (unchanged); `sdf_app` records the
+> unavailability in the device-state cache and gates the low-battery warning
+> on a *measured* low reading via `sdf_device_state_battery_is_low()`; the
+> health report shows unknown.
+
 ```c
 int sdf_drivers_battery_get_percent(void) {
     if (s_adc_handle == NULL) {

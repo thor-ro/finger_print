@@ -19,10 +19,11 @@ set(EXTRA_COMPONENT_DIRS
     "../components/sdf_ota"
     "../components/sdf_app"
     "../components/sdf_ble_companion"
+    "../components/sdf_device_state"
 )
 
 # Test runner components
-set(COMPONENTS main unity sdf_services sdf_common sdf_drivers sdf_power sdf_state_machines sdf_protocol_ble sdf_storage sdf_platform sdf_platform_power sdf_power_policy sdf_config sdf_event_router sdf_protocol_zigbee sdf_cli sdf_ota)
+set(COMPONENTS main unity sdf_services sdf_common sdf_drivers sdf_power sdf_state_machines sdf_protocol_ble sdf_storage sdf_platform sdf_platform_power sdf_power_policy sdf_config sdf_event_router sdf_protocol_zigbee sdf_cli sdf_ota sdf_device_state)
 
 if(NOT IDF_TARGET STREQUAL "linux")
     # sdf_app and sdf_ble_companion pull in the BLE/Zigbee stacks, so they only

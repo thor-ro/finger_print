@@ -76,6 +76,7 @@ BLE_OTA_HARNESS_SCRATCH=/tmp/bleh_run BUMBLE_PYTHON=/tmp/bleh_venv/bin/python sc
 ## Component Structure
 Each component exposes public API in `include/` and internals in `src/`:
 - `sdf_app` — Application flows (biometric unlock, zigbee bridge, enrollment). Owns `sdf_app_task`
+- `sdf_device_state` — Transport-independent last-known device state cache + health-report producer (feeds the BLE Status characteristic and `nuki status`; three-valued measured/unknown/not-applicable vocabulary, no I/O on the read path)
 - `sdf_drivers` — Hardware drivers (fingerprint UART, LED, battery, GPIO). Owns `fp_owner_task` and `led_task`
 - `sdf_protocol_ble` — BLE/Nuki protocol adaptor
 - `sdf_protocol_zigbee` — Zigbee Door Lock cluster adaptor (owns `sdf_zigbee_task` and `sdf_zb_attr_task`)

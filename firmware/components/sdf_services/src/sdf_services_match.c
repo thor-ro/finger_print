@@ -164,6 +164,37 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
      * per-call-site reset needed here. */
     sdf_fingerprint_op_result_t match_result = fp_match_1n(&match);
 
+    /* Publish sensor readiness from the fingerprint path's own I/O
+     * (companion-device-health): the scan answered, or it did not. Never a
+     * probe on behalf of a reader. */
+    {
+        bool ready = false;
+        bool publish = false;
+        switch (match_result) {
+        case SDF_FINGERPRINT_OP_OK:
+        case SDF_FINGERPRINT_OP_NO_MATCH:
+        case SDF_FINGERPRINT_OP_FULL:
+        case SDF_FINGERPRINT_OP_USER_OCCUPIED:
+        case SDF_FINGERPRINT_OP_FINGER_OCCUPIED:
+            ready = true;
+            publish = true;
+            break;
+        case SDF_FINGERPRINT_OP_TIMEOUT:
+        case SDF_FINGERPRINT_OP_IO_ERROR:
+        case SDF_FINGERPRINT_OP_PROTOCOL_ERROR:
+        case SDF_FINGERPRINT_OP_FAILED:
+            ready = false;
+            publish = true;
+            break;
+        default:
+            break;
+        }
+        if (publish && s->config.fingerprint_ready_cb != NULL) {
+            s->config.fingerprint_ready_cb(s->config.fingerprint_ready_ctx,
+                                           ready);
+        }
+    }
+
     uint32_t failed_attempts_after = 0;
     bool emit_failed_attempt = false;
     bool emit_lockout = false;

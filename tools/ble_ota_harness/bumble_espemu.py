@@ -66,6 +66,8 @@ AUTH_UUID = "7d5a0001-5c2b-4f8a-9e3d-1a2b3c4d5e6f"
 CONFIG_UUID = "7d5a0002-5c2b-4f8a-9e3d-1a2b3c4d5e6f"
 ENROLL_UUID = "7d5a0003-5c2b-4f8a-9e3d-1a2b3c4d5e6f"
 OTA_UUID = "7d5a0004-5c2b-4f8a-9e3d-1a2b3c4d5e6f"
+# Device health report (companion-device-health): read + notify JSON.
+STATUS_UUID = "7d5a0006-5c2b-4f8a-9e3d-1a2b3c4d5e6f"
 
 
 class PublicAddressLocalLink(LocalLink):

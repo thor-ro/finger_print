@@ -21,6 +21,7 @@
 #include "sdkconfig.h"
 
 #include "sdf_lock_flow.h"
+#include "sdf_device_state.h"
 #ifndef CONFIG_IDF_TARGET_LINUX
 #include "sdf_nuki_ble_transport.h"
 #include "sdf_nuki_pairing.h"
@@ -33,6 +34,7 @@
 #include "sdf_power.h"
 #include "sdf_protocol_ble.h"
 #include "sdf_protocol_zigbee.h"
+#include "sdf_zigbee_attr_cache.h"
 #include "sdf_services.h"
 #include "sdf_event_router.h"
 #include "sdf_storage.h"
@@ -115,6 +117,18 @@ static bool s_ble_admin_action_pending;
 static sdf_services_admin_action_t s_ble_admin_action;
 static uint16_t s_ble_admin_action_conn_handle;
 
+/* Companion user-management state (companion-user-mgmt): the remote
+ * admin-gated action awaiting its authorizing scan on behalf of a
+ * companion request. Set when the gate is armed, resolved exactly once -
+ * by the action callback (authorized) or ADMIN_ACTION_COMPLETE (denied/
+ * timeout) - and then cleared. Declared here because both resolution
+ * paths below and the UM processing block reference it. */
+static struct {
+  bool pending;
+  uint32_t req_id;
+  uint16_t conn_handle;
+} s_um_pending_gate = {false, 0, 0};
+
 static sdf_lock_flow_t s_lock_flow;
 
 void sdf_app_emit_audit(sdf_audit_event_type_t type, uint16_t user_id,
@@ -132,6 +146,9 @@ static void sdf_app_on_admin_action_complete(const sdf_event_router_event_t *eve
 static void sdf_app_on_ble_admin_action_request(void *ctx,
                                                  sdf_services_admin_action_t action,
                                                  uint16_t conn_handle);
+static void sdf_app_on_fingerprint_ready(void *ctx, bool ready);
+static void sdf_app_on_device_state_changed(void *ctx);
+static uint32_t sdf_app_now_ms(void);
 
 static const char *sdf_app_status_name(uint8_t status) {
   switch (status) {
@@ -166,6 +183,7 @@ static void sdf_app_set_alarm_mask_bits(uint16_t set_bits,
    * may therefore call this out of CAS order; that is harmless because each
    * passes a mask that already includes the other's bits and the Zigbee
    * component keeps the latest value it is given. */
+  sdf_device_state_record_alarm_mask(new_mask);
   if (sdf_protocol_zigbee_is_enabled()) {
     sdf_protocol_zigbee_update_alarm_mask(new_mask);
   }
@@ -213,6 +231,8 @@ static void sdf_app_release_ble_transport(const char *reason) {
     ESP_LOGW(TAG, "Failed to release BLE transport: %d", res);
     return;
   }
+
+  sdf_device_state_record_nuki_link(s_has_creds, false, sdf_app_now_ms());
 
   if (reason != NULL) {
     ESP_LOGI(TAG, "Released BLE transport: %s", reason);
@@ -270,39 +290,75 @@ static int sdf_app_dispatch_pending_lock_action(void) {
 }
 
 static sdf_protocol_zigbee_lock_state_t
-sdf_app_map_lock_state_to_zigbee(uint8_t nuki_lock_state) {
-  switch (nuki_lock_state) {
-  case 0x01: /* locked */
+sdf_app_map_device_lock_state_to_zigbee(sdf_device_state_lock_state_t state) {
+  switch (state) {
+  case SDF_DEVICE_STATE_LOCK_LOCKED:
     return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED;
-  case 0x03: /* unlocked */
-  case 0x05: /* unlatched */
-  case 0x06: /* unlocked (lock n go) */
+  case SDF_DEVICE_STATE_LOCK_UNLOCKED:
     return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNLOCKED;
-  case 0x02: /* unlocking */
-  case 0x04: /* locking */
-  case 0x07: /* unlatching */
+  case SDF_DEVICE_STATE_LOCK_NOT_FULLY_LOCKED:
     return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_NOT_FULLY_LOCKED;
+  case SDF_DEVICE_STATE_LOCK_UNKNOWN:
   default:
     return SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNDEFINED;
   }
 }
 
-static void sdf_app_update_zigbee_from_action(uint8_t lock_action) {
+static sdf_device_state_lock_state_t
+sdf_app_map_nuki_state_to_device(uint8_t nuki_lock_state) {
+  switch (nuki_lock_state) {
+  case 0x01: /* locked */
+    return SDF_DEVICE_STATE_LOCK_LOCKED;
+  case 0x03: /* unlocked */
+  case 0x05: /* unlatched */
+  case 0x06: /* unlocked (lock n go) */
+    return SDF_DEVICE_STATE_LOCK_UNLOCKED;
+  case 0x02: /* unlocking */
+  case 0x04: /* locking */
+  case 0x07: /* unlatching */
+    return SDF_DEVICE_STATE_LOCK_NOT_FULLY_LOCKED;
+  default:
+    return SDF_DEVICE_STATE_LOCK_UNKNOWN;
+  }
+}
+
+static uint32_t sdf_app_now_ms(void) {
+  return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+/* Single recording path for lock state (companion-device-health): the value
+ * lands in the transport-independent cache FIRST - unconditionally, before
+ * any Zigbee-enabled check, so a Zigbee-disabled build still holds it - and
+ * the Zigbee attribute is then fed from that recording rather than being
+ * the only place the value exists. Provenance distinguishes a keyturner
+ * report (confirmed) from a lock command we sent (assumed). */
+static void sdf_app_publish_lock_state(sdf_device_state_lock_state_t state,
+                                       sdf_device_state_lock_source_t source) {
+  sdf_device_state_record_lock(state, source, sdf_app_now_ms());
   if (!sdf_protocol_zigbee_is_enabled()) {
     return;
   }
+  esp_err_t err =
+      sdf_protocol_zigbee_update_lock_state(
+          sdf_app_map_device_lock_state_to_zigbee(state));
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    ESP_LOGW(TAG, "Lock state Zigbee update failed: %s",
+             esp_err_to_name(err));
+  }
+}
 
+static void sdf_app_update_zigbee_from_action(uint8_t lock_action) {
   switch (lock_action) {
   case SDF_LOCK_ACTION_LOCK:
   case SDF_LOCK_ACTION_LOCK_N_GO:
   case SDF_LOCK_ACTION_FULL_LOCK:
-    sdf_protocol_zigbee_update_lock_state(
-        SDF_PROTOCOL_ZIGBEE_LOCK_STATE_LOCKED);
+    sdf_app_publish_lock_state(SDF_DEVICE_STATE_LOCK_LOCKED,
+                               SDF_DEVICE_STATE_LOCK_SOURCE_ASSUMED);
     break;
   case SDF_LOCK_ACTION_UNLOCK:
   case SDF_LOCK_ACTION_UNLATCH:
-    sdf_protocol_zigbee_update_lock_state(
-        SDF_PROTOCOL_ZIGBEE_LOCK_STATE_UNLOCKED);
+    sdf_app_publish_lock_state(SDF_DEVICE_STATE_LOCK_UNLOCKED,
+                               SDF_DEVICE_STATE_LOCK_SOURCE_ASSUMED);
     break;
   default:
     break;
@@ -455,7 +511,12 @@ static void sdf_app_power_wakeup(void *ctx, sdf_power_wake_reason_t reason) {
 
 static int sdf_app_power_battery_percent(void *ctx) {
   (void)ctx;
-  return sdf_drivers_battery_get_percent();
+  int percent = sdf_drivers_battery_get_percent();
+  /* Keep the cache's battery entry current with the periodic measurement
+   * the power loop drives (including its unavailability), not just with the
+   * unlatch-time poll. */
+  sdf_device_state_record_battery(percent, sdf_app_now_ms());
+  return percent;
 }
 
 /* Shared by the button-triggered NUKI_PAIR admin action and the
@@ -540,6 +601,8 @@ static void sdf_app_on_admin_action(void *ctx,
     esp_err_t err = sdf_protocol_zigbee_permit_join();
     if (err == ESP_ERR_NOT_SUPPORTED) {
       ESP_LOGI(TAG, "Ignoring Zigbee Join request because Zigbee is disabled");
+    } else if (err == ESP_OK) {
+      sdf_device_state_record_zigbee_joined(true, sdf_app_now_ms());
     }
 
     /* ZB_JOIN is BLE-only as of this change (its Hold-3s button gesture was
@@ -566,6 +629,47 @@ static void sdf_app_on_admin_action(void *ctx,
     if (err != ESP_OK) {
       ESP_LOGW(TAG, "Failed to open BLE Companion pairing window: %s",
                esp_err_to_name(err));
+    }
+    break;
+  }
+
+  case SDF_SERVICES_ADMIN_ACTION_DELETE_USER:
+  case SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL:
+  case SDF_SERVICES_ADMIN_ACTION_RENAME_USER: {
+    /* The authorized side effect (delete / enrolment start / rename) already
+     * ran inside sdf_services_execute_admin_action(), which recorded the
+     * verb's named outcome; this only routes the terminal reply to the
+     * requesting companion connection (companion-user-mgmt). */
+    sdf_power_mark_activity();
+    if (!s_um_pending_gate.pending ||
+        (action != SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL &&
+         action != SDF_SERVICES_ADMIN_ACTION_DELETE_USER &&
+         action != SDF_SERVICES_ADMIN_ACTION_RENAME_USER)) {
+      break;
+    }
+    uint16_t user_id = 0;
+    uint8_t permission = 0;
+    sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_FAILED;
+    bool have = sdf_services_take_um_action_result(&user_id, &permission,
+                                                   &outcome);
+    uint32_t req_id = s_um_pending_gate.req_id;
+    uint16_t conn = s_um_pending_gate.conn_handle;
+    s_um_pending_gate.pending = false;
+    if (have) {
+      ESP_LOGI(TAG, "UM request %lu resolved: %s", (unsigned long)req_id,
+               sdf_services_um_outcome_name(outcome));
+      sdf_ble_companion_reply_um(conn, req_id,
+                                 sdf_services_um_outcome_name(outcome));
+      /* A remote enrolment that was refused at start carries no progress
+       * stream worth attributing. */
+      if (outcome != SDF_SERVICES_UM_OK &&
+          action == SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL) {
+        sdf_ble_companion_um_set_active_enroll_request(0);
+      }
+    } else {
+      /* Should not happen - execute always records - but never leave the
+       * client without its exactly-one terminal reply. */
+      sdf_ble_companion_reply_um(conn, req_id, "failed");
     }
     break;
   }
@@ -935,48 +1039,292 @@ static void sdf_ble_companion_on_config_write(void *ctx,
     // This will be handled by the caller after the callback returns
 }
 
-static void sdf_ble_companion_on_enroll_write(void *ctx,
-                                               const uint8_t *data,
-                                               size_t len) {
-    (void)ctx;
-    ESP_LOGI(TAG, "BLE Companion: Enroll write, len=%u", (unsigned)len);
+/* --- Companion user management (companion-user-mgmt) ---------------------
+ *
+ * The Enrollment characteristic carries a request/reply protocol: every
+ * accepted request produces exactly one terminal reply carrying the
+ * client-supplied request id, including requests refused before any work
+ * starts. Mutating verbs arm the admin-fingerprint gate, so their replies
+ * can arrive seconds after the request - long after the GATT callback that
+ * received it has returned.
+ *
+ * Threading: sdf_ble_companion parses and admits the request on the NimBLE
+ * host task and calls the callback below, which must not block. It copies
+ * the request into a single owned slot and emits SDF_EVENT_ROUTER_UM_
+ * REQUEST; all execution happens in sdf_app_process_um_request() on the
+ * app task, which may wait (set_permission blocks up to 15s there by
+ * design). One slot is enough: replies are correlated by request id, and a
+ * second concurrent handoff answers busy rather than queueing.
+ * ------------------------------------------------------------------------ */
 
-    cJSON *root = cJSON_ParseWithLength((const char *)data, len);
-    if (!root) {
-        ESP_LOGW(TAG, "Enroll write: invalid JSON");
+typedef struct {
+  bool occupied;
+  uint16_t conn_handle;
+  sdf_ble_companion_um_request_t req;
+} sdf_app_um_request_t;
+
+static sdf_app_um_request_t s_um_request;
+static SemaphoreHandle_t s_um_request_lock;
+
+/* Host task: stash + signal, never wait. */
+static void sdf_ble_companion_on_um_request(void *ctx, uint16_t conn_handle,
+                                            const sdf_ble_companion_um_request_t *request) {
+  (void)ctx;
+  if (s_um_request_lock == NULL) {
+    return;
+  }
+
+  bool handed_off = false;
+  if (xSemaphoreTake(s_um_request_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+    if (!s_um_request.occupied) {
+      s_um_request.occupied = true;
+      s_um_request.conn_handle = conn_handle;
+      s_um_request.req = *request;
+      handed_off = true;
+    }
+    xSemaphoreGive(s_um_request_lock);
+  }
+
+  if (!handed_off) {
+    /* Another request is between handoff and processing: busy is the honest
+     * answer (the device could not have started this one). */
+    ESP_LOGW(TAG, "UM request %lu dropped busy at handoff",
+             (unsigned long)(request ? request->req_id : 0));
+    sdf_ble_companion_reply_um(conn_handle,
+                               request ? request->req_id : 0, "busy");
+    return;
+  }
+
+  sdf_event_router_event_t evt = {
+      .type = SDF_EVENT_ROUTER_UM_REQUEST,
+      .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .payload.um_request.conn_handle = conn_handle,
+  };
+  esp_err_t err = sdf_event_router_emit(&evt, 0);
+  if (err != ESP_OK) {
+    /* The router queue refused the event: nothing will process the slot.
+     * Reply busy and free both the slot and the connection's in-flight
+     * marker so the client can retry. */
+    /* Reported from the caller's own copy: the slot is shared state and
+     * reading it here without the lock races the app task, which may
+     * already own and clear it. */
+    uint32_t req_id = request ? request->req_id : 0;
+    ESP_LOGW(TAG, "UM request %lu lost (router queue full): replying busy",
+             (unsigned long)req_id);
+    sdf_ble_companion_reply_um(conn_handle, req_id, "busy");
+    if (xSemaphoreTake(s_um_request_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+      s_um_request.occupied = false;
+      xSemaphoreGive(s_um_request_lock);
+    }
+  }
+}
+
+/* Builds entries for the shared serializer: query users from the cache,
+ * load each name. Returns false if the query failed. */
+static bool sdf_app_load_user_entries(sdf_services_user_list_entry_t *entries,
+                                      size_t cap, size_t *count_out) {
+  uint16_t user_ids[SDF_SERVICES_USER_LIST_MAX];
+  uint8_t perms[SDF_SERVICES_USER_LIST_MAX];
+  size_t count = 0;
+  if (sdf_services_query_users(user_ids, perms, &count, cap) != ESP_OK) {
+    return false;
+  }
+
+  for (size_t i = 0; i < count && i < cap; i++) {
+    static char names[SDF_SERVICES_USER_LIST_MAX][SDF_STORAGE_WEB_USER_NAME_MAX];
+    sdf_storage_web_user_t rec;
+    if (sdf_storage_web_user_load(user_ids[i], &rec) == ESP_OK &&
+        rec.name[0] != '\0') {
+      strncpy(names[i], rec.name, sizeof(names[i]) - 1);
+      names[i][sizeof(names[i]) - 1] = '\0';
+      entries[i].name = names[i];
+    } else {
+      entries[i].name = NULL;
+    }
+    entries[i].id = user_ids[i];
+    entries[i].permission = perms[i];
+  }
+  *count_out = count;
+  return true;
+}
+
+#define SDF_APP_UM_LIST_CHUNK_BUDGET 320u
+
+/* Executes the list verb: no scan required, answered immediately with
+ * chunked parts whose final part carries end=true, so a truncated list is
+ * never mistaken for a complete one (companion-user-mgmt). */
+static void sdf_app_um_handle_list(uint32_t req_id, uint16_t conn_handle) {
+  sdf_services_user_list_entry_t entries[SDF_SERVICES_USER_LIST_MAX];
+  size_t count = 0;
+  if (!sdf_app_load_user_entries(entries, SDF_SERVICES_USER_LIST_MAX,
+                                 &count)) {
+    sdf_ble_companion_reply_um(conn_handle, req_id, "failed");
+    return;
+  }
+
+  int part = 0;
+  size_t i = 0;
+  while (true) {
+    /* Take as many entries as fit one notification payload. */
+    size_t take = 0;
+    char users[SDF_APP_UM_LIST_CHUNK_BUDGET + 64];
+    size_t users_len = 0;
+    while (i + take < count) {
+      char trial[sizeof(users)];
+      size_t n = sdf_services_format_user_list(entries + i, take + 1, trial,
+                                               sizeof(trial));
+      if (n == 0 || n > SDF_APP_UM_LIST_CHUNK_BUDGET) {
+        break;
+      }
+      take++;
+      memcpy(users, trial, n + 1);
+      users_len = n;
+    }
+
+    bool end = (i + take) >= count;
+    const char *users_json =
+        (take > 0 || count == 0)
+            ? (users_len > 0 ? users : "[]")
+            : NULL;
+
+    char chunk[512];
+    int n = sdf_ble_companion_um_format_list_part(req_id, part++, end,
+                                                  users_json, chunk,
+                                                  sizeof(chunk));
+    if (n <= 0 ||
+        sdf_ble_companion_notify_um(conn_handle, (const uint8_t *)chunk,
+                                    (size_t)n) != ESP_OK) {
+      return; /* connection gone mid-list: no further reply possible */
+    }
+    if (end) {
+      break;
+    }
+    i += take;
+  }
+
+  sdf_ble_companion_um_set_in_flight(conn_handle, false);
+}
+
+/* App-task execution of one admitted user-management request. */
+static void sdf_app_process_um_request(void) {
+  if (s_um_request_lock == NULL) {
+    return;
+  }
+
+  sdf_app_um_request_t r;
+  if (xSemaphoreTake(s_um_request_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    return;
+  }
+  if (!s_um_request.occupied) {
+    xSemaphoreGive(s_um_request_lock);
+    return;
+  }
+  r = s_um_request;
+  s_um_request.occupied = false;
+  xSemaphoreGive(s_um_request_lock);
+
+  uint32_t req_id = r.req.req_id;
+  uint16_t conn = r.conn_handle;
+
+  switch (r.req.verb) {
+  case SDF_BLE_COMPANION_UM_VERB_LIST:
+    ESP_LOGI(TAG, "UM list request %lu", (unsigned long)req_id);
+    sdf_app_um_handle_list(req_id, conn);
+    return;
+
+  case SDF_BLE_COMPANION_UM_VERB_ENROLL: {
+    /* Setup-phase admission (ble-companion-service): on an unclaimed
+     * device with no enrolled users the wizard's enrolment starts without
+     * an authorizing scan - no admin exists yet to perform one. Every
+     * other enrolment goes through the gate. */
+    bool setup_first_enroll =
+        sdf_services_setup_phase_is_armed() &&
+        sdf_services_get_setup_state() == SDF_SERVICES_SETUP_STATE_NOT_STARTED;
+
+    sdf_services_um_outcome_t outcome;
+    if (setup_first_enroll) {
+      outcome = sdf_services_request_enrollment(r.req.user_id,
+                                                r.req.permission);
+      if (outcome == SDF_SERVICES_UM_OK) {
+        sdf_ble_companion_um_set_active_enroll_request(req_id);
+      }
+    } else {
+      sdf_ble_companion_um_set_active_enroll_request(req_id);
+      outcome = sdf_services_request_remote_enrollment(r.req.user_id,
+                                                       r.req.permission);
+      if (outcome == SDF_SERVICES_UM_OK) {
+        /* Armed: the terminal reply waits for the authorizing scan. */
+        s_um_pending_gate.pending = true;
+        s_um_pending_gate.req_id = req_id;
+        s_um_pending_gate.conn_handle = conn;
         return;
+      }
+      sdf_ble_companion_um_set_active_enroll_request(0);
     }
+    sdf_ble_companion_reply_um(
+        conn, req_id, sdf_services_um_outcome_name(outcome));
+    return;
+  }
 
-    cJSON *user_id_item = cJSON_GetObjectItemCaseSensitive(root, "user_id");
-    cJSON *permission_item = cJSON_GetObjectItemCaseSensitive(root, "permission");
-
-    if (!cJSON_IsNumber(user_id_item) || !cJSON_IsNumber(permission_item)) {
-        ESP_LOGW(TAG, "Enroll write: missing or invalid user_id/permission");
-        cJSON_Delete(root);
-        return;
+  case SDF_BLE_COMPANION_UM_VERB_DELETE: {
+    sdf_services_um_outcome_t outcome =
+        sdf_services_request_delete_user(r.req.user_id);
+    if (outcome == SDF_SERVICES_UM_OK) {
+      s_um_pending_gate.pending = true;
+      s_um_pending_gate.req_id = req_id;
+      s_um_pending_gate.conn_handle = conn;
+      return; /* reply follows the authorizing scan (or its denial/timeout) */
     }
+    sdf_ble_companion_reply_um(conn, req_id,
+                               sdf_services_um_outcome_name(outcome));
+    return;
+  }
 
-    uint16_t user_id = (uint16_t)user_id_item->valuedouble;
-    uint8_t permission = (uint8_t)permission_item->valuedouble;
-
-    if (user_id == 0 || user_id > SDF_FINGERPRINT_USER_ID_MAX) {
-        ESP_LOGW(TAG, "Enroll write: user_id out of range (1-%d)", SDF_FINGERPRINT_USER_ID_MAX);
-        cJSON_Delete(root);
-        return;
+  case SDF_BLE_COMPANION_UM_VERB_RENAME: {
+    sdf_services_um_outcome_t outcome =
+        sdf_services_request_rename_user(r.req.user_id, r.req.name);
+    if (outcome == SDF_SERVICES_UM_OK) {
+      s_um_pending_gate.pending = true;
+      s_um_pending_gate.req_id = req_id;
+      s_um_pending_gate.conn_handle = conn;
+      return;
     }
+    sdf_ble_companion_reply_um(conn, req_id,
+                               sdf_services_um_outcome_name(outcome));
+    return;
+  }
 
-    if (permission < 1 || permission > 3) {
-        ESP_LOGW(TAG, "Enroll write: permission out of range (1-3)");
-        cJSON_Delete(root);
-        return;
-    }
+  case SDF_BLE_COMPANION_UM_VERB_SET_PERMISSION: {
+    /* change_user_permission() arms CHANGE_PERMISSION itself and waits up
+     * to 15s for the authorizing scan. That wait happens HERE, on the app
+     * task - never on the NimBLE host task (companion-user-mgmt). Its
+     * immediate refusals return instantly with a named outcome. */
+    sdf_services_um_outcome_t outcome = sdf_services_change_user_permission(
+        r.req.user_id, r.req.permission);
+    sdf_ble_companion_reply_um(conn, req_id,
+                               sdf_services_um_outcome_name(outcome));
+    return;
+  }
 
-    esp_err_t err = sdf_services_request_enrollment(user_id, permission);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to request enrollment: %s", esp_err_to_name(err));
-    }
+  default:
+    sdf_ble_companion_reply_um(conn, req_id, "invalid");
+    return;
+  }
+}
 
-    cJSON_Delete(root);
+static void sdf_app_on_fingerprint_ready(void *ctx, bool ready) {
+  (void)ctx;
+  /* Published by the fingerprint path after its own I/O (match scan or
+   * enrolment step) - never probed on behalf of a reader. */
+  sdf_device_state_record_fingerprint(ready, sdf_app_now_ms());
+}
+
+static void sdf_app_on_device_state_changed(void *ctx) {
+  (void)ctx;
+  /* A recorded value actually changed: let the companion service coalesce
+   * and push an updated Status report to subscribed connections. */
+  sdf_ble_companion_notify_status_change();
 }
 
 static void sdf_app_on_event(const sdf_event_router_event_t *event) {
@@ -1010,7 +1358,12 @@ static void sdf_app_on_event(const sdf_event_router_event_t *event) {
       return;
     }
     int percent = sdf_drivers_battery_get_percent();
-    if (percent <= 20) {
+    /* Record whatever the driver answered - including unavailability - so
+     * the cache holds the truth, then act only on a MEASURED low reading.
+     * A failed measurement must never look like a full battery, and must
+     * not fire the warning either. */
+    sdf_device_state_record_battery(percent, sdf_app_now_ms());
+    if (sdf_device_state_battery_is_low(percent)) {
       sdf_services_trigger_low_battery_warning();
     }
     sdf_app_emit_audit(SDF_AUDIT_BIOMETRIC_MATCH_SUCCESS, match_user_id, ESP_OK,
@@ -1084,6 +1437,22 @@ static void sdf_app_on_event(const sdf_event_router_event_t *event) {
       break;
     case SDF_AUDIT_PROTOCOL_ERROR:
       s_app_audit_err_protocol++;
+      break;
+    default:
+      break;
+    }
+
+    /* OTA state is a live-sourced health-report field (read from sdf_ota at
+     * serialization time), so its transitions must also wake the Status
+     * notification path - the cache recorders cannot see them. Every OTA
+     * transport funnels its state changes through these audit emissions. */
+    switch (event->payload.audit.type) {
+    case SDF_AUDIT_OTA_STARTED:
+    case SDF_AUDIT_OTA_VERIFYING:
+    case SDF_AUDIT_OTA_COMMITTED:
+    case SDF_AUDIT_OTA_ROLLED_BACK:
+    case SDF_AUDIT_OTA_FAILED:
+      sdf_ble_companion_notify_status_change();
       break;
     default:
       break;
@@ -1238,6 +1607,33 @@ static void sdf_app_on_admin_action_complete(const sdf_event_router_event_t *eve
     s_ble_admin_action_pending = false;
     sdf_ble_companion_reply_admin_action(conn_handle, action, false);
   }
+
+  /* Same guarantee for a pending companion user-management action
+   * (delete / remote enrol / rename): the denial or timeout that emitted
+   * this event recorded the verb's named outcome; pop it and answer the
+   * requesting connection (companion-user-mgmt "exactly one terminal
+   * reply"). */
+  if (s_um_pending_gate.pending &&
+      sdf_services_ble_admin_action_should_resolve_on_action_complete(action, result)) {
+    uint16_t user_id = 0;
+    uint8_t permission = 0;
+    sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_FAILED;
+    bool have =
+        sdf_services_take_um_action_result(&user_id, &permission, &outcome);
+    uint32_t req_id = s_um_pending_gate.req_id;
+    uint16_t conn = s_um_pending_gate.conn_handle;
+    s_um_pending_gate.pending = false;
+    ESP_LOGW(TAG, "UM request %lu not granted: %s", (unsigned long)req_id,
+             have ? sdf_services_um_outcome_name(outcome)
+                  : esp_err_to_name(result));
+    sdf_ble_companion_reply_um(conn, req_id,
+                               have ? sdf_services_um_outcome_name(outcome)
+                                    : "denied");
+    if (action == SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL) {
+      /* No authorizing scan, no enrolment, no progress stream. */
+      sdf_ble_companion_um_set_active_enroll_request(0);
+    }
+  }
 }
 
 /* The one subscriber callback behind all nine of this component's event-router
@@ -1344,6 +1740,11 @@ static void sdf_app_task(void *arg) {
     case SDF_EVENT_ROUTER_ADMIN_ACTION_COMPLETE:
       sdf_app_on_admin_action_complete(&event);
       break;
+    case SDF_EVENT_ROUTER_UM_REQUEST:
+      /* Companion user-management request handed off by the NimBLE host
+       * task - executed here, where waiting is allowed. */
+      sdf_app_process_um_request();
+      break;
     default:
       sdf_app_on_event(&event);
       break;
@@ -1392,58 +1793,32 @@ static void sdf_app_update_zigbee_user_list(void) {
     return;
   }
 
-  const size_t max_users = (size_t)SDF_FINGERPRINT_USER_ID_MAX + 1u;
-  uint16_t user_ids[11];
-  uint8_t perms[11];
+  /* One serialized shape (companion-user-mgmt): entries + the shared
+   * sdf_services_format_user_list() serializer, exactly what the companion
+   * list reply is built from. */
+  sdf_services_user_list_entry_t entries[SDF_SERVICES_USER_LIST_MAX];
   size_t count = 0;
-
-  esp_err_t err = sdf_services_query_users(user_ids, perms, &count, max_users);
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Failed to query active users for Zigbee sync: %s",
-             esp_err_to_name(err));
+  if (!sdf_app_load_user_entries(entries, SDF_SERVICES_USER_LIST_MAX,
+                                 &count)) {
+    ESP_LOGW(TAG, "Failed to query active users for Zigbee sync");
     return;
   }
 
-  /* Serialize to JSON array: e.g. [{"id":1,"perm":3,"name":"Alice"},{"id":5,"perm":1}] */
-  cJSON *root = cJSON_CreateArray();
-  if (!root) {
-    ESP_LOGE(TAG, "Failed to create JSON array for Zigbee user sync");
+  char json_str[512];
+  size_t json_len =
+      sdf_services_format_user_list(entries, count, json_str, sizeof(json_str));
+  if (json_len == 0 || json_len >= SDF_ZIGBEE_USER_LIST_MAX) {
+    /* The Zigbee attribute's own size bound stays enforced here, at its
+     * existing call site (sdf_zigbee_attr_cache.h). */
+    ESP_LOGE(TAG, "User list JSON missing or too large for Zigbee (%zu)",
+             json_len);
     return;
   }
 
-  for (size_t i = 0; i < count; i++) {
-    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
-    sdf_storage_web_user_t rec;
-    if (sdf_storage_web_user_load(user_ids[i], &rec) == ESP_OK) {
-      strncpy(name, rec.name, sizeof(name) - 1);
-      name[sizeof(name) - 1] = '\0';
-    } else {
-      name[0] = '\0';
-    }
-
-    cJSON *user_obj = cJSON_CreateObject();
-    if (user_obj) {
-      cJSON_AddNumberToObject(user_obj, "id", user_ids[i]);
-      cJSON_AddNumberToObject(user_obj, "perm", perms[i]);
-      if (name[0] != '\0') {
-        cJSON_AddStringToObject(user_obj, "name", name);
-      }
-      cJSON_AddItemToArray(root, user_obj);
-    }
-  }
-
-  char *json_str = cJSON_PrintUnformatted(root);
-  cJSON_Delete(root);
-
-  if (json_str) {
-    /* Accepted for asynchronous application, not yet written - the component
-     * logs both the rejection reason and any later ZCL write failure. */
-    if (sdf_protocol_zigbee_update_user_list(json_str) == ESP_OK) {
-      ESP_LOGI(TAG, "Queued active users for Zigbee: %s", json_str);
-    }
-    free(json_str);
-  } else {
-    ESP_LOGE(TAG, "Failed to serialize user list JSON");
+  /* Accepted for asynchronous application, not yet written - the component
+   * logs both the rejection reason and any later ZCL write failure. */
+  if (sdf_protocol_zigbee_update_user_list(json_str) == ESP_OK) {
+    ESP_LOGI(TAG, "Queued active users for Zigbee: %s", json_str);
   }
 }
 
@@ -1495,15 +1870,15 @@ sdf_app_on_zigbee_command(void *ctx,
       }
 
       uint8_t permission = sdf_app_choose_fingerprint_permission(pe);
-      esp_err_t enroll_err =
+      sdf_services_um_outcome_t enroll_outcome =
           sdf_services_request_enrollment(pe->user_id, permission);
-      if (enroll_err != ESP_OK) {
+      if (enroll_outcome != SDF_SERVICES_UM_OK) {
         ESP_LOGW(TAG,
                  "Failed to queue enrollment for user_id=%u permission=%u: %s",
                  (unsigned)pe->user_id, (unsigned)permission,
-                 esp_err_to_name(enroll_err));
+                 sdf_services_um_outcome_name(enroll_outcome));
         sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
-        return enroll_err;
+        return ESP_FAIL;
       }
 
       ESP_LOGI(TAG,
@@ -1515,12 +1890,13 @@ sdf_app_on_zigbee_command(void *ctx,
         return ESP_ERR_INVALID_ARG;
       }
 
-      esp_err_t del_err = sdf_services_delete_user(pe->user_id);
-      if (del_err != ESP_OK) {
+      sdf_services_um_outcome_t del_outcome =
+          sdf_services_delete_user(pe->user_id);
+      if (del_outcome != SDF_SERVICES_UM_OK) {
         ESP_LOGW(TAG, "Failed to delete user_id=%u: %s", (unsigned)pe->user_id,
-                 esp_err_to_name(del_err));
+                 sdf_services_um_outcome_name(del_outcome));
         sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_ACTION_FAILURE, 0);
-        return del_err;
+        return ESP_FAIL;
       }
       ESP_LOGI(TAG, "Deleted user_id=%u successfully", (unsigned)pe->user_id);
       sdf_app_update_zigbee_user_list();
@@ -1763,8 +2139,9 @@ static void sdf_app_on_message(void *ctx, const sdf_nuki_message_t *msg) {
              (unsigned)state.nuki_state, (unsigned)state.lock_state,
              (unsigned)state.trigger, (unsigned)state.critical_battery_state);
 
-    sdf_protocol_zigbee_update_lock_state(
-        sdf_app_map_lock_state_to_zigbee(state.lock_state));
+    sdf_app_publish_lock_state(
+        sdf_app_map_nuki_state_to_device(state.lock_state),
+        SDF_DEVICE_STATE_LOCK_SOURCE_REPORTED);
     if (state.critical_battery_state) {
       sdf_app_set_alarm_mask_bits(SDF_APP_ZB_ALARM_LOW_BATTERY, 0);
     } else {
@@ -1834,6 +2211,7 @@ static void sdf_app_on_ble_ready(void *ctx) {
   (void)ctx;
   sdf_power_mark_activity();
   ESP_LOGI(TAG, "BLE transport ready");
+  sdf_device_state_record_nuki_link(s_has_creds, true, sdf_app_now_ms());
 
   if (!sdf_lock_flow_is_idle(&s_lock_flow)) {
     ESP_LOGW(TAG, "Resetting stale lock action flow after reconnect");
@@ -1894,6 +2272,9 @@ static void sdf_app_check_pairing_complete(void) {
   s_client.creds = creds;
   s_has_creds = true;
   s_pairing_active = false;
+  sdf_device_state_record_nuki_link(true,
+                                    sdf_nuki_ble_is_ready(&s_ble),
+                                    sdf_app_now_ms());
   sdf_app_emit_audit(SDF_AUDIT_PAIRING_COMPLETE, 0,
                      (int32_t)creds.authorization_id, 0);
   esp_err_t err = sdf_storage_nuki_save(creds.authorization_id, creds.shared_key);
@@ -1978,6 +2359,8 @@ esp_err_t sdf_app_init(void) {
   };
   sdf_lock_flow_init(&s_lock_flow, SDF_APP_LOCK_ACTION_MAX_RETRIES, &lf_ops);
   atomic_store(&s_zigbee_alarm_mask, 0);
+  sdf_device_state_reset();
+  sdf_device_state_set_change_cb(sdf_app_on_device_state_changed, NULL);
   s_latch_sequence_active = false;
   s_lock_action_pending = false;
   s_pending_lock_action = 0;
@@ -2061,6 +2444,7 @@ esp_err_t sdf_app_init(void) {
     memcpy(creds.shared_key, shared_key, sizeof(shared_key));
     creds.app_id = SDF_APP_ID;
     s_has_creds = true;
+    sdf_device_state_record_nuki_link(true, false, sdf_app_now_ms());
     ESP_LOGI(TAG, "Loaded stored Nuki credentials");
   }
 mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
@@ -2163,6 +2547,23 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
     return err;
   }
 
+  /* Companion user-management handoff (companion-user-mgmt): see
+   * sdf_ble_companion_on_um_request() / sdf_app_process_um_request(). */
+  err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_UM_REQUEST,
+                                   SDF_EVENT_ROUTER_PRIO_HIGH,
+                                   sdf_app_event_trampoline, NULL);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "Failed to subscribe to UM request: %s", esp_err_to_name(err));
+    return err;
+  }
+
+  /* Single-slot staging for UM requests handed off from the host task. */
+  s_um_request_lock = xSemaphoreCreateMutex();
+  if (s_um_request_lock == NULL) {
+    ESP_LOGE(TAG, "Failed to create UM request lock");
+    return ESP_ERR_NO_MEM;
+  }
+
   /* Tracks the first subsystem-init failure below so the function can
    * return an honest status while still attempting to bring up every
    * other subsystem (a partially-working door lock beats a hard abort). */
@@ -2172,6 +2573,8 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   sdf_services_get_default_config(&services_cfg);
   services_cfg.admin_action_cb = sdf_app_on_admin_action;
   services_cfg.admin_action_ctx = NULL;
+  services_cfg.fingerprint_ready_cb = sdf_app_on_fingerprint_ready;
+  services_cfg.fingerprint_ready_ctx = NULL;
 
   err = sdf_services_init(&services_cfg);
   if (err != ESP_OK) {
@@ -2186,7 +2589,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
       .ctx = NULL,
       .on_auth_request = sdf_ble_companion_on_auth_request,
       .on_config_write = sdf_ble_companion_on_config_write,
-      .on_enroll_write = sdf_ble_companion_on_enroll_write,
+      .on_um_request = sdf_ble_companion_on_um_request,
       .on_ota_write = sdf_ble_companion_handle_ota_write,
       .on_admin_action_request = sdf_app_on_ble_admin_action_request,
       .on_setup_complete = sdf_app_on_setup_complete,
@@ -2201,7 +2604,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
     }
   }
 
-  /* Create the app task after its nine subscriptions are registered and before
+  /* Create the app task after its ten subscriptions are registered and before
    * the router starts, so no event of a subscribed type can be dispatched
    * before there is a queue to receive it. */
   err = sdf_app_start_task();
@@ -2210,7 +2613,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
 
   /* Start event router dispatch task and freeze the subscriber table.
-   * All 22 subscriptions (app: 9, match: 3, admin: 4, enroll: 3, ble: 3)
+   * All 23 subscriptions (app: 10, match: 3, admin: 4, enroll: 3, ble: 3)
    * must be registered before this point. No further subscribers may register.
    * The app's nine are served by one trampoline callback (sdf_app_event_
    * trampoline); the count is per subscription, not per callback. */

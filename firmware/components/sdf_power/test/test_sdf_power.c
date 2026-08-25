@@ -1,4 +1,5 @@
 #include "unity.h"
+#include <limits.h>
 #include <string.h>
 
 #include "esp_err.h"
@@ -13,6 +14,7 @@ extern sdf_power_wake_reason_t
 sdf_power_map_wakeup_reason(esp_sleep_wakeup_cause_t cause);
 extern void test_sdf_power_set_base_checkin_interval_ms(uint32_t interval_ms);
 extern void test_sdf_power_set_battery_percent_raw(uint8_t battery_percent);
+extern bool sdf_power_battery_cb_result_acceptable(int result);
 extern uint32_t test_sdf_power_compute_stay_awake_wait_ms(
     int64_t now_us, int64_t last_activity_us, uint32_t idle_before_sleep_ms,
     int64_t wake_guard_until_us, int64_t next_battery_report_us,
@@ -91,6 +93,18 @@ void test_sdf_power_battery_bounds(void) {
 
   err = sdf_power_set_battery_percent(255);
   TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+}
+
+void test_sdf_power_battery_cb_unavailable_result_keeps_previous(void) {
+  /* The power task's battery callback contract: a result outside 0-100
+   * (SDF_BATTERY_UNAVAILABLE is -1) means "no new reading" and must not be
+   * accepted as a battery level — the previous value is kept. */
+  TEST_ASSERT_FALSE(sdf_power_battery_cb_result_acceptable(-1));
+  TEST_ASSERT_FALSE(sdf_power_battery_cb_result_acceptable(INT_MIN));
+  TEST_ASSERT_FALSE(sdf_power_battery_cb_result_acceptable(101));
+  TEST_ASSERT_TRUE(sdf_power_battery_cb_result_acceptable(0));
+  TEST_ASSERT_TRUE(sdf_power_battery_cb_result_acceptable(63));
+  TEST_ASSERT_TRUE(sdf_power_battery_cb_result_acceptable(100));
 }
 
 void test_sdf_power_calculate_checkin_interval_disabled_returns_base(void) {

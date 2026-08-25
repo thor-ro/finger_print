@@ -8,6 +8,7 @@
 # Usage:
 #   scripts/run_ble_ota_harness.sh                 # default OTA-signature cases
 #   scripts/run_ble_ota_harness.sh --scenario identity   # companion-identity 9.3
+#   scripts/run_ble_ota_harness.sh --scenario user-mgmt  # companion-user-mgmt 8.4
 #
 # Requires: ESP-IDF environment sourced (idf.py on PATH), esp-emu on PATH,
 # and a Python interpreter with bumble (see tools/ble_ota_harness/requirements.txt;
@@ -57,9 +58,10 @@ for f in "$APP_BIN" "$MERGED_BIN" "$ELF" "$SIGNING_KEY"; do
 done
 
 echo "== ble-ota-emulator-harness: deriving test images =="
-if [[ "$SCENARIO" == "identity" ]]; then
-  # The identity scenario never transfers images; skip derivation entirely.
-  echo "(identity scenario: no test images needed)"
+if [[ "$SCENARIO" == "identity" || "$SCENARIO" == "user-mgmt" || "$SCENARIO" == "device-health" ]]; then
+  # The identity/user-mgmt/device-health scenarios never transfer images;
+  # skip derivation.
+  echo "($SCENARIO scenario: no test images needed)"
 else
 "${BUMBLE_PYTHON:-python3}" "$HARNESS_DIR/prepare_images.py" \
   --app-bin "$APP_BIN" --signing-key "$SIGNING_KEY" --out-dir "$IMAGE_DIR" \
@@ -82,8 +84,8 @@ RUN_EXIT=0
 # The harness must own the HCI TCP listener before esp-emu dials in (esp-emu
 # connects as a TCP client exactly once, early in its boot).
 HARNESS_ARGS=(--device-port "$DEV_PORT" --central-port "$CENTRAL_PORT")
-if [[ "$SCENARIO" == "identity" ]]; then
-  HARNESS_ARGS+=(--scenario identity)
+if [[ "$SCENARIO" == "identity" || "$SCENARIO" == "user-mgmt" || "$SCENARIO" == "device-health" ]]; then
+  HARNESS_ARGS+=(--scenario "$SCENARIO")
 else
   HARNESS_ARGS+=(
     --tampered-image "$IMAGE_DIR/tampered.bin"
@@ -116,10 +118,21 @@ RESULT_LINE="$(grep 'BLE_OTA_HARNESS_RESULT' "$SCRATCH-harness.log" | tail -1 ||
 echo "result: ${RESULT_LINE:-<none>}"
 if [[ "$SCENARIO" == "identity" ]]; then
   PASS_RE='BLE_OTA_HARNESS_RESULT status=PASS scenario=identity'
+elif [[ "$SCENARIO" == "user-mgmt" ]]; then
+  PASS_RE='BLE_OTA_HARNESS_RESULT status=PASS scenario=user-mgmt'
+elif [[ "$SCENARIO" == "device-health" ]]; then
+  # The device-health scenario's packet budget exceeds the documented
+  # esp-emu ACL wedge (~28-31 inbound packets/boot, add-ble-ota-emulator-
+  # harness design.md D6), so its expected best outcome is an explicit
+  # WEDGE classification recording exactly what was and was not confirmed.
+  PASS_RE='BLE_OTA_HARNESS_RESULT status=(PASS|WEDGE) scenario=device-health'
+  if [[ "$RESULT_LINE" == *"status=WEDGE"* ]]; then
+    echo "::warning:: (ble-ota-emulator-harness) device-health ended on the documented esp-emu ACL wedge; notification delivery is unconfirmed under emulation"
+  fi
 else
   PASS_RE='BLE_OTA_HARNESS_RESULT status=PASS cases_run=3/3'
 fi
-if [[ "$RUN_EXIT" -ne 0 ]] || ! grep -q "$PASS_RE" "$SCRATCH-harness.log"; then
+if [[ "$RUN_EXIT" -ne 0 ]] || ! grep -Eq "$PASS_RE" "$SCRATCH-harness.log"; then
   echo "::error:: (ble-ota-emulator-harness) did not report PASS - see $SCRATCH-harness.log and $SCRATCH-emu.log"
   exit 1
 fi

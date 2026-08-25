@@ -98,6 +98,12 @@ sdf_power_wakeup_reason_name(sdf_power_wake_reason_t reason) {
   }
 }
 
+/* A battery callback result outside 0-100 means "no new reading" (e.g.
+ * SDF_BATTERY_UNAVAILABLE from the driver); the previous value is kept. */
+SDF_POWER_STATIC bool sdf_power_battery_cb_result_acceptable(int result) {
+  return result >= 0 && result <= 100;
+}
+
 static void sdf_power_push_battery_percent(uint8_t battery_percent) {
   if (!sdf_protocol_zigbee_is_enabled()) {
     return;
@@ -291,7 +297,7 @@ static void sdf_power_task(void *arg) {
         battery_cb_result = config_snapshot.battery_cb(config_snapshot.battery_ctx);
       }
 
-      if (battery_cb_result >= 0 && battery_cb_result <= 100) {
+      if (sdf_power_battery_cb_result_acceptable(battery_cb_result)) {
         battery_percent = (uint8_t)battery_cb_result;
       }
 

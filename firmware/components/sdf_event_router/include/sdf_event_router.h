@@ -36,6 +36,13 @@ typedef enum {
     /* Web Companion */
     SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
 
+    /* Companion user-management request handoff (companion-user-mgmt): the
+     * BLE host task parsed an admitted Enrollment-characteristic request
+     * and needs the app task to execute it. The full parsed request rides
+     * in sdf_app-owned state; this event is only the "go" signal, so its
+     * payload stays tiny. */
+    SDF_EVENT_ROUTER_UM_REQUEST,
+
     /* Setup phase (device-setup-phase): emitted by sdf_services' setup
      * module when a timer or the button requires a BLE-side action. */
     SDF_EVENT_ROUTER_SETUP_PHASE,
@@ -138,6 +145,13 @@ typedef struct {
     bool authorized;
 } sdf_event_router_web_reg_auth_result_payload_t;
 
+/* Companion user-management request handoff (companion-user-mgmt). The
+ * parsed request itself lives in sdf_app-owned state; this payload only
+ * names the connection that made it. */
+typedef struct {
+    uint16_t conn_handle;
+} sdf_event_router_um_request_payload_t;
+
 /* Setup-phase actions the BLE Companion Service executes on receipt:
  * - TIMEOUT: the arm window or setup deadline expired. Clear all persisted
  *   bonds, terminate the setup connection, stop advertising (the phase is
@@ -199,6 +213,7 @@ typedef struct {
         sdf_event_router_admin_auth_payload_t admin_auth;
         sdf_event_router_admin_action_complete_payload_t admin_action_complete;
         sdf_event_router_web_reg_auth_result_payload_t web_reg_auth_result;
+        sdf_event_router_um_request_payload_t um_request;
         sdf_event_router_setup_phase_payload_t setup_phase;
         sdf_event_router_button_payload_t button;
         sdf_event_router_audit_payload_t audit;

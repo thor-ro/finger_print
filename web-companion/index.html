@@ -142,7 +142,17 @@
             <div id="dashboard-view" class="view">
                 <h2>Device Dashboard</h2>
                 <p>Manage your Smart Door Bridge.</p>
-                
+
+                <!-- Device health: every value comes from the device's own
+                     health report. Unknown means the device holds no reading;
+                     N/A means the subsystem is absent by build or
+                     configuration. Available to any authenticated user. -->
+                <div class="dashboard-section">
+                    <h3>Device Health</h3>
+                    <div id="health-table"></div>
+                    <button id="btn-refresh-health" class="secondary-btn" style="margin-top: 0.5rem;">Refresh</button>
+                </div>
+
                 <div class="dashboard-section">
                     <h3>Configuration</h3>
                     <button id="btn-read-config" class="secondary-btn">Read Config</button>
@@ -152,6 +162,9 @@
 
                 <div class="dashboard-section">
                     <h3>Enroll Fingerprint</h3>
+                    <p>Four scans are required: an Admin first scans their
+                    fingerprint on the device to authorize the enrolment, then the
+                    new user scans three times.</p>
                     <div id="enrollment-panel" class="enrollment-panel">
                         <div class="input-group">
                             <label for="enroll-user-id">User ID (1-10)</label>
@@ -176,6 +189,17 @@
                         </div>
                         <p id="enroll-result" class="status-msg" style="display: none;"></p>
                     </div>
+                </div>
+
+                <div class="dashboard-section">
+                    <h3>User Management</h3>
+                    <p>List every enrolled user, and enrol, rename, re-permission
+                    or delete them. Every change requires an Admin fingerprint
+                    scan on the device to authorize it — a BLE request alone is
+                    never enough.</p>
+                    <button id="btn-um-refresh" class="secondary-btn">Refresh Users</button>
+                    <div id="um-users" style="margin-top: 0.75rem; overflow-x: auto;"></div>
+                    <p id="um-status" class="status-msg"></p>
                 </div>
 
                 <div class="dashboard-section">

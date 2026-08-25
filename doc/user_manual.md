@@ -127,6 +127,71 @@ Admin requests via app     ──► LED pulses Blue ──► Admin scans finge
 | First-time setup (initial Admin) | Setup wizard, step 1 | 3 (Admin) | No — setup phase is the gate |
 | Remote (Zigbee) | n/a | Specified by coordinator | No (trusted network) |
 
+## Companion App User Management
+
+After setup completes, the companion app is the supported surface for
+managing enrolled users on a claimed device. Open the dashboard's **User
+Management** section and tap **Refresh Users** to list every enrolled user
+with their ID, name and permission.
+
+Every change is authorized by a **live Admin fingerprint scan on the device**
+— a BLE request alone is never enough:
+
+| Action | Scans required |
+| --- | --- |
+| List users | None (Admin session only) |
+| Enroll a new user | 1 authorizing Admin scan, then the new user scans 3 times |
+| Rename a user | 1 authorizing Admin scan |
+| Change permission | 1 authorizing Admin scan (may take up to ~15 seconds) |
+| Delete a user | 1 authorizing Admin scan |
+
+The app tells you before submitting what scans are needed and shows the
+request as waiting until the device reports its outcome. Refusals are
+rendered specifically: *last admin* (the change would leave no admin),
+*name taken* (another user holds that name), *id occupied*, *busy* (retry in
+a moment), *denied* (the scanned finger was not an Admin), or *timed out*
+(no one scanned within 10 seconds).
+
+You may delete or demote your own user — only the last-admin rule refuses.
+The app warns you first: after such a change your session loses its
+authority at its next restricted action.
+
+## Companion App Device Health
+
+The dashboard's **Device Health** section shows what the device knows about
+itself right now: lock state, battery, active alarms, fingerprint sensor
+readiness, the Nuki link, the Zigbee network, firmware version, OTA state and
+setup state. It is available to **any signed-in user**, not only an admin,
+and it updates on its own as values change — you never need to reload.
+
+Every field shows one of three things:
+
+- **A real reading.** The device measured or was told this value. A lock
+  state or battery level also says how old the reading is when it is old
+  enough to mislead.
+- **Unknown.** The device holds *no* reading — for example the battery
+  measurement failed, or nothing has reported since boot. Unknown means
+  unknown: no number stands in for it.
+- **N/A (not applicable).** The subsystem does not exist in this build or
+  configuration — a Zigbee-disabled build shows its network state this way.
+  This is different from unknown: nothing failed; there is simply nothing
+  there to read.
+
+### Why an assumed lock state looks different
+
+When you send a lock or unlock command, the bridge immediately records the
+state it *expects* — but until the lock itself confirms, that value is an
+assumption, not evidence. The app marks such a state with
+*(awaiting confirmation)*. When the lock reports back, the marking
+disappears: from then on the state shown is one the lock confirmed.
+
+### Battery
+
+The battery percentage is always the device's own latest measurement — never
+a configured default. If no measurement is available it shows **Unknown**,
+and the OTA pre-flight warning will say the battery level is unknown rather
+than implying it was checked.
+
 ## Permission Model
 
 Each enrolled user is assigned a permission level:
@@ -215,9 +280,15 @@ Requires: `login` (CLI authentication)
 |---------|-------------|------|
 | `user list` | List all enrolled users (ID, Permission name) | CLI login |
 | `user get <id>` | Show details for a specific user | CLI login |
-| `user add <id> <perm>` | Enroll new user locally (3 scans, requires Admin FP) | CLI login + Admin FP |
-| `user del <id>` | Delete user (requires Admin FP; refused if it would remove the last remaining admin) | CLI login + Admin FP |
-| `user permission <id> <perm>` | Change user permission level (requires Admin FP) | CLI login + Admin FP |
+| `user add <id> <perm>` | Enroll new user locally (3 scans; no Admin FP needed — the enrolment starts directly and the three scans are the capture) | CLI login |
+| `user del <id>` | Delete user directly (no Admin FP gate; refused if it would remove the last remaining admin) | CLI login |
+| `user permission <id> <perm>` | Change user permission level (requires Admin FP scan to authorize) | CLI login + Admin FP |
+
+Note the difference from the companion app: on the console, `user add` arms
+the enrolment directly and `user del` performs the deletion directly —
+neither goes through an Admin-fingerprint authorization step (the console
+itself is behind your CLI login). Over BLE, by contrast, every state-changing
+verb requires a live Admin fingerprint scan.
 
 **Permission levels:** 1 = Standard, 2 = Elevated, 3 = Admin
 
@@ -226,7 +297,7 @@ Requires: `login` (CLI authentication)
 SDF> login mypassword
 Authenticated
 SDF> user add 42 1
-Scan an admin fingerprint to authorize enrollment of user 42 with permission 1...
+Enrolling user 42 with permission 1: 3 fingerprint scans required.
 Place finger on sensor (scan 1 of 3)...
 Scan 1 OK.
 Remove finger and place again for next scan.

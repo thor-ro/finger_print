@@ -7,7 +7,7 @@
 /* Declared per-component subscription counts.
  * Every subsystem that subscribes to the event router declares its
  * exact subscription count here. */
-#define SDF_EVENT_ROUTER_SUBS_APP             9
+#define SDF_EVENT_ROUTER_SUBS_APP             10
 #define SDF_EVENT_ROUTER_SUBS_SERVICES_MATCH  3
 #define SDF_EVENT_ROUTER_SUBS_SERVICES_ADMIN  4
 #define SDF_EVENT_ROUTER_SUBS_SERVICES_ENROLL 3
@@ -18,7 +18,7 @@
      SDF_EVENT_ROUTER_SUBS_SERVICES_MATCH + \
      SDF_EVENT_ROUTER_SUBS_SERVICES_ADMIN + \
      SDF_EVENT_ROUTER_SUBS_SERVICES_ENROLL + \
-     SDF_EVENT_ROUTER_SUBS_BLE_COMPANION) /* 22 */
+     SDF_EVENT_ROUTER_SUBS_BLE_COMPANION) /* 23 */
 
 /* Headroom above declared total. Set to 0: sizing the pool exactly at the
  * declared total ensures that any undeclared subscription immediately causes

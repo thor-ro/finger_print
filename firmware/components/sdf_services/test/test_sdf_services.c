@@ -690,7 +690,7 @@ void test_set_user_name_refuses_duplicate_of_other_user(void) {
   rec2.valid = true;
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &rec2));
 
-  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sdf_services_set_user_name(2, "alice"));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_NAME_TAKEN, sdf_services_set_user_name(2, "alice"));
 
   /* Both records unchanged. */
   sdf_storage_web_user_t check1 = {0}, check2 = {0};
@@ -713,7 +713,7 @@ void test_set_user_name_to_own_name_is_noop_success(void) {
   sdf_storage_web_user_t rec = make_web_user_record("alice", true);
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &rec));
 
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_set_user_name(1, "alice"));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_set_user_name(1, "alice"));
 
   sdf_storage_web_user_t check = {0};
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &check));
@@ -738,7 +738,7 @@ void test_set_user_name_preserves_existing_credential(void) {
   rec.valid = true;
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &rec));
 
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_set_user_name(1, "carol"));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_set_user_name(1, "carol"));
 
   sdf_storage_web_user_t check = {0};
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &check));
@@ -1036,6 +1036,9 @@ void test_pulse_pending_action_led_covers_all_actions(void) {
   sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH);
   sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR);
   sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_DELETE_USER);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL);
+  sdf_services_pulse_pending_action_led(SDF_SERVICES_ADMIN_ACTION_RENAME_USER);
 }
 
 void test_request_admin_action_ble_pairing_window_sets_pending_action(void) {
@@ -1593,7 +1596,7 @@ void test_delete_user_refuses_sole_admin_before_sensor(void) {
   seed_enrolled_user(1, 3);
 
   uint32_t writes_before = sdf_mock_uart_write_count();
-  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sdf_services_delete_user(1));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_LAST_ADMIN, sdf_services_delete_user(1));
 
   TEST_ASSERT_EQUAL(writes_before, sdf_mock_uart_write_count());
   sdf_services_state_t *s = sdf_services_state();
@@ -1619,7 +1622,7 @@ void test_delete_user_allows_one_of_two_admins(void) {
   seed_enrolled_user(2, 3);
 
   queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_delete_user(2));
 
   sdf_services_state_t *s = sdf_services_state();
   TEST_ASSERT_FALSE(SDF_SERVICES_BMP_TEST(s->enrolled_user_bmp, 2));
@@ -1646,7 +1649,7 @@ void test_delete_user_allows_non_admin_with_single_admin_enrolled(void) {
   seed_enrolled_user(2, 1);
 
   queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_delete_user(2));
 
   sdf_services_state_t *s = sdf_services_state();
   TEST_ASSERT_FALSE(SDF_SERVICES_BMP_TEST(s->enrolled_user_bmp, 2));
@@ -1668,14 +1671,14 @@ void test_delete_user_unenrolled_id_not_found_without_sensor_traffic(void) {
   seed_enrolled_user(2, 1);
 
   uint32_t writes_before = sdf_mock_uart_write_count();
-  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_services_delete_user(7));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_NOT_FOUND, sdf_services_delete_user(7));
   TEST_ASSERT_EQUAL(writes_before, sdf_mock_uart_write_count());
 
   /* With no scripted reply the same request for the enrolled non-admin
    * fails at the sensor instead - a different code, leaving the cache (and
    * its bit for user 2) untouched because the mutation path is never
    * reached. */
-  TEST_ASSERT_EQUAL(ESP_FAIL, sdf_services_delete_user(2));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_FAILED, sdf_services_delete_user(2));
   TEST_ASSERT_TRUE(SDF_SERVICES_BMP_TEST(
       sdf_services_state()->enrolled_user_bmp, 2));
 
@@ -1723,7 +1726,7 @@ void test_delete_user_destroys_bound_credential(void) {
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &survivor_seed));
 
   queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_delete_user(2));
 
   /* The record - name, salt and stretched credential - is gone. */
   sdf_storage_web_user_t loaded = {0};
@@ -1758,16 +1761,317 @@ void test_deleted_name_is_available_for_reuse(void) {
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &account));
 
   queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_delete_user(2));
 
   /* The freed name can now be given to another enrolled user. */
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_set_user_name(1, "shared"));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_set_user_name(1, "shared"));
 
   sdf_storage_web_user_t check = {0};
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &check));
   TEST_ASSERT_EQUAL_STRING("shared", check.name);
 
   sdf_storage_web_user_clear_all();
+  delete_guard_test_teardown();
+}
+
+#endif /* CONFIG_IDF_TARGET_LINUX */
+
+/* ---------------------------------------------------------------------------
+ * companion-user-mgmt: named outcomes, the remote admin-gated actions, and
+ * the one user-list serializer.
+ * ------------------------------------------------------------------------- */
+
+/* The wire strings are part of the companion protocol: renaming any of them
+ * breaks every client. Pinned here so a drift fails loudly. */
+void test_um_outcome_names_are_wire_stable(void) {
+  TEST_ASSERT_EQUAL_STRING("ok", sdf_services_um_outcome_name(SDF_SERVICES_UM_OK));
+  TEST_ASSERT_EQUAL_STRING("not_found",
+                           sdf_services_um_outcome_name(SDF_SERVICES_UM_NOT_FOUND));
+  TEST_ASSERT_EQUAL_STRING("id_occupied",
+                           sdf_services_um_outcome_name(SDF_SERVICES_UM_ID_OCCUPIED));
+  TEST_ASSERT_EQUAL_STRING("last_admin",
+                           sdf_services_um_outcome_name(SDF_SERVICES_UM_LAST_ADMIN));
+  TEST_ASSERT_EQUAL_STRING("name_taken",
+                           sdf_services_um_outcome_name(SDF_SERVICES_UM_NAME_TAKEN));
+  TEST_ASSERT_EQUAL_STRING("busy", sdf_services_um_outcome_name(SDF_SERVICES_UM_BUSY));
+  TEST_ASSERT_EQUAL_STRING("denied",
+                           sdf_services_um_outcome_name(SDF_SERVICES_UM_DENIED));
+  TEST_ASSERT_EQUAL_STRING("timeout",
+                           sdf_services_um_outcome_name(SDF_SERVICES_UM_TIMEOUT));
+  TEST_ASSERT_EQUAL_STRING("invalid",
+                           sdf_services_um_outcome_name(SDF_SERVICES_UM_INVALID));
+}
+
+void test_change_permission_outcomes_are_distinguishable(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  /* Out-of-range arguments: INVALID, produced by nothing else. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_INVALID,
+                    sdf_services_change_user_permission(0, 1));
+
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 3);
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 2);
+  sdf_services_perm_set(s->enrolled_perm_packed, 2, 1);
+
+  /* Unenrolled target: NOT_FOUND, distinct from the last-admin refusal. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_NOT_FOUND,
+                    sdf_services_change_user_permission(7, 1));
+
+  /* Demoting the only admin: LAST_ADMIN - the condition that used to share
+   * ESP_ERR_INVALID_STATE with "busy" now names itself. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_LAST_ADMIN,
+                    sdf_services_change_user_permission(1, 1));
+
+  /* With another action already in flight: BUSY - provably different from
+   * the LAST_ADMIN answer above even for an identical call. */
+  s->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR;
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_BUSY,
+                    sdf_services_change_user_permission(1, 1));
+  s->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+
+  /* Same-permission change is a completed no-op. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK,
+                    sdf_services_change_user_permission(2, 1));
+}
+
+void test_request_enrollment_reports_occupied_id_itself(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 4);
+  sdf_services_perm_set(s->enrolled_perm_packed, 4, 1);
+
+  /* The occupied-id check moved off the CLI into the services layer: every
+   * caller gets ID_OCCUPIED, named specifically rather than folded into an
+   * ambiguous code. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_ID_OCCUPIED,
+                    sdf_services_request_enrollment(4, 1));
+  /* A free id passes the pre-checks (no tasks running here, so the pending
+   * flag simply stays set; reset afterwards). */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK,
+                    sdf_services_request_enrollment(5, 1));
+  TEST_ASSERT_TRUE(sdf_services_is_enrollment_active());
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_INVALID,
+                    sdf_services_request_enrollment(0, 1));
+}
+
+void test_request_enrollment_busy_while_enrollment_pending(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK,
+                    sdf_services_request_enrollment(5, 1));
+  /* A second enrolment while one is in flight answers BUSY. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_BUSY,
+                    sdf_services_request_enrollment(6, 1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+}
+
+void test_um_format_user_list_shape(void) {
+  char buf[256];
+  sdf_services_user_list_entry_t entries[2] = {
+      {1, 3, "Alice"},
+      {5, 1, NULL},
+  };
+
+  size_t n = sdf_services_format_user_list(entries, 2, buf, sizeof(buf));
+  TEST_ASSERT_GREATER_THAN(0, n);
+  /* Same shape the Zigbee report has always carried - and the nameless
+   * user is represented by the ABSENCE of the field, never an empty
+   * string. */
+  TEST_ASSERT_EQUAL_STRING("[{\"id\":1,\"perm\":3,\"name\":\"Alice\"},"
+                           "{\"id\":5,\"perm\":1}]",
+                           buf);
+}
+
+void test_um_format_user_list_empty(void) {
+  char buf[8];
+  size_t n = sdf_services_format_user_list(NULL, 0, buf, sizeof(buf));
+  TEST_ASSERT_GREATER_THAN(0, n);
+  TEST_ASSERT_EQUAL_STRING("[]", buf);
+}
+
+void test_um_format_user_list_escapes_and_rejects_truncation(void) {
+  char buf[64];
+  sdf_services_user_list_entry_t entries[1] = {{1, 1, "a\"b"}};
+  size_t n = sdf_services_format_user_list(entries, 1, buf, sizeof(buf));
+  TEST_ASSERT_GREATER_THAN(0, n);
+  TEST_ASSERT_NOT_NULL(strstr(buf, "\\\""));
+
+  /* Too small for even "[]": reported as does-not-fit (0), never as an
+   * empty list. */
+  char tiny[2];
+  TEST_ASSERT_EQUAL(0, sdf_services_format_user_list(NULL, 0, tiny,
+                                                     sizeof(tiny)));
+}
+
+void test_request_delete_user_refuses_last_admin_before_arming(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 3);
+
+  /* Impossible deletion refused BEFORE the gate is armed: no pending
+   * action, so nobody is asked to scan a finger that can never work. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_LAST_ADMIN,
+                    sdf_services_request_delete_user(1));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    s->pending_admin_action);
+}
+
+void test_request_delete_user_unenrolled_refused_without_arming(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 3);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_NOT_FOUND,
+                    sdf_services_request_delete_user(7));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    s->pending_admin_action);
+}
+
+void test_request_delete_user_arms_gate_carrying_target(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 3);
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 2);
+  sdf_services_perm_set(s->enrolled_perm_packed, 2, 1);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_request_delete_user(2));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_DELETE_USER,
+                    s->pending_admin_action);
+  TEST_ASSERT_EQUAL_UINT16(2, s->pending_admin_action_user_id);
+}
+
+void test_second_remote_request_while_in_flight_answers_busy(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 3);
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 2);
+  sdf_services_perm_set(s->enrolled_perm_packed, 2, 1);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_request_delete_user(2));
+  /* The single-slot gate cannot hold two actions: the second request gets
+   * BUSY rather than queueing behind or displacing the first. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_BUSY,
+                    sdf_services_request_remote_enrollment(3, 1));
+}
+
+#ifdef CONFIG_IDF_TARGET_LINUX
+
+void test_remote_delete_denied_by_non_admin_scan_resolves_immediately(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 1);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_request_delete_user(2));
+
+  /* A non-admin finger claims-attempts the pending action: the remote
+   * action must resolve NOW with DENIED - not linger until timeout. */
+  sdf_fingerprint_match_t non_admin = {.user_id = 9, .permission = 1};
+  TEST_ASSERT_TRUE(sdf_services_try_claim_admin_action(&non_admin));
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+  uint16_t uid = 0;
+  uint8_t perm = 0;
+  sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_FAILED;
+  TEST_ASSERT_TRUE(
+      sdf_services_take_um_action_result(&uid, &perm, &outcome));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_DENIED, outcome);
+  TEST_ASSERT_EQUAL_UINT16(2, uid);
+  /* Exactly-once: the slot is drained. */
+  TEST_ASSERT_FALSE(
+      sdf_services_take_um_action_result(&uid, &perm, &outcome));
+
+  /* User 2 still enrolled. */
+  TEST_ASSERT_TRUE(
+      SDF_SERVICES_BMP_TEST(sdf_services_state()->enrolled_user_bmp, 2));
+
+  delete_guard_test_teardown();
+}
+
+void test_remote_enroll_denial_never_starts_state_machine(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK,
+                    sdf_services_request_remote_enrollment(3, 1));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_REMOTE_ENROLL,
+                    sdf_services_state()->pending_admin_action);
+  /* Armed != started: the enrolment state machine waits for its
+   * authorizing admin scan. */
+  TEST_ASSERT_FALSE(sdf_services_is_enrollment_active());
+
+  sdf_fingerprint_match_t non_admin = {.user_id = 9, .permission = 1};
+  TEST_ASSERT_TRUE(sdf_services_try_claim_admin_action(&non_admin));
+
+  TEST_ASSERT_FALSE(sdf_services_is_enrollment_active());
+  uint16_t uid = 0;
+  uint8_t perm = 0;
+  sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_FAILED;
+  TEST_ASSERT_TRUE(
+      sdf_services_take_um_action_result(&uid, &perm, &outcome));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_DENIED, outcome);
+
+  delete_guard_test_teardown();
+}
+
+void test_remote_delete_authorized_executes_with_recorded_outcome(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 1);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_request_delete_user(2));
+
+  /* Simulate exactly what an authorizing admin scan does (claim + execute)
+   * with a scripted sensor ACK behind fp_delete_user(). */
+  queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
+  sdf_services_execute_admin_action(SDF_SERVICES_ADMIN_ACTION_DELETE_USER,
+                                    NULL, NULL);
+
+  TEST_ASSERT_FALSE(
+      SDF_SERVICES_BMP_TEST(sdf_services_state()->enrolled_user_bmp, 2));
+  uint16_t uid = 0;
+  uint8_t perm = 0;
+  sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_FAILED;
+  TEST_ASSERT_TRUE(
+      sdf_services_take_um_action_result(&uid, &perm, &outcome));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, outcome);
+  TEST_ASSERT_EQUAL_UINT16(2, uid);
+
+  delete_guard_test_teardown();
+}
+
+void test_remote_delete_timeout_records_named_outcome(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 1);
+
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_OK, sdf_services_request_delete_user(2));
+  sdf_services_record_um_action_timeout_locked(
+      SDF_SERVICES_ADMIN_ACTION_DELETE_USER);
+
+  uint16_t uid = 0;
+  uint8_t perm = 0;
+  sdf_services_um_outcome_t outcome = SDF_SERVICES_UM_FAILED;
+  TEST_ASSERT_TRUE(
+      sdf_services_take_um_action_result(&uid, &perm, &outcome));
+  /* TIMEOUT is distinguishable from DENIED - the client renders different
+     messages for "wrong finger scanned" and "nobody scanned in time". */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_UM_TIMEOUT, outcome);
+
   delete_guard_test_teardown();
 }
 
@@ -1834,4 +2138,61 @@ void test_sdf_services_start_stop_start_tasks_cycle(void) {
   TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(match_task_2));
   TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(enroll_task_2));
   TEST_ASSERT_TRUE(sdf_platform_time_wdt_is_registered(admin_task_2));
+}
+/* --- Permission change: a refused scan is not a timeout -----------------
+ *
+ * sdf_services_change_user_permission() blocks its caller on
+ * admin_action_done_sem, so the gate has to resolve a non-admin scan the
+ * way it resolves one for the remote verbs. Left unresolved, the caller
+ * would wait out the whole window and report "timeout" for a scan that was
+ * actually refused (companion-user-mgmt "Denied and timed-out scans are
+ * distinguishable"). Driven through the gate directly: the blocking wait
+ * itself needs a second task and is exercised on-target. */
+static void seed_pending_permission_change(void) {
+  sdf_services_state_t *st = sdf_services_state();
+  while (xSemaphoreTake(st->admin_action_done_sem, 0) == pdTRUE) {
+  }
+  st->permission_change_pending = true;
+  st->permission_change_user_id = 4;
+  st->permission_change_permission = 3;
+  st->permission_change_result = ESP_ERR_TIMEOUT;
+  st->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION;
+}
+
+void test_permission_change_denied_by_non_admin_scan(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  seed_pending_permission_change();
+
+  sdf_fingerprint_match_t non_admin = {.user_id = 9, .permission = 1};
+  TEST_ASSERT_TRUE(sdf_services_try_claim_admin_action(&non_admin));
+
+  sdf_services_state_t *st = sdf_services_state();
+  /* Distinct from the ESP_ERR_TIMEOUT the waiter was armed with: the
+   * waiter maps this to DENIED, not TIMEOUT. */
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_ALLOWED, st->permission_change_result);
+  TEST_ASSERT_FALSE(st->permission_change_pending);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE, st->pending_admin_action);
+  /* The blocked caller is released immediately rather than waiting out the
+   * window - which is also what keeps the app task inside its watchdog. */
+  TEST_ASSERT_EQUAL(pdTRUE, xSemaphoreTake(st->admin_action_done_sem, 0));
+}
+
+void test_permission_change_untouched_when_no_change_is_pending(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  sdf_services_state_t *st = sdf_services_state();
+  st->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION;
+  st->permission_change_pending = false;
+  st->permission_change_result = ESP_OK;
+
+  sdf_fingerprint_match_t non_admin = {.user_id = 9, .permission = 1};
+  TEST_ASSERT_TRUE(sdf_services_try_claim_admin_action(&non_admin));
+
+  /* No caller is waiting: the action stays pending for a retry, exactly as
+   * before, and no result is fabricated for nobody. */
+  TEST_ASSERT_EQUAL(ESP_OK, st->permission_change_result);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION,
+                    st->pending_admin_action);
 }

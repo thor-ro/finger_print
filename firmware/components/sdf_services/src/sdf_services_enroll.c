@@ -174,6 +174,35 @@ void sdf_services_run_enrollment_step(void) {
         (sdf_fingerprint_enroll_step_t)current_cmd,
         snapshot_user_id, snapshot_permission);
 
+    /* Publish sensor readiness from the fingerprint path's own I/O
+     * (companion-device-health) - see the match task's equivalent block. */
+    {
+        bool ready = false;
+        bool publish = false;
+        switch (step_result) {
+        case SDF_FINGERPRINT_OP_OK:
+        case SDF_FINGERPRINT_OP_FULL:
+        case SDF_FINGERPRINT_OP_USER_OCCUPIED:
+        case SDF_FINGERPRINT_OP_FINGER_OCCUPIED:
+            ready = true;
+            publish = true;
+            break;
+        case SDF_FINGERPRINT_OP_TIMEOUT:
+        case SDF_FINGERPRINT_OP_IO_ERROR:
+        case SDF_FINGERPRINT_OP_PROTOCOL_ERROR:
+        case SDF_FINGERPRINT_OP_FAILED:
+            ready = false;
+            publish = true;
+            break;
+        default:
+            break;
+        }
+        if (publish && s->config.fingerprint_ready_cb != NULL) {
+            s->config.fingerprint_ready_cb(s->config.fingerprint_ready_ctx,
+                                           ready);
+        }
+    }
+
     if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
         return;
     }

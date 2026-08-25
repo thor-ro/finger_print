@@ -212,6 +212,7 @@ common <-- evt
 | Component | Responsibility |
 |---|---|
 | **sdf_app** | Application orchestration: biometric unlock flow, Zigbee bridge flow, Nuki pairing flow, enrollment trigger, lock action queuing, event subscription, audit event emission |
+| **sdf_device_state** | Transport-independent last-known device state cache and health-report producer (companion-device-health): lock state with provenance/age, battery, alarms, fingerprint readiness, Nuki link, Zigbee join; three-valued JSON report (measured / unknown / not applicable), no sensor or bus I/O on the read path |
 | **sdf_services** | Core services: fingerprint match polling cycle, enrollment executor (event-driven, retries), admin action authorization (10s timeout), security rate limiting, LED feedback dispatch, event emission for biometric/security/enrollment events |
 | **sdf_event_router** | Central event bus: typed event emission, priority-based dispatch (CRITICAL/HIGH/NORMAL/LOW), subscription management with filtering, audit logging |
 | **sdf_protocol_ble** | BLE/Nuki protocol: encrypted/unencrypted message framing, Curve25519 ECDH key exchange, challenge-response, lock action encoding, nonce replay detection, event emission for lock actions |
@@ -623,6 +624,47 @@ An authenticated connection records the fingerprint user id of the account that 
 
 Any other opcode is rejected with `BLE_ATT_ERR_WRITE_NOT_PERMITTED`. `LOGOUT` carries no operands, so a padded `LOGOUT` is an invalid-length error and does **not** log the connection out.
 
+### BLE Companion User-Management Wire Format (Enrollment Characteristic)
+
+The Enrollment characteristic (`7d5a0003-5c2b-4f8a-9e3d-1a2b3c4d5e6f`) carries the companion's user-management verbs as a request/reply protocol. Every write carries a client-supplied request id, and every accepted write produces exactly one terminal reply notification carrying that id — including requests refused before any work starts (malformed payload, unknown verb, out-of-range field). The only condition that produces no reply is a connection that has gone away. The legacy bare enrolment payload `{"user_id":N,"permission":P}` is no longer accepted; it is answered as an invalid request and never executed.
+
+Admission mirrors every other restricted characteristic: live admin authority (an authenticated session whose bound user is still an enrolled admin). One stated exception exists — **setup-phase admission**: while the device is in the setup phase with **no enrolled users**, the *enrolment verb alone* is admitted from the setup connection without authentication and without an admin scan, because neither an account nor an admin exists yet. The exception closes the moment any user is enrolled; every other verb stays refused on such a connection.
+
+| Verb | Request | Extra fields |
+|---|---|---|
+| `list` | `{"req":N,"verb":"list"}` | none |
+| `enroll` | `{"req":N,"verb":"enroll","user_id":U,"permission":P}` | `1 <= U <= 10`, `1 <= P <= 3` |
+| `delete` | `{"req":N,"verb":"delete","user_id":U}` | `1 <= U <= 10` |
+| `set_permission` | `{"req":N,"verb":"set_permission","user_id":U,"permission":P}` | same ranges |
+| `rename` | `{"req":N,"verb":"rename","user_id":U,"name":"..."}` | name ≤ 31 bytes |
+
+Terminal reply shape: `{"req":N,"result":"<outcome>"}`, where `<outcome>` is one of:
+
+| Result | Means |
+|---|---|
+| `ok` | The verb completed |
+| `not_found` | No such enrolled user |
+| `id_occupied` | Enrolment target id already enrolled |
+| `last_admin` | Refused: would remove or demote the only admin |
+| `name_taken` | Refused: another user holds that name |
+| `busy` | Another admin action, permission change or enrolment is in flight |
+| `denied` | The authorizing scan did not match an admin |
+| `timeout` | No authorizing scan arrived within the pending-action window |
+| `invalid` | Malformed request, unknown verb, or out-of-range field |
+
+The same enumeration is reported by the serial console, so the two surfaces cannot disagree about why something was refused.
+
+Authorization rules per verb:
+
+- **list** requires live admin authority but **no fingerprint scan**; it replies immediately.
+- **enroll, delete, set_permission, rename** additionally require a **live Admin fingerprint scan** resolved through the pending-admin-action gate. The reply arrives when the action resolves — authorized, denied (`denied`), or expired (`timeout`). Nothing blocks the GATT callback while waiting: requests are handed to the app task and answered asynchronously.
+- A second request on the same connection while one is in flight is answered `busy`, never queued or dropped.
+- During first-time setup (no enrolled users) the wizard's enrolment starts without an authorizing scan; everywhere else an authenticated session alone is never sufficient to enrol a user at any permission level.
+
+The user list has exactly one serialized shape, shared with the Zigbee report: `[{"id":1,"perm":3,"name":"Alice"},{"id":5,"perm":1}]`, produced by a single serializer (`sdf_services_format_user_list()`); a user holding no name omits the field rather than carrying an empty one. Because ten users can exceed one notification, the list reply is chunked: each part carries `{"req":N,"verb":"list","part":i,"end":true|false,"users":[...]}`, and only the final part has `"end":true`, so a truncated list is never indistinguishable from a complete one.
+
+Enrolment progress notifications keep their existing shapes (`{"status":"success"|"failed",...}`); when an enrolment was started by a user-management request they additionally carry `"req":<id>`, so progress is attributable to the request that began it.
+
 ### BLE Companion Setup-State Wire Format
 
 The Setup-State characteristic (`7d5a0005-5c2b-4f8a-9e3d-1a2b3c4d5e6f`) is read-only, `READ | READ_ENC`: readable on an encrypted but unauthenticated link, before any account exists — this is how the first-time setup wizard determines which phase the device is in prior to login. It is deliberately not NOTIFY-capable (the persisted CCCD budget is fully committed) and has no write path.
@@ -647,6 +689,40 @@ nobody could log into.
 Exposing only this enumeration keeps the authentication gate on the Config, Enrollment and OTA characteristics intact: without a completed login those still return `BLE_ATT_ERR_INSUFFICIENT_AUTHEN`.
 
 Two Config-characteristic action requests support the wizard's final steps, both accepted only on an authenticated session: `{"action":"setup_nuki_pair"}` (initial Nuki pairing while the setup-completion latch is unset; replies `{"setup_nuki_pair":true|false}`) and `{"action":"finish_setup"}` (explicit completion; replies `{"finish_setup":true}` or `{"finish_setup":false,"step":"admin_enrollment"|"registration"|"nuki_pairing"|"internal_error"}`). The three step names identify the first outstanding prerequisite; `internal_error` covers a failure that is not an unmet prerequisite, so the app retries completion instead of returning the user to a step that already succeeded. A failure after the setup-completion latch has been written rolls that latch back, leaving the device in the setup phase and completable on retry..
+
+### BLE Companion Status Characteristic (Device Health Report)
+
+The Status characteristic (`7d5a0006-5c2b-4f8a-9e3d-1a2b3c4d5e6f`) supports read and notify and carries the device health report produced by `sdf_device_state` — a new component holding the last-known device state independently of any transport. Lock state, battery, alarms, fingerprint readiness, Nuki link state and Zigbee join state are recorded there by the same events that feed every other consumer; the Zigbee push reads that one cache rather than being where values land first, so two transports cannot report different numbers for the same thing.
+
+Admission is deliberately different from Config/Enrollment/OTA: any **authenticated** connection may read or subscribe, at any permission level — no admin authority required — because the report carries no secret material: no authorization id, no keys, no salts, no user records. Admission resolves the bound user's enrolment live on every access, so a deleted bound user loses Status access along with authentication.
+
+**Field vocabulary — three-valued, never substituted.** Every field is exactly one of:
+
+- *measured* — a value with provenance; stale-able values carry `"age_ms"`.
+- `"unknown"` (`{"state":"unknown"}`) — the system holds no reading (the measurement failed, or nothing has reported since boot).
+- `"not applicable"` (`{"state":"not_applicable"}`) — the subsystem is absent by build or configuration (Zigbee disabled).
+
+No field is ever populated with a substitute. In particular the configured default battery percentage never appears as a battery level, and a failed ADC read is reported as unknown, not as 100. A lock state carries its provenance: `"source":"reported"` (a keyturner report confirmed it) or `"source":"assumed"` (derived from a lock/unlock command this device sent, not yet confirmed by the lock).
+
+Report shape (single JSON document):
+
+```
+{"lock":{"state":"locked","source":"reported","age_ms":8300},
+ "battery":{"percent":63,"age_ms":41200},
+ "alarms":{"mask":2},
+ "fingerprint":{"ready":true,"age_ms":1200},
+ "nuki":{"paired":true,"connected":false,"age_ms":400},
+ "zigbee":{"joined":true,"age_ms":90000},
+ "firmware":"v1.0.0-3-gabcdef",
+ "ota":"idle",
+ "setup":"complete"}
+```
+
+`firmware`, `ota` and `setup` are sourced from `sdf_ota_get_version()`, `sdf_ota_get_state()` and `sdf_services_get_setup_state()` so the report cannot disagree with their other surfaces; none can go stale, so none carries an age. Signal RSSI and Parent RSSI are not applicable today and appear nowhere in the report.
+
+Producing the report performs **no sensor or bus I/O**: reads are served from recorded state on the host task with no wait on another task, and fingerprint readiness is published by the fingerprint path after its own I/O (match scans, enrolment steps) — never probed on behalf of a reader.
+
+Change notifications are coalesced to the latest report within a short window, mirroring the Zigbee attribute-reporting rule. Because a notification is MTU-bound while a read is not, a report too large for one notification at the negotiated MTU is delivered as an empty change marker carrying no partial data; the client obtains the full value with a read (ATT read-blob serves long values transparently). No change is silently dropped: every burst ends in either a report or a marker per subscribed connection. The fifth NOTIFY-capable characteristic is accounted against `CONFIG_BT_NIMBLE_MAX_CCCDS` (5 notify characteristics × 3 bonded peers = 15 ≤ 16).
 
 ### BLE Companion GATT Write Staging
 

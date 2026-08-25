@@ -31,12 +31,14 @@ set(EXTRA_COMPONENT_DIRS
     "../components/sdf_ota"
     "../components/sdf_app"
     "../components/sdf_ble_companion"
+    "../components/sdf_device_state"
 )
 
 set(COMPONENTS main sdf_common sdf_drivers sdf_power sdf_state_machines
                sdf_protocol_ble sdf_storage sdf_platform sdf_platform_power
                sdf_power_policy sdf_config sdf_event_router sdf_services
                sdf_protocol_zigbee sdf_cli sdf_ota sdf_app sdf_ble_companion
+               sdf_device_state
                espressif__esp-zigbee-lib espressif__led_strip
                espressif__button espressif__cjson app_update esp_partition
                bt mbedtls)
