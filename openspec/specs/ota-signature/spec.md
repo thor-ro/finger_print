@@ -6,15 +6,21 @@ Specifies how OTA images are signed and verified, so that a device only commits 
 ## Requirements
 
 ### Requirement: Signature Algorithm
-The system SHALL verify OTA images using ECDSA over the NIST P-256 curve (`secp256r1`). The system SHALL NOT depend on any signature implementation not already present in the ESP-IDF-bundled mbedTLS.
+The system SHALL verify OTA images using the ESP-IDF Secure Boot V2 ECDSA signature scheme over the NIST P-256 curve (`secp256r1`), as provided by ESP-IDF's `bootloader_support` component. The system SHALL NOT implement its own signature verification, and SHALL NOT vendor or link any cryptographic library for this purpose beyond what ESP-IDF already provides.
 
 #### Scenario: Verification uses already-linked primitives
-- **WHEN** firmware is built with `CONFIG_SDF_OTA_SIGNATURE_VERIFY=y`
-- **THEN** the build succeeds using only `CONFIG_MBEDTLS_ECDSA_C` and `CONFIG_MBEDTLS_ECP_DP_SECP256R1_ENABLED` primitives
+- **WHEN** firmware is built with signed-app verification enabled
+- **THEN** the build succeeds using only ESP-IDF's Secure Boot V2 signature support
+- **AND** no project-owned signature verification code is compiled into the firmware
 - **AND** no additional third-party cryptographic library is vendored into the firmware
 
+#### Scenario: Hardware secure boot remains disabled
+- **WHEN** firmware is built for the current development configuration
+- **THEN** signed-app verification is enabled without hardware secure boot
+- **AND** no eFuse is burned by building, flashing, or updating the device
+
 ### Requirement: Signed Payload Is a SHA-256 Digest
-The signature SHALL be computed over the SHA-256 digest of the image bytes, where the image bytes are the transferred image excluding its 68-byte footer. Verification SHALL NOT require the complete image to be resident in memory, and SHALL NOT impose any maximum verifiable image size.
+The signature SHALL be computed over the SHA-256 digest of the image bytes padded up to the next 4096-byte boundary, excluding the appended signature sector. Verification SHALL NOT require the complete image to be resident in memory, and SHALL NOT impose any maximum verifiable image size.
 
 #### Scenario: Image larger than available RAM verifies
 - **WHEN** an OTA image whose size exceeds the device's available heap is transferred and its signature is valid
@@ -22,87 +28,29 @@ The signature SHALL be computed over the SHA-256 digest of the image bytes, wher
 - **AND** no allocation proportional to the image size is performed
 
 #### Scenario: Digest covers image bytes only
-- **WHEN** a signed image of `N` total bytes is transferred
-- **THEN** the digest is computed over exactly the first `N - 68` bytes
-- **AND** the 64-byte signature and 4-byte magic marker are excluded from the digest
-
-### Requirement: Streaming Digest Computation
-The system SHALL compute the image digest incrementally as bytes are written during the OTA transfer, rather than by reading the written image back from flash. Each transferred byte within the signed range SHALL be incorporated into the digest exactly once, in transfer order.
-
-#### Scenario: Digest accumulates across chunked writes
-- **WHEN** an image is transferred as a sequence of chunks of varying sizes
-- **THEN** the resulting digest equals the SHA-256 digest of the concatenated signed range
-- **AND** the digest is independent of how the image was split into chunks
-
-#### Scenario: Final chunk containing footer is clamped
-- **WHEN** a chunk contains bytes that extend into the 68-byte footer
-- **THEN** only the portion of that chunk within the signed range is incorporated into the digest
-
-#### Scenario: Transfer resumed after disconnect
-- **WHEN** a transfer is resumed and the client continues from the device's confirmed `bytes_written` offset
-- **THEN** no byte is incorporated into the digest more than once
-- **AND** the resulting digest matches that of an uninterrupted transfer of the same image
+- **WHEN** a signed image is transferred
+- **THEN** the digest is computed over the image bytes padded to the next 4096-byte boundary
+- **AND** the appended signature sector is excluded from the digest
 
 ### Requirement: Signed Image Format
-A signed image SHALL consist of the image bytes followed by a 68-byte footer: a 64-byte ECDSA P-256 signature encoded as raw `r‖s` (two 32-byte big-endian integers), followed by the 4-byte magic marker `SDF\x01`. The signature SHALL NOT be ASN.1 DER encoded, so that the footer length is a compile-time constant known before a transfer begins.
+A signed image SHALL consist of the application image padded up to the next 4096-byte boundary, followed by a 4096-byte ESP-IDF Secure Boot V2 signature sector. The project SHALL NOT define its own signature footer format or magic marker.
 
 #### Scenario: Well-formed signed image accepted
-- **WHEN** an image carries a valid 64-byte raw `r‖s` signature and the `SDF\x01` magic marker
-- **THEN** the magic marker is recognized and the signature is verified against the image digest
+- **WHEN** an image carries a valid Secure Boot V2 ECDSA signature block signed by the trusted key
+- **THEN** the signature is verified against the image digest and the image is committed
 
 #### Scenario: Missing signature rejected
-- **WHEN** an OTA image has no `SDF\x01` magic marker at the expected footer offset
+- **WHEN** an OTA image carries no valid signature block at the expected offset
 - **THEN** the OTA session is aborted and the image is not committed
 
 #### Scenario: Invalid signature rejected
-- **WHEN** an OTA image's signature does not verify against the embedded public key
+- **WHEN** an OTA image's signature does not verify against the trusted key
 - **THEN** the OTA session is aborted, an `OTA_SIGNATURE_INVALID` audit event is emitted, and the image is not committed
 
-### Requirement: Embedded Public Key
-The system SHALL embed the ECDSA P-256 public key in firmware at build time as a 65-byte uncompressed EC point (`0x04 || X || Y`), stored in a read-only section. Compressed point encoding SHALL NOT be used.
-
-#### Scenario: Key embedded in firmware
-- **WHEN** firmware is built with signature verification enabled
-- **THEN** the 65-byte uncompressed public key is present in a read-only section and readable by `sdf_ota` at runtime
-
-### Requirement: Verification Occurs In-App Before Commit
-The bootloader SHALL NOT verify the OTA signature. Verification SHALL occur in the application before `esp_ota_end()`, and its result SHALL determine whether the image is committed. Verification SHALL NOT depend on reading the target partition while the `esp_ota_handle_t` is open: the system SHALL perform no read of the target partition between `esp_ota_begin()` and `esp_ota_end()`.
-
-#### Scenario: Verification precedes commit
-- **WHEN** an OTA transfer completes
-- **THEN** signature verification runs before `esp_ota_end()` is called
-- **AND** the image is committed only if verification passes
-
-#### Scenario: Verification does not read back the target partition
-- **WHEN** signature verification and the version check run for an OTA session
-- **THEN** every byte they consume originates from the transfer stream, not from a read of the target partition
-- **AND** no partition read occurs between `esp_ota_begin()` and `esp_ota_end()`
-
-#### Scenario: Verification succeeds with flash encryption enabled
-- **WHEN** firmware is built with `CONFIG_SECURE_FLASH_ENC_ENABLED=y` and a validly signed image is transferred
-- **THEN** the magic marker is recognized and the signature verifies
-- **AND** the outcome is identical to the same transfer with flash encryption disabled
-
-#### Scenario: Bad image rejected before the target partition is finalized
-- **WHEN** an image with an invalid or missing signature is transferred
-- **THEN** the session is aborted without `esp_ota_end()` being called
-- **AND** no image finalization or staging-to-final copy is performed for that image
-
-### Requirement: Signature Footer Captured From Transfer Stream
-The system SHALL capture the 68-byte signature footer from the bytes as they are transferred, using the window `[expected_size - 68, expected_size)` fixed at session start, rather than reading it back from the target partition. Verification SHALL use the captured footer.
-
-#### Scenario: Footer captured across chunk boundaries
-- **WHEN** the 68-byte footer window spans two or more transfer chunks
-- **THEN** the captured footer equals the last 68 bytes of the transferred image
-- **AND** the result is independent of how the transfer was split into chunks
-
-#### Scenario: Footer capture unaffected by deferred flash writes
-- **WHEN** the underlying OTA write layer defers trailing bytes and flushes them only at `esp_ota_end()`
-- **THEN** the captured footer is complete and correct at the time verification runs
-
-#### Scenario: Transfer resumed after disconnect
-- **WHEN** a transfer is resumed and the client continues from the device's confirmed `bytes_written` offset
-- **THEN** the captured footer matches that of an uninterrupted transfer of the same image
+#### Scenario: Declared transfer size accounts for the signature sector
+- **WHEN** a client begins a transfer of a signed image
+- **THEN** the declared image size is the size of the padded image plus its signature sector
+- **AND** the transfer completes without the transport needing to interpret the signature format
 
 ### Requirement: Application Descriptor Captured From Transfer Stream
 The system SHALL capture the incoming image's 256-byte `esp_app_desc_t` from the transfer stream, using the window `[32, 288)`, and SHALL perform the version and downgrade check against the captured copy rather than against a read of the target partition.
@@ -129,33 +77,87 @@ The system SHALL expose the transfer-window capture logic as a function that dep
 - **THEN** every split produces a byte-identical captured window
 - **AND** chunks entirely outside the window leave the destination unmodified
 
-### Requirement: Verification Core Is Independently Testable
-The system SHALL expose a signature verification function that takes a digest, a signature, and a public key as inputs and depends on no partition or flash APIs, so it can be built and exercised on `IDF_TARGET=linux`.
+### Requirement: Trust Anchor Is the Running Firmware's Signing Key
+Because hardware secure boot is not enabled, the set of trusted signing keys SHALL be derived from the signature block of the currently running application rather than from eFuse or from a key blob linked into the application. An OTA image SHALL be accepted only if it is signed by the same key as the firmware already installed on the device.
 
-#### Scenario: Known-answer vectors verify on host
-- **WHEN** the host test runner executes the verification core against NIST CAVP P-256 known-answer vectors
-- **THEN** valid vectors return success and invalid vectors return a signature failure
-- **AND** the test exercises real cryptographic verification rather than a disabled no-op path
+#### Scenario: Image signed with the running firmware's key accepted
+- **WHEN** an OTA image signed with the same key as the running firmware is transferred
+- **THEN** verification succeeds and the image is committed
 
-### Requirement: Verification Enabled By Default
-`CONFIG_SDF_OTA_SIGNATURE_VERIFY` SHALL default to `y`, so that the verification path is compiled by every build and continuous integration run.
+#### Scenario: Image signed with a different key rejected
+- **WHEN** an OTA image is signed with a well-formed key that does not match the running firmware's signing key
+- **THEN** verification fails, an `OTA_SIGNATURE_INVALID` audit event is emitted, and the image is not committed
 
-#### Scenario: Default build compiles the real path
-- **WHEN** firmware is built with no explicit override of `CONFIG_SDF_OTA_SIGNATURE_VERIFY`
-- **THEN** the ECDSA P-256 verification code is compiled and linked, not the no-op stub
+#### Scenario: Unsigned running firmware cannot accept updates
+- **WHEN** the running firmware carries no signature block and an OTA transfer completes
+- **THEN** verification fails because no trusted key digest can be resolved
+- **AND** the image is not committed
 
-#### Scenario: Unsigned image rejected under default configuration
-- **WHEN** an unsigned image is transferred to a device built with default configuration
+### Requirement: Signed First Image Required at Provisioning
+The device provisioning procedure SHALL flash a signed image over the serial/USB interface as the initial firmware. An unsigned initial flash SHALL NOT be treated as a supported configuration, because it leaves the device permanently unable to accept OTA updates until it is reflashed over serial.
+
+#### Scenario: Provisioning flashes a signed image
+- **WHEN** a device is provisioned for the first time
+- **THEN** the image written over serial carries a valid signature block
+- **AND** a subsequent OTA update signed with the same key verifies successfully
+
+### Requirement: Key Rotation Requires a Serial Reflash
+The system SHALL treat signing-key rotation as a serial-reflash operation. Only the first signature block of an image SHALL be consulted during OTA verification, so a transitional image carrying signatures from both an old and a new key SHALL NOT be relied upon to rotate keys over the air.
+
+#### Scenario: Rotation over the air is not supported
+- **WHEN** an operator needs to move the fleet to a new signing key
+- **THEN** the documented procedure is a serial reflash of a signed image carrying the new key
+- **AND** no over-the-air path is offered that would accept an image signed by a key other than the running firmware's
+
+### Requirement: Trusted Key Is Not Embedded as a Separate Blob
+The system SHALL NOT embed a standalone public key blob in the firmware image or link one via a read-only section. The public key used for verification SHALL be carried inside the signature block appended to the application image, and the SHA-256 digest of that key SHALL be what establishes trust.
+
+#### Scenario: No standalone key blob is linked
+- **WHEN** firmware is built with signed-app verification enabled
+- **THEN** no separate public-key binary is embedded into the application
+- **AND** verification resolves its trusted key digest from the running application's signature block
+
+### Requirement: Verification Gates the Commit
+The bootloader SHALL NOT verify the OTA signature. Verification SHALL occur in the application as part of finalizing the transfer, and its result SHALL determine whether the image is committed. A failing image SHALL NOT be copied from a staging partition to its final partition, and SHALL NOT become the boot partition. Reading the staging partition back to compute the digest and locate the signature block is permitted, provided it occurs after the transfer's trailing bytes have been flushed and before any staging-to-final copy.
+
+#### Scenario: Verification precedes commit
+- **WHEN** an OTA transfer completes
+- **THEN** signature verification runs before the image is made bootable
+- **AND** the boot partition is switched only if verification passes
+
+#### Scenario: Bad image is never finalized
+- **WHEN** an image with an invalid or missing signature is transferred
+- **THEN** no staging-to-final copy is performed for that image
+- **AND** the boot partition is not switched
+
+#### Scenario: Verification succeeds with flash encryption enabled
+- **WHEN** firmware is built with `CONFIG_SECURE_FLASH_ENC_ENABLED=y` and a validly signed image is transferred
+- **THEN** the signature verifies
+- **AND** the outcome is identical to the same transfer with flash encryption disabled
+
+#### Scenario: Failure is reported as a signature failure
+- **WHEN** finalizing the transfer reports a validation failure
+- **THEN** the session is aborted, the session's resources are released, and an `OTA_SIGNATURE_INVALID` audit event is emitted
+
+### Requirement: Verification Is Unconditional
+Signed-app verification SHALL be unconditional. The system SHALL NOT provide a build configuration that compiles out signature verification, and SHALL NOT contain a verification stub that reports success when verification is unavailable.
+
+#### Scenario: No opt-out exists
+- **WHEN** the firmware's configuration options are inspected
+- **THEN** there is no option that disables OTA signature verification
+- **AND** no code path returns success on the grounds that verification is disabled
+
+#### Scenario: Unsigned image rejected
+- **WHEN** an unsigned image is transferred to a device
 - **THEN** the OTA session is aborted and the image is not committed
 
 ### Requirement: Signing Tool
-The build system SHALL provide `tools/sdf_sign_ota.py`, which signs a built binary by appending a 64-byte raw `r‖s` ECDSA P-256 signature over the image's SHA-256 digest plus the 4-byte magic marker `SDF\x01`, and which can verify a signed binary using the same procedure the device performs.
+The build system SHALL sign release binaries using ESP-IDF's own signing tooling rather than a project-owned signing script. The project SHALL NOT maintain a bespoke signing or signature-verification utility.
 
 #### Scenario: Sign a release binary
-- **WHEN** running `sdf_sign_ota.py sign --input sdf.bin --key ota_private.key --output sdf_signed.bin`
-- **THEN** the output is the original binary followed by a 64-byte signature and the 4-byte magic marker
-- **AND** the output is verifiable by firmware carrying the corresponding public key
+- **WHEN** an operator signs a built binary using the documented ESP-IDF signing procedure and the project's signing key
+- **THEN** the output is verifiable by a device running firmware signed with the same key
 
 #### Scenario: Verify a signed binary
-- **WHEN** running `sdf_sign_ota.py verify --input sdf_signed.bin --pubkey ota_public.key`
-- **THEN** the command exits successfully if the signature matches the image digest, and non-zero otherwise
+- **WHEN** an operator verifies a signed binary using ESP-IDF's signature verification tooling
+- **THEN** the command exits successfully if the signature is valid, and non-zero otherwise

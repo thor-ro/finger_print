@@ -621,6 +621,17 @@ static void sdf_ble_companion_on_auth_request(void *ctx,
     (void)ctx;
     ESP_LOGI(TAG, "BLE Companion: Auth request for user '%s'", username);
 
+    /* Registration is ordered behind Admin enrolment: WEB_REG_AUTH is
+     * authorized by an Admin fingerprint scan, which would have nothing to
+     * match on a device with no enrolled users. During first-time setup the
+     * wizard enrols the Admin before offering the registration form; this
+     * device-side guard makes that ordering hold regardless of client
+     * behaviour. */
+    if (sdf_services_get_setup_state() == SDF_SERVICES_SETUP_STATE_NOT_STARTED) {
+        ESP_LOGW(TAG, "REGISTER rejected: no Admin enrolled yet");
+        return;
+    }
+
     esp_err_t err = sdf_services_set_web_reg_auth(username, password_hash, hash_len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Web reg auth request dropped (set_web_reg_auth): %s",
@@ -632,6 +643,151 @@ static void sdf_ble_companion_on_auth_request(void *ctx,
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Web reg auth request dropped (request_admin_action): %s",
                  esp_err_to_name(err));
+    }
+}
+
+/* Explicit setup-completion request, from an authenticated companion session
+ * (the Config write `{"action":"finish_setup"}`). Runs entirely on the
+ * NimBLE host task like the auth-request handler above.
+ *
+ * Crash-safe persistence order (device-setup-phase spec): the admission
+ * record is written BEFORE the latch, so losing power between the two
+ * writes leaves the device in the setup phase with an inert admission
+ * record - reachable and completable - instead of reporting complete while
+ * advertising filtered against an empty allow list (unreachable). */
+static void sdf_app_on_setup_complete(void *ctx, uint16_t conn_handle) {
+    (void)ctx;
+    ESP_LOGI(TAG, "BLE Companion: setup completion request, conn_handle=%u",
+             (unsigned)conn_handle);
+
+    /* Prerequisites, reported as the first outstanding wizard step. Every
+     * pre-completion state names the step the user still owes; only
+     * NUKI_PAIRED - the terminal one - may proceed. Deriving this from the
+     * reported state rather than spot-checking prerequisites individually
+     * is what keeps a device from being claimed with, say, no companion
+     * account and therefore no way to log in. */
+    const char *outstanding = NULL;
+    switch (sdf_services_get_setup_state()) {
+        case SDF_SERVICES_SETUP_STATE_NOT_STARTED:
+            outstanding = "admin_enrollment";
+            break;
+        case SDF_SERVICES_SETUP_STATE_ADMIN_ENROLLED:
+            outstanding = "registration";
+            break;
+        case SDF_SERVICES_SETUP_STATE_REGISTERED:
+            outstanding = "nuki_pairing";
+            break;
+        case SDF_SERVICES_SETUP_STATE_NUKI_PAIRED:
+            outstanding = NULL;
+            break;
+        case SDF_SERVICES_SETUP_STATE_COMPLETE:
+        default:
+            /* Already complete - reply success idempotently. */
+            sdf_ble_companion_reply_setup_complete(conn_handle, true, NULL);
+            return;
+    }
+
+    if (outstanding != NULL) {
+        ESP_LOGW(TAG, "Setup completion rejected: %s outstanding", outstanding);
+        sdf_ble_companion_reply_setup_complete(conn_handle, false, outstanding);
+        return;
+    }
+
+    /* Failures below are infrastructure faults, not outstanding wizard
+     * steps: reporting one of the step names here would send the user back
+     * to redo something they already finished. The app shows this verbatim
+     * and offers a retry instead. */
+    static const char *const kInternalError = "internal_error";
+
+    uint8_t addr_type = 0;
+    uint8_t addr[6] = {0};
+    if (!sdf_ble_companion_get_conn_identity(conn_handle, &addr_type, addr)) {
+        ESP_LOGW(TAG, "Setup completion failed: connection gone");
+        sdf_ble_companion_reply_setup_complete(conn_handle, false,
+                                                kInternalError);
+        return;
+    }
+
+    /* 1/5 Admission record first (see crash-safety note above). */
+    esp_err_t err = sdf_storage_admission_add(addr_type, addr);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Setup completion failed at admission record: %s",
+                 esp_err_to_name(err));
+        sdf_ble_companion_reply_setup_complete(conn_handle, false,
+                                                kInternalError);
+        return;
+    }
+
+    /* 2/5 Latch - written once; only factory reset ever clears it. */
+    err = sdf_storage_setup_complete_save(true);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Setup completion failed at latch: %s",
+                 esp_err_to_name(err));
+        sdf_ble_companion_reply_setup_complete(conn_handle, false,
+                                                kInternalError);
+        return;
+    }
+
+    /* 3-5/5 Populate allow list, push to controller, switch advertising and
+     * restore the ordinary connection limit. */
+    err = sdf_ble_companion_admit_and_switch_to_filtered(addr_type, addr);
+    if (err != ESP_OK) {
+        /* Roll the latch back. The crash-safety ordering above only covers
+         * power loss *between* the two NVS writes; a step that fails after
+         * both have landed would otherwise leave a device that reports
+         * setup complete, never switched to filtered advertising, has the
+         * connection cap lifted (it derives from the latch), and whose
+         * still-running setup deadline would then wipe the admission record
+         * and every account out from under the set latch - unreachable
+         * except by a physical factory reset. Clearing the latch returns
+         * the device to exactly the state the crash-safety rule aims for:
+         * in the setup phase with an inert admission record, completable
+         * on retry. */
+        ESP_LOGE(TAG, "Setup completion failed at allow-list switch: %s",
+                 esp_err_to_name(err));
+        esp_err_t rollback = sdf_storage_setup_complete_clear();
+        if (rollback != ESP_OK) {
+            ESP_LOGE(TAG, "Latch rollback failed: %s - device may need a "
+                          "factory reset", esp_err_to_name(rollback));
+        }
+        sdf_ble_companion_reply_setup_complete(conn_handle, false,
+                                                kInternalError);
+        return;
+    }
+
+    sdf_services_setup_phase_disarm();
+    sdf_ble_companion_reply_setup_complete(conn_handle, true, NULL);
+    ESP_LOGI(TAG, "Setup completed - device claimed and locked to this companion");
+}
+
+/* Setup-phase initial Nuki pairing (wizard step 3): reachable only while the
+ * latch is unset - the time-bounded, singly-occupied setup session is the
+ * authorization. After completion the dashboard's admin-fingerprint-gated
+ * "Request Nuki Re-pair" takes over. */
+static void sdf_app_on_setup_nuki_pair(void *ctx, uint16_t conn_handle) {
+    (void)ctx;
+    ESP_LOGI(TAG, "BLE Companion: setup Nuki pairing request, conn_handle=%u",
+             (unsigned)conn_handle);
+
+    bool ok = false;
+    if (sdf_services_get_setup_state() != SDF_SERVICES_SETUP_STATE_COMPLETE &&
+        sdf_services_get_setup_state() != SDF_SERVICES_SETUP_STATE_NUKI_PAIRED) {
+        sdf_power_mark_activity();
+        ok = sdf_app_execute_nuki_pairing_start();
+    } else if (sdf_services_get_setup_state() == SDF_SERVICES_SETUP_STATE_NUKI_PAIRED) {
+        /* Idempotent: already paired during this setup phase. */
+        ok = true;
+    }
+
+    char payload[48];
+    int n = snprintf(payload, sizeof(payload), "{\"setup_nuki_pair\":%s}",
+                     ok ? "true" : "false");
+    if (n > 0 && (size_t)n < sizeof(payload)) {
+        esp_err_t err = sdf_ble_companion_notify_config(conn_handle,
+                                                         (const uint8_t *)payload, (size_t)n);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "setup_nuki_pair reply dropped: %s", esp_err_to_name(err));
+        }
     }
 }
 
@@ -2016,6 +2172,8 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
       .on_enroll_write = sdf_ble_companion_on_enroll_write,
       .on_ota_write = sdf_ble_companion_handle_ota_write,
       .on_admin_action_request = sdf_app_on_ble_admin_action_request,
+      .on_setup_complete = sdf_app_on_setup_complete,
+      .on_setup_nuki_pair = sdf_app_on_setup_nuki_pair,
   };
   err = sdf_ble_companion_init(&ble_companion_cbs);
   if (err != ESP_OK) {
@@ -2035,7 +2193,7 @@ mbedtls_platform_zeroize(shared_key, sizeof(shared_key));
   }
 
   /* Start event router dispatch task and freeze the subscriber table.
-   * All 21 subscriptions (app: 9, match: 3, admin: 4, enroll: 3, ble: 2)
+   * All 22 subscriptions (app: 9, match: 3, admin: 4, enroll: 3, ble: 3)
    * must be registered before this point. No further subscribers may register.
    * The app's nine are served by one trampoline callback (sdf_app_event_
    * trampoline); the count is per subscription, not per callback. */

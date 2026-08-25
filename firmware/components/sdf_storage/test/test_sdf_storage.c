@@ -534,3 +534,263 @@ void test_sdf_storage_erase_all_clears_enrolled_users(void) {
 
   nvs_teardown();
 }
+
+// -----------------------------------------------------------------------------
+// Setup-completion latch
+// -----------------------------------------------------------------------------
+
+void test_sdf_storage_setup_complete_save_and_load(void) {
+  nvs_setup();
+
+  bool complete = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_FALSE(complete);
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_save(true));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_TRUE(complete);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_setup_complete_absent_key_reads_as_false_not_error(void) {
+  nvs_setup();
+
+  // Namespace exists but key never written - still reads as unset.
+  uint8_t key_to_save[32];
+  memset(key_to_save, 0xEE, 32);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(42, key_to_save));
+
+  bool complete = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_FALSE(complete);
+
+  // And on a completely virgin partition too.
+  nvs_flash_erase();
+  nvs_flash_deinit();
+  nvs_setup();
+
+  complete = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_FALSE(complete);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_setup_complete_clear(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_save(true));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_clear());
+
+  bool complete = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_FALSE(complete);
+
+  // Clearing an already-cleared latch is not an error.
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_clear());
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_setup_complete_invalid_args(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_setup_complete_load(NULL));
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_erase_all_clears_setup_latch_and_admissions(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_save(true));
+  uint8_t mac[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, mac));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
+
+  bool complete = false;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_FALSE(complete);
+
+  size_t count = (size_t)-1;
+  sdf_storage_admission_t entries[SDF_STORAGE_ADMISSION_MAX];
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(0, count);
+
+  nvs_teardown();
+}
+
+// -----------------------------------------------------------------------------
+// Admission records
+// -----------------------------------------------------------------------------
+
+void test_sdf_storage_admission_add_and_load_all(void) {
+  nvs_setup();
+
+  uint8_t a1[6] = {0x01, 0x01, 0x01, 0x01, 0x01, 0x01};
+  uint8_t a2[6] = {0x02, 0x02, 0x02, 0x02, 0x02, 0x02};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(0, a1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, a2));
+
+  sdf_storage_admission_t entries[SDF_STORAGE_ADMISSION_MAX];
+  size_t count = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(2, count);
+  TEST_ASSERT_EQUAL(0, entries[0].addr_type);
+  TEST_ASSERT_EQUAL_MEMORY(a1, entries[0].addr, 6);
+  TEST_ASSERT_EQUAL(1, entries[1].addr_type);
+  TEST_ASSERT_EQUAL_MEMORY(a2, entries[1].addr, 6);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_admission_add_duplicate_is_idempotent(void) {
+  nvs_setup();
+
+  uint8_t a1[6] = {0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, a1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, a1));
+
+  sdf_storage_admission_t entries[SDF_STORAGE_ADMISSION_MAX];
+  size_t count = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(1, count);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_admission_remove_compacts(void) {
+  nvs_setup();
+
+  uint8_t a1[6] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+  uint8_t a2[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+  uint8_t a3[6] = {0x03, 0x00, 0x00, 0x00, 0x00, 0x00};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(0, a1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(0, a2));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(0, a3));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_remove(0, a2));
+
+  sdf_storage_admission_t entries[SDF_STORAGE_ADMISSION_MAX];
+  size_t count = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(2, count);
+  TEST_ASSERT_EQUAL_MEMORY(a1, entries[0].addr, 6);
+  TEST_ASSERT_EQUAL_MEMORY(a3, entries[1].addr, 6);
+
+  // Removing an address that was never admitted is not an error.
+  uint8_t missing[6] = {0xEE, 0xEE, 0xEE, 0xEE, 0xEE, 0xEE};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_remove(1, missing));
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_admission_capacity_exhaustion_rejected(void) {
+  nvs_setup();
+
+  for (size_t i = 0; i < SDF_STORAGE_ADMISSION_MAX; i++) {
+    uint8_t addr[6];
+    memset(addr, (int)(i + 1), sizeof(addr));
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add((uint8_t)i, addr));
+  }
+
+  uint8_t overflow[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, sdf_storage_admission_add(1, overflow));
+
+  // Capacity is at least CONFIG_BT_NIMBLE_MAX_BONDS (3).
+  TEST_ASSERT_TRUE(SDF_STORAGE_ADMISSION_MAX >= 3);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_admission_load_all_buffer_too_small_reports_no_mem(void) {
+  nvs_setup();
+
+  uint8_t a1[6] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+  uint8_t a2[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(0, a1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, a2));
+
+  sdf_storage_admission_t one;
+  size_t count = 0;
+  TEST_ASSERT_EQUAL(ESP_ERR_NO_MEM, sdf_storage_admission_load_all(&one, 1, &count));
+  TEST_ASSERT_EQUAL(2, count);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_admission_empty_store_reads_as_zero_count(void) {
+  nvs_setup();
+
+  sdf_storage_admission_t entries[SDF_STORAGE_ADMISSION_MAX];
+  size_t count = (size_t)-1;
+
+  // Virgin namespace: no records, not an error.
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(0, count);
+
+  // Namespace created by an unrelated write, still no records.
+  uint8_t key_to_save[32];
+  memset(key_to_save, 0xEE, 32);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(7, key_to_save));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(0, count);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_admission_clear_all(void) {
+  nvs_setup();
+
+  uint8_t a1[6] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00};
+  uint8_t a2[6] = {0x02, 0x00, 0x00, 0x00, 0x00, 0x00};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(0, a1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, a2));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_clear_all());
+
+  sdf_storage_admission_t entries[SDF_STORAGE_ADMISSION_MAX];
+  size_t count = (size_t)-1;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(0, count);
+
+  // Clearing an empty store is not an error.
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_clear_all());
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_admission_invalid_args(void) {
+  nvs_setup();
+
+  uint8_t addr[6] = {0};
+  sdf_storage_admission_t entry;
+  size_t count;
+
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_admission_add(0, NULL));
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_admission_remove(0, NULL));
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_admission_load_all(NULL, 1, &count));
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_admission_load_all(&entry, 1, NULL));
+
+  nvs_teardown();
+}
+
+/* Crash-safety ordering (device-setup-phase): an interruption after the
+ * admission record is written but before the latch leaves the device in the
+ * setup phase - the latch read stays false with only an admission present,
+ * so a reboot lands back in the wizard and completion can be retried. */
+void test_sdf_storage_admission_without_latch_leaves_device_in_setup_phase(void) {
+  nvs_setup();
+
+  uint8_t addr[6] = {0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, addr));
+
+  bool complete = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_FALSE(complete);
+
+  nvs_teardown();
+}

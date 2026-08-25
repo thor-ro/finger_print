@@ -1,149 +1,94 @@
-# First-Time Flow Concept (Out of the Box Experience)
+# First-Time Flow Concept (App-Guided Setup)
 
-This document outlines the optimal initial setup flow for a brand-new or factory-reset Smart Door Fingerprint (SDF) lock. The primary goal is to provide a seamless, secure, and logical progression from unboxing to a fully functional access control system.
+This document describes the initial setup flow for a brand-new or factory-reset Smart Door Fingerprint (SDF) lock. Setup is guided end-to-end by the Web Companion App; there is no physical-button path for enrolling the first Admin or for pairing the Nuki lock.
 
 ## 1. Core Principles
-- **Security First:** The device must never be left in a state where a malicious actor can claim ownership or pair it to their own Nuki/Zigbee network.
-- **Offline Capable:** The user must be able to set up the core functionality (fingerprint unlocking of the Nuki lock) completely offline, without a Zigbee coordinator or smartphone app.
-- **Admin Authorization:** Any state-changing command beyond the initial unboxing requires biometric authorization by the device Administrator (User ID 1).
 
-## 2. Optimal Setup Order
+- **The app guides every setup step.** Admin enrolment, account registration, Nuki pairing and completion all happen through the Web Companion App's setup wizard.
+- **Reachable before it is claimed.** A device that has never completed setup advertises *unfiltered and connectable*, so an arbitrary companion client can reach the wizard. This openness is bounded in time, bounded to a single connection, and ends in one of exactly two ways (explicit completion or timeout).
+- **Completion is an explicit, latched act.** Setup is complete only when the app issues the explicit finish step — never inferred from enrolled users or persisted credentials. The latch survives later user/credential deletion and is cleared only by a factory reset.
+- **Trust follows a recorded act.** Allow-list membership comes from an explicit admission record intersected with the bond store — never from "has a bond, therefore trusted".
 
-The setup is structured into three progressive phases.
+## 2. The Setup Phase
 
-### Phase 1: Claiming Device Ownership (Local Admin Enrollment)
-**Goal:** Establish the first authorized user (Admin) who will have the right to configure the rest of the system.
-**Why First?** Enrolling the Admin immediately secures the device. Without this step, an attacker could power on the device and pair it with their own systems. Entering Nuki or Zigbee pairing mode is protected by this Admin fingerprint.
+A brand-new device (or one just factory-reset) boots into the **setup phase**:
 
-1. **Power On:** The device is powered via battery or mains. The LED breathes **White**, indicating it is in a "Factory Reset / Unclaimed" state.
-2. **Initiate Setup:** The user presses the physical Configuration Button once. The LED begins to flash **Blue**.
-3. **Biometric Capture:** The user places their finger on the sensor three consecutive times. After each successful scan, the LED flashes green.
-4. **Completion:** Upon the third scan, the template is generated and saved as `User ID 1` with `Admin` privileges (Permission: 3). The LED breathes solid **Green** for a few seconds to confirm. The device is now "Claimed".
+1. The device advertises connectably with no allow-list filter. Any companion client can discover and connect.
+2. At most **one** client may hold the connection. Any second inbound connection is terminated immediately at connect time.
+3. The phase runs under three compile-time timers:
 
-### Phase 2: Pairing to the Nuki Lock (BLE)
-**Goal:** Connect the SDF to the physical door mechanism so it can actually unlock the door.
-**Why Second?** This provides the core utility of the device (opening the door). It also tests the most critical link in the system. Since we mapped an all-zero target address (as per `nuki-pairing-usage.md`), the SDF can automatically discover a Nuki in pairing mode.
+| Timer | Default | Runs from | Expiry effect |
+| --- | --- | --- | --- |
+| **Arm window** | 5 min | arming (boot, factory-reset reboot, button press) | Timeout wipe + stop advertising |
+| **Setup deadline** | 10 min | first accepted connection | Timeout wipe + stop advertising |
+| **Connection idle** | 2 min | last GATT activity on the setup connection | Drops only the connection; advertising re-arms; deadline keeps running |
 
-1. **Prepare Nuki:** The user presses and holds the button on their Nuki Smart Lock for 5 seconds until its LED circle glows constantly (Pairing Mode).
-2. **Initiate Nuki Pairing on SDF:** 
-   - The user presses the SDF Configuration Button **once (Short Press)** again. Because the device is already claimed but has no Nuki credentials yet, a Short Press at this stage means "pair Nuki" rather than "enroll another user" — the button's Short Press action is state-dependent (see the summary table below).
-   - The LED begins to pulse **Yellow** (Awaiting Admin Auth).
-3. **Authorize:** The Admin (User ID 1) touches the fingerprint sensor to authorize the action.
-4. **Active Pairing:** Once authorized, the LED flashes **Rapid Yellow**. The SDF connects to the Nuki over BLE, negotiates the shared key, and saves the credentials to NVS.
-5. **Completion:** The LED glows solid **Green** to confirm successful pairing. The user can now unlock the door with their fingerprint.
+Neither the arm window nor the deadline is extended by client activity, progress, disconnection or reconnection. The **only** way either timer restarts is a physical button press. Once the first connection starts the deadline, the arm window stops governing altogether — a disconnect or an idle drop leaves the deadline as the sole bound rather than handing out a fresh open-air window. Worst case per arming is therefore 15 min of open advertising, when a client connects in the last instant of the arm window.
 
-### Phase 3: Joining the Smart Home (Optional Zigbee)
-**Goal:** Integrate the SDF into a Zigbee network (e.g., Home Assistant) for remote user management, battery monitoring, and logging.
-**Why Last?** Zigbee is an advanced feature and often not strictly required for standard usage. Separating this step ensures users who only want an offline fingerprint lock are not forced to connect to a coordinator.
+## 3. The Wizard
 
-1. **Prepare Coordinator:** The user enables "Permit Join" on their Zigbee coordinator (e.g., Zigbee2MQTT).
-2. **Initiate Zigbee Join on SDF:**
-   - The user opens the BLE Companion web app, logs in, and taps **Request Zigbee Join** on the dashboard (see `user_manual.md`). There is no physical-button path for this — Zigbee Join is only reachable through an authenticated companion-app request.
-   - The LED begins to pulse **Purple** (Awaiting Admin Auth).
-3. **Authorize:** The Admin (User ID 1) touches the fingerprint sensor to authorize the network join.
-4. **Active Joining:** The LED flashes **Rapid Purple** as the device attempts to steer to the network.
-5. **Completion:** The LED glows solid **Green** and the device becomes available in the Smart Home dashboard.
+On connecting, the app reads the device's setup state (a read-only characteristic readable before login) and resumes at the matching step:
 
-## 3. Configuration Button Mapping Summary
+### Step 1 — Enrol the Admin Fingerprint
+The first Admin (User ID 1, Permission 3) is enrolled through the wizard. Three scans of the finger, as with any enrollment.
 
-The device distinguishes between adding a new user, pairing to Nuki, and joining Zigbee based on **how long the physical Configuration Button is pressed**, and — for Short Press specifically — on the device's current setup state.
+### Step 2 — Register Your Account
+Registration creates the companion account used for login. It is offered only after an Admin exists, because confirming registration requires a scan of that Admin finger (`WEB_REG_AUTH`). Registration before any admin exists is rejected by the device outright.
 
-The initial button press tells the device *what* action you want to perform and places the device into a "Pending Authorization" state for that specific action, indicated by a unique LED color. The subsequent Admin fingerprint scan simply answers "Are you allowed to do this?".
+### Step 3 — Pair Your Nuki Lock
+The user puts the Nuki Smart Lock into pairing mode (hold its button ~5 s), then triggers pairing from the wizard. During the setup phase this uses the dedicated `setup_nuki_pair` request — reachable only while setup is not complete; after completion the admin-gated "Request Nuki Re-pair" dashboard trigger takes over.
 
-Short Press is **state-dependent**, resolving its action at the moment the button is pressed rather than always meaning the same thing:
+### Step 4 — Finish Setup
+The explicit completion request. The device checks prerequisites (Admin enrolled, account registered, Nuki paired), reporting the first outstanding step if any. All three are required: completing without an account would claim a device nobody can log into. A failure that is *not* an unmet prerequisite is reported as `internal_error` instead of a step name, so the app offers a retry rather than sending the user back through work that already succeeded. On success it, in order:
 
-| Action / Duration | State Condition | Authentication Required | Resulting Pending State (LED) | Action after Admin Auth |
-| --- | --- | --- | --- | --- |
-| **Short Press** | Unclaimed (0 users) | None | n/a | Starts Admin Enrollment (Phase 1) |
-| **Short Press** | Claimed, Nuki not yet paired | Admin Fingerprint | `PENDING_NUKI_PAIR` (Pulse Yellow) | Enters BLE Nuki Pairing Mode (Phase 2) |
-| **Short Press** | Claimed, Nuki already paired | Admin Fingerprint | `PENDING_USER_ENROLL` (Pulse Blue) | Starts Standard User Enrollment |
-| **Hold 8 sec** | Any | Admin Fingerprint | `PENDING_FACTORY_RESET` (Pulse Red) | Factory Reset (Wipes users, Nuki keys, Zigbee) |
-
-> [!NOTE]
-> Double Press is no longer mapped to any action. It previously triggered Nuki Pairing, but that gesture has been retired in favor of the state-dependent Short Press behavior above, which also closes a gap where Nuki Pairing (via Double Press) could previously be triggered on an unclaimed device with no Admin fingerprint check at all. The gesture remains free for future use.
-
-> [!NOTE]
-> Triple Press and Hold 3 sec are no longer mapped to any action. They previously triggered Admin User Enrollment and Zigbee Join respectively; both are now only reachable through an authenticated request from the BLE Companion web app (see `user_manual.md`), still gated on the same Admin fingerprint authorization. Both gestures remain free for future use.
-
-> [!NOTE] 
-> Because the Configuration Button requires Admin verification for nearly all actions, the device is highly secure against physical tampering after the initial setup.
-
-## 4. Edge Cases and Considerations
-- **Lost Admin Fingerprint:** If the Admin fingerprint is unreadable, and no Zigbee coordinator is connected to remotely add another Admin, the user must perform a hard factory reset. For security, a true "Hard Reset" without the Admin fingerprint might require a special hardware procedure (e.g., holding the button while powering on the device).
-- **Timeouts:** If the user performs an action (e.g., Short Press to pair Nuki) but does not provide an Admin fingerprint within 10 seconds, the LED flashes **Red** and the device returns to sleep.
-- **Re-pairing after setup is complete:** Once Nuki is paired, Short Press reverts to standard user enrollment and no longer offers a button path to Nuki pairing. Re-pairing afterward (e.g., after replacing the Nuki lock) is reachable only via a full factory reset, or via an Admin-fingerprint-gated "Request Nuki Re-pair" trigger in the BLE Companion web app (see `user_manual.md`).
-
-## 5. Adding Additional Users
-
-After Phase 1 is complete and the device is claimed, the Admin can enroll additional users. The SDF supports two enrollment paths depending on the desired privilege level and whether Zigbee is connected.
-
-### 5.1 Permission Model
-
-Each enrolled user is assigned a permission level between 1 and 3:
-
-| Permission | Role | Capabilities |
-| --- | --- | --- |
-| 1 | Standard User | Can unlock the door with their fingerprint. |
-| 2 | Elevated User | Reserved for future use (same as Standard for now). |
-| 3 | Admin | Can unlock the door **and** authorize configuration actions (enrollment, Nuki pairing, Zigbee join, factory reset). |
-
-The first enrolled user (User ID 1) is always created with Admin privileges (Permission 3). All subsequent users default to Standard (Permission 1) unless explicitly enrolled as Admin.
-
-### 5.2 User Capacity
-
-The fingerprint sensor supports User IDs from `1` to `0x0FFF` (4095). When a new user is enrolled locally, the firmware automatically assigns the **lowest available User ID** by scanning for gaps in the currently occupied IDs.
-
-If all User IDs are occupied, the LED flashes **Red** and enrollment is rejected.
-
-### 5.3 Local Enrollment — Standard User (Button)
-
-This is the primary method for adding household members, guests, or other people who should be able to unlock the door.
-
-1. **Initiate:** The Admin presses the Configuration Button **once (Short Press)** while the device is claimed (≥1 enrolled user).
-2. **Pending Authorization:** The LED begins to pulse **Blue**, indicating the device is in `PENDING_USER_ENROLL` state and waiting for Admin authorization.
-3. **Authorize:** The Admin (any user with Permission 3) touches the fingerprint sensor within 10 seconds. The sensor verifies the fingerprint matches an Admin template.
-   - If a non-Admin fingerprint is scanned, the LED flashes **Red** and the action is rejected. The device remains in the pending state until timeout.
-   - If no fingerprint is provided within 10 seconds, the LED flashes **Red** and the device returns to idle.
-4. **Biometric Capture:** Once authorized, the LED flashes **Blue** and the new user places their finger on the sensor **three consecutive times**. After each successful scan, the LED flashes **Green**.
-   - The new user should **lift their finger** between scans. If the same image is detected, the step is retried automatically.
-5. **Completion:** After the third scan, the template is generated and saved with the next available User ID and Standard permission (1). The LED breathes solid **Green** for a few seconds to confirm.
-6. **Ready:** The new user can now unlock the door with their fingerprint.
-
-### 5.4 Local Enrollment — Admin User (Companion App)
-
-To enroll an additional Admin (e.g., a partner or co-owner who should also be able to configure the device), use the BLE Companion web app rather than the physical button — there is no button gesture for this (see `user_manual.md`).
-
-1. **Initiate:** A logged-in companion-app user taps **Request Enroll Admin** on the dashboard.
-2. **Pending Authorization:** The LED begins to pulse **Blue**, indicating the device is in `PENDING_USER_ENROLL` state (same visual as standard enrollment).
-3. **Authorize:** An existing Admin touches the fingerprint sensor within 10 seconds.
-4. **Biometric Capture:** Identical to Standard User enrollment — the new user places their finger three times.
-5. **Completion:** The template is saved with Admin permission (3). The new Admin can now both unlock the door **and** authorize configuration actions. The companion app is notified that enrollment has started.
+1. Persists an **admission record** for the connected client (before anything else — see crash-safety below),
+2. Persists the **setup-completion latch**,
+3. Adds the client to the allow list and pushes it to the controller,
+4. Switches advertising to sparse, allow-list-filtered mode,
+5. Restores the ordinary multi-connection limit.
 
 > [!IMPORTANT]
-> Adding an Admin gives that person full control over the device, including the ability to enroll/remove other users, pair to Nuki, join Zigbee networks, and factory reset the device. Only grant Admin to trusted individuals.
+> Completing setup locks the device to the companion that completed it: afterwards only allow-listed identities can connect. Losing that companion means using a factory reset to recover.
 
-### 5.5 Remote Enrollment via Zigbee (Optional)
+**Crash safety:** the admission record is written *before* the latch. Power lost between the two writes leaves the device in the setup phase with an inert record — reachable and completable — rather than reporting complete while unreachable.
 
-If the device has completed Phase 3 (Zigbee Join), additional users can be enrolled remotely through the Smart Home coordinator (e.g., Home Assistant via Zigbee2MQTT). This is useful when the Admin is not physically present at the device.
+Steps 3–5 run after the latch is already persisted, so a failure there cannot be handled by ordering alone: the device rolls the latch back. Otherwise it would sit latched but still armed, with the deadline running — and that deadline would wipe the accounts and admission records out from under a device reporting itself claimed, leaving it reachable only by a physical factory reset.
 
-1. **Trigger:** The coordinator sends an enrollment command specifying the desired User ID and permission level.
-2. **Biometric Capture:** The device enters enrollment mode. The LED flashes **Blue** and the new user places their finger three times, as in local enrollment.
-3. **Completion:** The result (success or error) is reported back to the coordinator.
+## 4. Timeout: Wipe Without Resume
+
+If the arm window or setup deadline expires, the device:
+
+- erases all partial setup state: enrolled templates, web accounts, bonds, admission records and any partial Nuki credentials,
+- disarms the setup phase and stops advertising.
+
+There is **no resume across a lapse** — the next setup attempt starts from scratch. Within one setup phase (before a lapse), the wizard resumes from reported state after reconnects.
+
+## 5. Button Semantics
+
+With the new flow the physical Configuration Button has exactly two meanings:
+
+| Gesture | State | Effect |
+| --- | --- | --- |
+| **Short Press / Double Press** | Setup incomplete (armed or lapsed) | **Reclaim & re-arm**: terminate the current setup connection, resume unfiltered advertising, restart both the arm window and the deadline. No pending admin action is set. |
+| **Short Press / Double Press** | Setup complete | Double Press requests the admin-fingerprint-gated **BLE Companion Pairing Window** (used to admit a second companion). Short Press does nothing. |
+| **Hold 8 sec** | Any | **Factory Reset**, executed directly — no Admin fingerprint required (see below). |
 
 > [!NOTE]
-> Remote enrollment via Zigbee still requires physical presence at the sensor for the biometric capture — it only skips the button press and Admin fingerprint authorization step.
+> The reclaim gesture gives whoever is physically at the device the tiebreaker over any client squatting on the setup slot. One press, one meaning: *give me the setup slot.*
 
-### 5.6 Enrollment Flow Summary
+## 6. Factory Reset
 
-```
-Admin presses button      ──► LED pulses Blue ──► Admin scans finger ──► New user scans 3× ──► LED Green ✓
-  or requests via app          (Pending Auth)       (Authorization)       (Capture)           (Saved)
-     (Short Press /
-   companion-app request)
-```
+Factory reset (Hold 8 sec) requires **no Admin fingerprint** — it is the recovery path for a lost or unreadable Admin fingerprint, which a fingerprint gate would make unreachable. The reset erases users, web accounts, bonds, admission records, Nuki credentials, Zigbee state and the completion latch, then reboots into the setup phase, ready to be claimed again.
 
-| Enrollment Method | Trigger | Permission Assigned | Admin Auth Required |
-| --- | --- | --- | --- |
-| Standard User (local) | Short Press | 1 (Standard) | Yes — Admin fingerprint |
-| Admin User (local) | Companion-app request ("Request Enroll Admin") | 3 (Admin) | Yes — Admin fingerprint |
-| Remote (Zigbee) | n/a | Specified by coordinator | No (trusted network) |
+## 7. Adding Additional Users After Setup
+
+After setup completes, additional fingerprints are enrolled through the Web Companion App (Enrollment characteristic on the dashboard, and "Request Enroll Admin" for additional admins) or remotely via Zigbee once joined. There is no button path for enrollment anymore.
+
+Permission model, capacity limits and the Zigbee remote-enrollment behavior are unchanged; see `usermanagement.md` and `user_manual.md`.
+
+## 8. Edge Cases and Considerations
+
+- **Device lapsed before you opened the box:** normal. Press the button once to re-arm, then open the app and start the wizard.
+- **Squatted setup slot:** another client holding the connection? Press the button — your press always wins and their session is dropped.
+- **Mid-wizard disconnect:** reconnect within the deadline to resume at the current step. If the device stopped advertising, the window lapsed: press the button and start over.
+- **Lost companion device:** perform a factory reset (Hold 8 sec), then set up again with the replacement.

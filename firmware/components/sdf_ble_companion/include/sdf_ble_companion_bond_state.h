@@ -119,6 +119,43 @@ size_t sdf_ble_companion_bond_snapshot_allow_list(const sdf_ble_companion_bond_s
                                                     sdf_ble_companion_addr_t *out_addrs,
                                                     size_t max_count);
 
+/* ---------------------------------------------------------------------------
+ * Setup-phase trust decisions (app-guided-first-time-setup). Pure functions
+ * so the host suite can pin the latch/armed combinations and the
+ * admission-intersection rule down without the BLE stack.
+ * ------------------------------------------------------------------------- */
+
+typedef enum {
+    SDF_BLE_COMPANION_ADV_MODE_NOT_ADVERTISING = 0,
+    SDF_BLE_COMPANION_ADV_MODE_SPARSE_FILTERED = 1,
+    SDF_BLE_COMPANION_ADV_MODE_UNFILTERED_SETUP = 2,
+    SDF_BLE_COMPANION_ADV_MODE_PAIRING_WINDOW = 3,
+} sdf_ble_companion_adv_mode_t;
+
+/* Advertising-mode selection used by restart_advertising(). Priority order:
+ * an open pairing window wins; then, while the setup-completion latch is
+ * unset, armed means unfiltered connectable setup advertising and disarmed
+ * means silence; once the latch is set the sparse filtered default applies. */
+sdf_ble_companion_adv_mode_t sdf_ble_companion_select_advertising_mode(
+    bool pairing_window_open, bool setup_complete, bool setup_phase_armed);
+
+/* Setup-phase connection cap: while the latch is unset, at most one client
+ * may hold a connection - any second inbound one is terminated at connect.
+ * Once set, the ordinary slot limit governs. `connected_others` counts
+ * currently-tracked connections other than the inbound one. */
+bool sdf_ble_companion_should_terminate_second_connection(
+    bool setup_complete, size_t connected_others);
+
+/* Allow-list seeding as the intersection of persisted admission records and
+ * the persisted bond store: adds to `state`'s allow list exactly the bonded
+ * peers that also appear in `admitted`. Bonds without admission grant
+ * nothing; admissions without bonds cannot resurrect anything either.
+ * Returns the number of peers newly allow-listed. */
+size_t sdf_ble_companion_allow_list_seed_intersection(
+    sdf_ble_companion_bond_state_t *state,
+    const sdf_ble_companion_addr_t *bonded, size_t num_bonded,
+    const sdf_ble_companion_addr_t *admitted, size_t num_admitted);
+
 #ifdef __cplusplus
 }
 #endif

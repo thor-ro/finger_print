@@ -151,9 +151,9 @@ When making architectural changes, you **must** update the corresponding documen
 ## Gotchas
 - Fingerprint sensor `Control LED (0x3C)` payload bytes are module-variant specific; defaults in `sdf_services.c` may need tuning on real hardware.
 - Match task uses suspend flag + extended polling (10s) when idle instead of WDT delete/recreate + semaphore-block for deep sleep transitions. This keeps the WDT active and reduces context-switch overhead.
-- `.github/workflows/firmware-ci.yml` gates `firmware/**` pushes/PRs with two jobs: `build-firmware` (`idf.py build` for `esp32c6`) and `test-firmware` (host-side Unity via `test_runner`'s `linux` target). The unit test job only covers what `test_runner` links on `linux` — the `sdf_app`/lock-flow suites run only on the chip target (see Testing above) and CI does not run them, so a green `test-firmware` check is not full regression coverage.
+- `.github/workflows/firmware-ci.yml` gates `firmware/**` pushes/PRs with three independent jobs: `build-firmware` (`idf.py build` for `esp32c6`), `test-firmware` (host-side Unity via `test_runner`'s `linux` target), and `ota-signature` (the emulator gate, see above). The unit test job only covers what `test_runner` links on `linux` — the `sdf_app`/lock-flow suites run only on the chip target (see Testing above) and CI does not run them, so a green `test-firmware` check is not full regression coverage.
 - `sdf_ota_version_compare()` lives in `sdf_ota_version.c` only. It used to be duplicated in `sdf_ota.c`, and because `sdf_ota.c` is not compiled for `IDF_TARGET=linux`, the host suite tested one comparator while the device ran the other. Keep it single-definition. It orders `git describe` pre-releases (`<tag>-<commits>-g<hash>`) by commit count, not lexically — that is the form `PROJECT_VER` takes, so changing it changes the OTA upgrade/downgrade gate.
-- `scripts/` and `tools/` directories are currently empty.
+- `scripts/` holds the OTA signature gate runner (`run_ota_signature_gate.sh`), its fixture-preparation script (`ota_signature_gate_prepare.py`), and the BLE OTA harness runner (`run_ble_ota_harness.sh`); `tools/ble_ota_harness/` holds the Bumble-based GATT central (see Testing above). Neither directory contains production firmware.
 
 ## Instructions
 Make use of codebase-memory-mcp and serena to understand the codebase.

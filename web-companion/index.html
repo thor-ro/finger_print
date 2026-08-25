@@ -35,6 +35,78 @@
                 <p id="connection-status" class="status-msg"></p>
             </div>
 
+            <!-- Wizard View: first-time setup, shown before auth when the
+                 device reports it is not setup-complete -->
+            <div id="wizard-view" class="view">
+                <h2>First-Time Setup</h2>
+                <div class="alert warning">
+                    <strong>Time limit:</strong> Setup must be completed within the
+                    device's setup window (about 15 minutes from when the device was
+                    armed or the button was pressed). If the window lapses, all
+                    progress is erased — including enrolled fingerprints, accounts,
+                    and pairing data — and the device must be re-armed with its button.
+                </div>
+                <p id="wizard-step-indicator" class="status-msg"></p>
+
+                <!-- Step 1: Admin enrolment -->
+                <div id="wizard-step-enroll" class="dashboard-section wizard-step">
+                    <h3>Step 1 of 4 · Enrol the Admin Fingerprint</h3>
+                    <p>The first Admin fingerprint unlocks every later step. Place
+                    the admin's finger on the sensor when prompted by the device.</p>
+                    <button id="btn-wizard-enroll-admin" class="primary-btn">Enrol Admin Finger</button>
+                    <div id="wizard-enroll-progress" class="enroll-progress" style="display: none;">
+                        <div class="step-indicator">
+                            <span id="wizard-enroll-step-text">Step 1 of 3</span>
+                            <div class="progress-bar">
+                                <div id="wizard-enroll-progress-bar" class="progress-fill"></div>
+                            </div>
+                        </div>
+                        <p id="wizard-enroll-message" class="status-msg"></p>
+                    </div>
+                    <p id="wizard-enroll-status" class="status-msg"></p>
+                </div>
+
+                <!-- Step 2: Account registration -->
+                <div id="wizard-step-register" class="dashboard-section wizard-step">
+                    <h3>Step 2 of 4 · Register Your Account</h3>
+                    <p>Create the companion account for this browser/device.
+                    Confirming registration requires a scan of the Admin finger
+                    just enrolled.</p>
+                    <form id="wizard-register-form">
+                        <div class="input-group">
+                            <label for="wizard-username">Username</label>
+                            <input type="text" id="wizard-username" required maxlength="16" placeholder="admin">
+                        </div>
+                        <div class="input-group">
+                            <label for="wizard-password">Password</label>
+                            <input type="password" id="wizard-password" required minlength="4" placeholder="••••••••">
+                        </div>
+                        <button type="submit" class="primary-btn">Register Account</button>
+                    </form>
+                    <p id="wizard-register-status" class="status-msg"></p>
+                </div>
+
+                <!-- Step 3: Nuki pairing -->
+                <div id="wizard-step-nuki" class="dashboard-section wizard-step">
+                    <h3>Step 3 of 4 · Pair Your Nuki Lock</h3>
+                    <p>Put your Nuki Smart Lock into pairing mode first: press and
+                    hold the lock's button (on the inside of the door) for about
+                    5 seconds until its LED lights up. Then start pairing here.</p>
+                    <button id="btn-wizard-nuki-pair" class="primary-btn">Start Nuki Pairing</button>
+                    <p id="wizard-nuki-status" class="status-msg"></p>
+                </div>
+
+                <!-- Step 4: Completion -->
+                <div id="wizard-step-finish" class="dashboard-section wizard-step">
+                    <h3>Step 4 of 4 · Finish Setup</h3>
+                    <p>Finishing locks this device to this browser: it will switch
+                    to filtered advertising and only reconnect to the companion
+                    that completed setup. Everything else stays as configured.</p>
+                    <button id="btn-wizard-finish" class="primary-btn">Finish Setup</button>
+                    <p id="wizard-finish-status" class="status-msg"></p>
+                </div>
+            </div>
+
             <!-- Auth View -->
             <div id="auth-view" class="view">
                 <h2>Authentication</h2>

@@ -104,4 +104,34 @@ esp_err_t sdf_storage_delete_user_name(uint16_t user_id);
 esp_err_t sdf_storage_enrolled_users_save(uint16_t bmp, const uint8_t *perm_packed);
 esp_err_t sdf_storage_enrolled_users_load(uint16_t *bmp_out, uint8_t *perm_packed_out);
 
+/* Setup-completion latch. Written once at explicit setup completion, cleared
+ * only by factory reset (sdf_storage_erase_all). An absent key reads as
+ * "not complete" (false) with ESP_OK, per the component's absent-key
+ * convention - a device upgrading to this firmware boots as unclaimed. */
+esp_err_t sdf_storage_setup_complete_save(bool complete);
+esp_err_t sdf_storage_setup_complete_load(bool *complete_out);
+esp_err_t sdf_storage_setup_complete_clear(void);
+
+/* Admission records: the identities that were deliberately granted
+ * allow-list trust (setup completion or a pairing-window admit), stored as
+ * addr type plus 6-byte address like sdf_storage_ble_target_save(). Sized to
+ * hold at least CONFIG_BT_NIMBLE_MAX_BONDS (3, see sdkconfig.defaults) so
+ * every persisted bond can have a matching record; the allow list is seeded
+ * from the intersection of the two stores. */
+#define SDF_STORAGE_ADMISSION_MAX 4u
+
+typedef struct {
+  uint8_t addr_type;
+  uint8_t addr[6];
+} sdf_storage_admission_t;
+
+esp_err_t sdf_storage_admission_add(uint8_t addr_type, const uint8_t addr[6]);
+esp_err_t sdf_storage_admission_remove(uint8_t addr_type, const uint8_t addr[6]);
+/* Loads all admission records into up to max_entries slots of entries[];
+ * count_out receives the number written. Returns ESP_ERR_NO_MEM if more
+ * records exist than fit. An empty/absent store yields count 0 with ESP_OK. */
+esp_err_t sdf_storage_admission_load_all(sdf_storage_admission_t *entries,
+                                         size_t max_entries, size_t *count_out);
+esp_err_t sdf_storage_admission_clear_all(void);
+
 #endif /* SDF_STORAGE_H */

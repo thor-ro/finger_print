@@ -86,6 +86,27 @@ typedef bool (*sdf_ble_companion_ota_write_cb)(void *ctx,
                                                 const uint8_t *data,
                                                 size_t len);
 
+/**
+ * Fired when an authenticated companion session writes the explicit
+ * setup-completion request (`{"action":"finish_setup"}` on the Config
+ * characteristic - Config writes are authenticated-only, which is exactly
+ * the gate the wizard's final step needs). The device-side completion
+ * sequence (persist admission record BEFORE latch, populate/push allow
+ * list, switch advertising) runs in sdf_app's handler; its outcome is
+ * routed back via sdf_ble_companion_reply_setup_complete().
+ */
+typedef void (*sdf_ble_companion_setup_complete_cb)(void *ctx,
+                                                     uint16_t conn_handle);
+
+/**
+ * Fired when an authenticated companion session writes the setup-phase Nuki
+ * pairing request (`{"action":"setup_nuki_pair"}` on Config). Reachable only
+ * while the setup-completion latch is unset; sdf_app's handler starts
+ * initial Nuki pairing and replies via a Config notify.
+ */
+typedef void (*sdf_ble_companion_setup_nuki_pair_cb)(void *ctx,
+                                                      uint16_t conn_handle);
+
 
 typedef struct {
     void *ctx;
@@ -94,6 +115,8 @@ typedef struct {
     sdf_ble_companion_enroll_write_cb on_enroll_write;
     sdf_ble_companion_ota_write_cb on_ota_write;
     sdf_ble_companion_admin_action_request_cb on_admin_action_request;
+    sdf_ble_companion_setup_complete_cb on_setup_complete;
+    sdf_ble_companion_setup_nuki_pair_cb on_setup_nuki_pair;
 } sdf_ble_companion_callbacks_t;
 
 esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks);
@@ -161,6 +184,38 @@ bool sdf_ble_companion_handle_ota_write(void *ctx, uint16_t conn_handle,
  * initialized.
  */
 esp_err_t sdf_ble_companion_open_pairing_window(void);
+
+/**
+ * Routes the outcome of the explicit setup-completion request back to the
+ * requesting connection as a Config-characteristic notification:
+ *   completed:  {"finish_setup":true}
+ *   rejected:   {"finish_setup":false,"step":"<outstanding_step>"}
+ * where <outstanding_step> is one of "admin_enrollment", "registration" or
+ * "nuki_pairing" - the first wizard step that is still outstanding.
+ */
+esp_err_t sdf_ble_companion_reply_setup_complete(uint16_t conn_handle,
+                                                  bool completed,
+                                                  const char *outstanding_step);
+
+/**
+ * Copies the peer's resolved identity address for an active connection into
+ * (addr_type, addr6). Used by sdf_app's setup-completion sequence to persist
+ * the admission record for exactly the requesting client. Returns false if
+ * the connection is gone.
+ */
+bool sdf_ble_companion_get_conn_identity(uint16_t conn_handle,
+                                          uint8_t *addr_type, uint8_t addr6[6]);
+
+/**
+ * Completion-path tail: adds the just-admitted identity to the runtime
+ * allow list, pushes the list into the controller's Filter Accept List, and
+ * re-evaluates advertising mode. With the setup-completion latch already
+ * persisted by the caller (admission record first, then latch - the
+ * crash-safe order), this switches to sparse allow-list-filtered
+ * advertising and restores the ordinary connection limit.
+ */
+esp_err_t sdf_ble_companion_admit_and_switch_to_filtered(uint8_t addr_type,
+                                                          const uint8_t addr[6]);
 
 #ifdef __cplusplus
 }

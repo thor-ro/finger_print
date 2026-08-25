@@ -90,6 +90,21 @@ extern void test_sdf_storage_enrolled_users_save_invalid_args(void);
 extern void test_sdf_storage_enrolled_users_load_invalid_args(void);
 extern void test_sdf_storage_enrolled_users_save_overwrites_previous(void);
 extern void test_sdf_storage_erase_all_clears_enrolled_users(void);
+extern void test_sdf_storage_setup_complete_save_and_load(void);
+extern void test_sdf_storage_setup_complete_absent_key_reads_as_false_not_error(void);
+extern void test_sdf_storage_setup_complete_clear(void);
+extern void test_sdf_storage_setup_complete_invalid_args(void);
+extern void test_sdf_storage_erase_all_clears_setup_latch_and_admissions(void);
+extern void test_sdf_storage_admission_add_and_load_all(void);
+extern void test_sdf_storage_admission_add_duplicate_is_idempotent(void);
+extern void test_sdf_storage_admission_remove_compacts(void);
+extern void test_sdf_storage_admission_capacity_exhaustion_rejected(void);
+extern void test_sdf_storage_admission_load_all_buffer_too_small_reports_no_mem(void);
+extern void test_sdf_storage_admission_empty_store_reads_as_zero_count(void);
+extern void test_sdf_storage_admission_clear_all(void);
+extern void test_sdf_storage_admission_invalid_args(void);
+extern void test_sdf_storage_admission_without_latch_leaves_device_in_setup_phase(void);
+extern void test_setup_state_wire_byte_values_are_stable(void);
 
 /* SDF Config tests */
 extern void test_sdf_config_set_checkin_interval_bounds(void);
@@ -168,22 +183,23 @@ extern void test_web_auth_should_not_resolve_for_other_actions(void);
 extern void test_ble_admin_action_should_resolve_on_denial_or_timeout(void);
 extern void test_ble_admin_action_should_not_resolve_on_success(void);
 extern void test_ble_admin_action_should_not_resolve_for_other_actions(void);
-extern void test_setup_state_unclaimed_when_no_enrolled_users(void);
+extern void test_setup_state_not_started_when_no_enrolled_users_and_latch_unset(void);
+extern void test_setup_state_intermediate_states_are_derived_in_step_order(void);
+extern void test_setup_state_latch_survives_user_and_credential_deletion(void);
 extern void test_button_dispatch_ble_pairing_window_sets_pending_action(void);
 extern void test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending(void);
 extern void test_pulse_pending_action_led_covers_all_actions(void);
 extern void test_request_admin_action_ble_pairing_window_sets_pending_action(void);
-extern void test_bootstrap_bypass_rejected_for_unspecified_origin_on_zero_user_device(void);
-extern void test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device(void);
-extern void test_bootstrap_bypass_clears_existing_pending_action_before_execution(void);
-extern void test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action(void);
-extern void test_dispatch_admin_action_remote_origin_on_zero_user_device_sets_pending_action(void);
-extern void test_dispatch_admin_action_local_physical_origin_on_zero_user_device_bypasses_authorization(void);
+extern void test_dispatch_admin_action_on_zero_user_device_sets_pending_action(void);
+extern void test_factory_reset_direct_execution_sets_no_pending_action(void);
 extern void test_button_dispatch_claimed_device_sets_pending_action(void);
-extern void test_button_single_click_resolves_to_enroll_on_unclaimed_device(void);
-extern void test_button_single_click_resolves_to_nuki_pair_on_claimed_incomplete_device(void);
-extern void test_button_single_click_resolves_to_enroll_on_claimed_complete_device(void);
-extern void test_button_dispatch_factory_reset_on_claimed_device_sets_pending_action(void);
+extern void test_setup_phase_boot_arms_when_latch_unset_and_not_when_set(void);
+extern void test_setup_phase_arm_window_expiry_wipes_and_disarms(void);
+extern void test_setup_phase_deadline_starts_at_first_connection_and_is_not_extended(void);
+extern void test_setup_phase_idle_timer_drops_only_the_connection(void);
+extern void test_setup_phase_arm_window_stops_governing_once_deadline_starts(void);
+extern void test_setup_phase_button_press_restarts_both_timers(void);
+extern void test_setup_phase_timeout_wipe_erases_partial_state(void);
 extern void test_button_press_dropped_under_backpressure_leaves_no_state(void);
 extern void test_button_init_deinit_stop_start_cycle(void);
 extern void test_task_wake_helpers_safe_when_idle(void);
@@ -354,6 +370,11 @@ extern void test_gatt_scratch_release_from_non_owner_refused(void);
 extern void test_gatt_scratch_second_bind_from_other_task_refused(void);
 extern void test_gatt_scratch_rebind_same_task_is_silent(void);
 extern void test_addr_eq_compares_type_and_value(void);
+extern void test_adv_mode_selection_covers_all_latch_armed_combinations(void);
+extern void test_second_connection_terminated_only_while_latch_unset(void);
+extern void test_seed_intersection_abandoned_setup_bond_is_not_seeded(void);
+extern void test_seed_intersection_admitted_and_bonded_peer_is_seeded(void);
+extern void test_seed_intersection_admission_without_bond_grants_nothing(void);
 
 #ifndef CONFIG_IDF_TARGET_LINUX
 /* sdf_app tests (target-only) */
@@ -484,6 +505,21 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_enrolled_users_load_invalid_args);
   RUN_TEST(test_sdf_storage_enrolled_users_save_overwrites_previous);
   RUN_TEST(test_sdf_storage_erase_all_clears_enrolled_users);
+  RUN_TEST(test_sdf_storage_setup_complete_save_and_load);
+  RUN_TEST(test_sdf_storage_setup_complete_absent_key_reads_as_false_not_error);
+  RUN_TEST(test_sdf_storage_setup_complete_clear);
+  RUN_TEST(test_sdf_storage_setup_complete_invalid_args);
+  RUN_TEST(test_sdf_storage_erase_all_clears_setup_latch_and_admissions);
+  RUN_TEST(test_sdf_storage_admission_add_and_load_all);
+  RUN_TEST(test_sdf_storage_admission_add_duplicate_is_idempotent);
+  RUN_TEST(test_sdf_storage_admission_remove_compacts);
+  RUN_TEST(test_sdf_storage_admission_capacity_exhaustion_rejected);
+  RUN_TEST(test_sdf_storage_admission_load_all_buffer_too_small_reports_no_mem);
+  RUN_TEST(test_sdf_storage_admission_empty_store_reads_as_zero_count);
+  RUN_TEST(test_sdf_storage_admission_clear_all);
+  RUN_TEST(test_sdf_storage_admission_invalid_args);
+  RUN_TEST(test_sdf_storage_admission_without_latch_leaves_device_in_setup_phase);
+  RUN_TEST(test_setup_state_wire_byte_values_are_stable);
 
   /* SDF Config tests */
   RUN_TEST(test_sdf_config_set_checkin_interval_bounds);
@@ -560,22 +596,23 @@ void app_main(void) {
   RUN_TEST(test_ble_admin_action_should_resolve_on_denial_or_timeout);
   RUN_TEST(test_ble_admin_action_should_not_resolve_on_success);
   RUN_TEST(test_ble_admin_action_should_not_resolve_for_other_actions);
-  RUN_TEST(test_setup_state_unclaimed_when_no_enrolled_users);
+  RUN_TEST(test_setup_state_not_started_when_no_enrolled_users_and_latch_unset);
+  RUN_TEST(test_setup_state_intermediate_states_are_derived_in_step_order);
+  RUN_TEST(test_setup_state_latch_survives_user_and_credential_deletion);
   RUN_TEST(test_button_dispatch_ble_pairing_window_sets_pending_action);
   RUN_TEST(test_button_dispatch_ble_pairing_window_ignored_when_action_already_pending);
   RUN_TEST(test_pulse_pending_action_led_covers_all_actions);
   RUN_TEST(test_request_admin_action_ble_pairing_window_sets_pending_action);
-  RUN_TEST(test_bootstrap_bypass_rejected_for_unspecified_origin_on_zero_user_device);
-  RUN_TEST(test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device);
-  RUN_TEST(test_bootstrap_bypass_clears_existing_pending_action_before_execution);
-  RUN_TEST(test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action);
-  RUN_TEST(test_dispatch_admin_action_remote_origin_on_zero_user_device_sets_pending_action);
-  RUN_TEST(test_dispatch_admin_action_local_physical_origin_on_zero_user_device_bypasses_authorization);
+  RUN_TEST(test_dispatch_admin_action_on_zero_user_device_sets_pending_action);
+  RUN_TEST(test_factory_reset_direct_execution_sets_no_pending_action);
   RUN_TEST(test_button_dispatch_claimed_device_sets_pending_action);
-  RUN_TEST(test_button_single_click_resolves_to_enroll_on_unclaimed_device);
-  RUN_TEST(test_button_single_click_resolves_to_nuki_pair_on_claimed_incomplete_device);
-  RUN_TEST(test_button_single_click_resolves_to_enroll_on_claimed_complete_device);
-  RUN_TEST(test_button_dispatch_factory_reset_on_claimed_device_sets_pending_action);
+  RUN_TEST(test_setup_phase_boot_arms_when_latch_unset_and_not_when_set);
+  RUN_TEST(test_setup_phase_arm_window_expiry_wipes_and_disarms);
+  RUN_TEST(test_setup_phase_deadline_starts_at_first_connection_and_is_not_extended);
+  RUN_TEST(test_setup_phase_idle_timer_drops_only_the_connection);
+  RUN_TEST(test_setup_phase_arm_window_stops_governing_once_deadline_starts);
+  RUN_TEST(test_setup_phase_button_press_restarts_both_timers);
+  RUN_TEST(test_setup_phase_timeout_wipe_erases_partial_state);
   RUN_TEST(test_button_press_dropped_under_backpressure_leaves_no_state);
   RUN_TEST(test_button_init_deinit_stop_start_cycle);
   RUN_TEST(test_task_wake_helpers_safe_when_idle);
@@ -755,6 +792,11 @@ void app_main(void) {
   RUN_TEST(test_gatt_scratch_second_bind_from_other_task_refused);
   RUN_TEST(test_gatt_scratch_rebind_same_task_is_silent);
   RUN_TEST(test_addr_eq_compares_type_and_value);
+  RUN_TEST(test_adv_mode_selection_covers_all_latch_armed_combinations);
+  RUN_TEST(test_second_connection_terminated_only_while_latch_unset);
+  RUN_TEST(test_seed_intersection_abandoned_setup_bond_is_not_seeded);
+  RUN_TEST(test_seed_intersection_admitted_and_bonded_peer_is_seeded);
+  RUN_TEST(test_seed_intersection_admission_without_bond_grants_nothing);
 #endif
 
   /* sdf_app suites. Target-only: sdf_app is not built for the Linux host

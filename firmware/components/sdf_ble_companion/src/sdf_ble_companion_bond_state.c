@@ -131,3 +131,44 @@ size_t sdf_ble_companion_bond_snapshot_allow_list(const sdf_ble_companion_bond_s
     }
     return count;
 }
+
+sdf_ble_companion_adv_mode_t sdf_ble_companion_select_advertising_mode(
+    bool pairing_window_open, bool setup_complete, bool setup_phase_armed) {
+    if (pairing_window_open) {
+        return SDF_BLE_COMPANION_ADV_MODE_PAIRING_WINDOW;
+    }
+    if (!setup_complete) {
+        return setup_phase_armed ? SDF_BLE_COMPANION_ADV_MODE_UNFILTERED_SETUP
+                                 : SDF_BLE_COMPANION_ADV_MODE_NOT_ADVERTISING;
+    }
+    return SDF_BLE_COMPANION_ADV_MODE_SPARSE_FILTERED;
+}
+
+bool sdf_ble_companion_should_terminate_second_connection(
+    bool setup_complete, size_t connected_others) {
+    return !setup_complete && connected_others > 0;
+}
+
+size_t sdf_ble_companion_allow_list_seed_intersection(
+    sdf_ble_companion_bond_state_t *state,
+    const sdf_ble_companion_addr_t *bonded, size_t num_bonded,
+    const sdf_ble_companion_addr_t *admitted, size_t num_admitted) {
+    if (!state || !bonded || !admitted) return 0;
+    size_t added = 0;
+    for (size_t i = 0; i < num_bonded; i++) {
+        bool is_admitted = false;
+        for (size_t a = 0; a < num_admitted; a++) {
+            if (sdf_ble_companion_addr_eq(&bonded[i], &admitted[a])) {
+                is_admitted = true;
+                break;
+            }
+        }
+        if (!is_admitted) {
+            continue;
+        }
+        if (sdf_ble_companion_bond_allow_list_add(state, &bonded[i])) {
+            added++;
+        }
+    }
+    return added;
+}

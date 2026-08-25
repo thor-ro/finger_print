@@ -3,6 +3,17 @@ const SDF_AUTH_UUID    = '7d5a0001-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 const SDF_CONFIG_UUID  = '7d5a0002-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 const SDF_ENROLL_UUID  = '7d5a0003-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
 const SDF_OTA_UUID     = '7d5a0004-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
+// Read-only setup-state characteristic (readable on the encrypted-but-
+// unauthenticated link, before login). Wire format: 1 byte -
+//   0 setup not started | 1 Admin enrolled | 2 Nuki paired | 3 complete
+const SDF_SETUP_STATE_UUID = '7d5a0005-5c2b-4f8a-9e3d-1a2b3c4d5e6f';
+
+// Setup-state enumeration (mirrors sdf_services_setup_state_t)
+const SETUP_NOT_STARTED = 0;
+const SETUP_ADMIN_ENROLLED = 1;
+const SETUP_REGISTERED = 2;
+const SETUP_NUKI_PAIRED = 3;
+const SETUP_COMPLETE = 4;
 
 // Auth characteristic opcodes. LOGIN is a two-round-trip challenge-response
 // (LOGIN_INIT then LOGIN_VERIFY) rather than a single message - see
@@ -40,6 +51,7 @@ let authChar;
 let configChar;
 let enrollChar;
 let otaChar;
+let setupStateChar;
 
 const connectBtn = document.getElementById('btn-connect');
 const statusMsg = document.getElementById('connection-status');
@@ -73,12 +85,13 @@ connectBtn.addEventListener('click', async () => {
         configChar = await sdfService.getCharacteristic(SDF_CONFIG_UUID);
         enrollChar = await sdfService.getCharacteristic(SDF_ENROLL_UUID);
         otaChar = await sdfService.getCharacteristic(SDF_OTA_UUID);
+        setupStateChar = await sdfService.getCharacteristic(SDF_SETUP_STATE_UUID);
 
         statusMsg.textContent = 'Connected successfully!';
-        
+
         authChar.addEventListener('characteristicvaluechanged', handleAuthNotification);
         await authChar.startNotifications();
-        
+
         // Subscribe to config notifications
         configChar.addEventListener('characteristicvaluechanged', handleConfigNotification);
         await configChar.startNotifications();
@@ -90,8 +103,25 @@ connectBtn.addEventListener('click', async () => {
         // Subscribe to OTA notifications
         otaChar.addEventListener('characteristicvaluechanged', handleOtaNotification);
         await otaChar.startNotifications();
-        
-        switchView('auth-view');
+
+        /* Read setup state BEFORE login: the wizard is mandatory for an
+         * unclaimed device, and resumes at the step the reported state
+         * implies. */
+        let setupState = SETUP_COMPLETE;
+        try {
+            const v = await setupStateChar.readValue();
+            if (v.byteLength >= 1) {
+                setupState = new Uint8Array(v.buffer, v.byteOffset, 1)[0];
+            }
+        } catch (e) {
+            console.warn('Could not read setup state:', e);
+        }
+
+        if (setupState !== SETUP_COMPLETE) {
+            enterWizard(setupState);
+        } else {
+            switchView('auth-view');
+        }
     } catch (error) {
         console.error(error);
         statusMsg.textContent = `Error: ${error.message}`;
@@ -100,6 +130,17 @@ connectBtn.addEventListener('click', async () => {
 
 function onDisconnected(event) {
     statusMsg.textContent = 'Device disconnected.';
+    const wizardWasActive = document.getElementById('wizard-view').classList.contains('active');
+    if (wizardWasActive && !setupCompleted) {
+        /* The device disconnected without setup completing. If it stopped
+         * advertising, the setup window elapsed: progress was erased and the
+         * button must be pressed to re-arm before reconnecting. */
+        wizardStatus.textContent =
+            'The connection was lost and setup did not complete. If the device ' +
+            'is no longer visible in the device picker, its setup window elapsed ' +
+            'and all progress was discarded — press the button on the device to ' +
+            'start setup again.';
+    }
     switchView('connection-view');
     bluetoothDevice = null;
     gattServer = null;
@@ -108,6 +149,7 @@ function onDisconnected(event) {
     configChar = null;
     enrollChar = null;
     otaChar = null;
+    setupStateChar = null;
     document.getElementById('status-cards').style.display = 'none';
 }
 
@@ -116,6 +158,161 @@ function onDisconnected(event) {
 function switchView(viewId) {
     document.querySelectorAll('.view').forEach(el => el.classList.remove('active'));
     document.getElementById(viewId).classList.add('active');
+}
+
+// --- First-Time Setup Wizard ---
+
+const wizardStatus = document.getElementById('wizard-finish-status');
+let setupCompleted = false;
+
+function showWizardStep(stepElId) {
+    document.querySelectorAll('#wizard-view .wizard-step').forEach(el => {
+        el.style.display = 'none';
+    });
+    document.getElementById(stepElId).style.display = 'block';
+}
+
+// Resumes at the step the reported setup state implies, so a user who
+// reconnects mid-setup does not repeat completed steps within one phase.
+function enterWizard(setupState) {
+    setupCompleted = false;
+    switchView('wizard-view');
+    if (setupState === SETUP_NOT_STARTED) {
+        showWizardStep('wizard-step-enroll');
+        document.getElementById('wizard-step-indicator').textContent =
+            'Setup state: not started — begin with Admin enrolment.';
+    } else if (setupState === SETUP_ADMIN_ENROLLED) {
+        showWizardStep('wizard-step-register');
+        document.getElementById('wizard-step-indicator').textContent =
+            'Setup state: Admin enrolled — continue with account registration.';
+    } else if (setupState === SETUP_REGISTERED) {
+        showWizardStep('wizard-step-nuki');
+        document.getElementById('wizard-step-indicator').textContent =
+            'Setup state: account registered — continue with Nuki pairing.';
+    } else if (setupState === SETUP_NUKI_PAIRED) {
+        showWizardStep('wizard-step-finish');
+        document.getElementById('wizard-step-indicator').textContent =
+            'Setup state: Nuki paired — finish to claim the device.';
+    } else {
+        showWizardStep('wizard-step-enroll');
+        document.getElementById('wizard-step-indicator').textContent = '';
+    }
+}
+
+function wizardIsActive() {
+    return document.getElementById('wizard-view').classList.contains('active');
+}
+
+// Step 1: Admin enrolment - reuses the Enrollment characteristic with
+// user_id=1 (the first admin-permission user), permission=3.
+document.getElementById('btn-wizard-enroll-admin').addEventListener('click', async () => {
+    const statusEl = document.getElementById('wizard-enroll-status');
+    try {
+        document.getElementById('btn-wizard-enroll-admin').disabled = true;
+        statusEl.textContent = 'Starting Admin enrolment...';
+        const payload = new TextEncoder().encode(JSON.stringify({ user_id: 1, permission: 3 }));
+        await enrollChar.writeValue(payload);
+        document.getElementById('wizard-enroll-progress').style.display = 'block';
+        document.getElementById('wizard-enroll-step-text').textContent = 'Step 1 of 3';
+        document.getElementById('wizard-enroll-progress-bar').style.width = '33%';
+        document.getElementById('wizard-enroll-message').textContent =
+            'Place the admin finger on the sensor for each of the 3 scans...';
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = `Could not start enrolment: ${err.message}`;
+        document.getElementById('btn-wizard-enroll-admin').disabled = false;
+    }
+});
+
+// Step 3: initial Nuki pairing via the setup-phase-only Config action.
+document.getElementById('btn-wizard-nuki-pair').addEventListener('click', async () => {
+    const statusEl = document.getElementById('wizard-nuki-status');
+    try {
+        document.getElementById('btn-wizard-nuki-pair').disabled = true;
+        statusEl.textContent = 'Pairing with the Nuki lock...';
+        const resultPromise = waitForBleAdminActionResult('setup_nuki_pair', BLE_ADMIN_ACTION_RESPONSE_TIMEOUT_MS);
+        const payload = new TextEncoder().encode(JSON.stringify({ action: 'setup_nuki_pair' }));
+        await configChar.writeValue(payload);
+        const paired = await resultPromise;
+        if (paired === true) {
+            statusEl.textContent = 'Nuki pairing succeeded.';
+            showWizardStep('wizard-step-finish');
+            document.getElementById('wizard-step-indicator').textContent =
+                'Nuki paired - finish below.';
+        } else {
+            statusEl.textContent = 'Nuki pairing did not succeed. Make sure the lock is in pairing mode and try again.';
+        }
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = `Pairing request rejected: ${err.message}`;
+    } finally {
+        document.getElementById('btn-wizard-nuki-pair').disabled = false;
+    }
+});
+
+// Step 4: explicit completion over the authenticated session.
+document.getElementById('btn-wizard-finish').addEventListener('click', async () => {
+    const statusEl = document.getElementById('wizard-finish-status');
+    try {
+        document.getElementById('btn-wizard-finish').disabled = true;
+        statusEl.textContent = 'Finishing setup...';
+        const resultPromise = waitForBleAdminActionResult('finish_setup', BLE_ADMIN_ACTION_RESPONSE_TIMEOUT_MS);
+        const payload = new TextEncoder().encode(JSON.stringify({ action: 'finish_setup' }));
+        await configChar.writeValue(payload);
+        const result = await resultPromise;
+        if (result === true) {
+            setupCompleted = true;
+            statusEl.textContent =
+                'Setup complete! The device is now claimed and paired to this browser: it has ' +
+                'switched to filtered advertising and will only accept reconnections from this companion.';
+            document.getElementById('wizard-step-indicator').textContent = '';
+        } else if (result === null || result === undefined) {
+            statusEl.textContent = 'No response received - check the device.';
+        } else {
+            // Rejected: the device reports which step is still outstanding,
+            // or 'internal_error' for a fault that is not a wizard step at
+            // all (a failed NVS write, the connection dropping mid-request).
+            // Sending the user back to redo a finished step in that case
+            // would be misleading, so offer a retry on the spot instead.
+            let step = null;
+            if (lastConfigNotifyRaw && lastConfigNotifyRaw.step) {
+                step = lastConfigNotifyRaw.step;
+            }
+            if (step === 'internal_error') {
+                statusEl.textContent =
+                    'The device could not finish setup because of an internal error. ' +
+                    'No progress was lost - press Finish to try again.';
+            } else {
+                reportOutstandingStep(step);
+                statusEl.textContent = `Setup cannot be finished yet: ${describeStep(step)} is still outstanding.`;
+            }
+        }
+    } catch (err) {
+        console.error(err);
+        statusEl.textContent = `Finish request rejected: ${err.message}`;
+    } finally {
+        document.getElementById('btn-wizard-finish').disabled = false;
+    }
+});
+
+function describeStep(step) {
+    switch (step) {
+        case 'admin_enrollment': return 'Admin fingerprint enrolment';
+        case 'registration': return 'account registration';
+        case 'nuki_pairing': return 'Nuki pairing';
+        case 'internal_error': return 'An internal device error';
+        default: return 'A setup step';
+    }
+}
+
+function reportOutstandingStep(step) {
+    if (step === 'registration') {
+        showWizardStep('wizard-step-register');
+    } else if (step === 'nuki_pairing') {
+        showWizardStep('wizard-step-nuki');
+    } else if (step === 'admin_enrollment' || step === null) {
+        showWizardStep('wizard-step-enroll');
+    }
 }
 
 // --- Auth (Login / Register) ---
@@ -273,8 +470,19 @@ async function submitLogin(username, password) {
 function handleAuthNotification(event) {
     const value = new Uint8Array(event.target.value.buffer);
     const status = value[0];
-    
+
     if (status === 0x01) {
+        // Wizard registration: a successful REGISTER advances the wizard
+        // instead of opening the dashboard.
+        if (wizardIsActive() && wizardRegisterPending) {
+            wizardRegisterPending = false;
+            document.getElementById('wizard-register-status').textContent =
+                'Registration confirmed by the Admin fingerprint.';
+            showWizardStep('wizard-step-nuki');
+            document.getElementById('wizard-step-indicator').textContent =
+                'Account registered - pair your Nuki lock.';
+            return;
+        }
         authStatus.textContent = 'Success!';
         setTimeout(() => {
             switchView('dashboard-view');
@@ -282,9 +490,9 @@ function handleAuthNotification(event) {
             resumeOtaTransferIfPending();
         }, 500);
     } else if (status === 0x02) {
-        authStatus.textContent = 'Pending admin authorization on device...';
+        if (!wizardIsActive()) authStatus.textContent = 'Pending admin authorization on device...';
     } else {
-        authStatus.textContent = 'Authentication failed or logged out.';
+        if (!wizardIsActive()) authStatus.textContent = 'Authentication failed or logged out.';
     }
 }
 
@@ -387,6 +595,7 @@ function handleConfigNotification(event) {
         const config = JSON.parse(jsonStr);
 
         if (pendingBleAdminAction && config[pendingBleAdminAction.key] !== undefined) {
+            lastConfigNotifyRaw = config;
             pendingBleAdminAction.resolve(config[pendingBleAdminAction.key] === true);
             return;
         }
@@ -396,6 +605,10 @@ function handleConfigNotification(event) {
         console.warn('Config notification not valid JSON:', jsonStr);
     }
 }
+
+// Full JSON body of the most recent action-reply notify - lets callers read
+// extra fields (e.g. finish_setup's "step") beyond the boolean value.
+let lastConfigNotifyRaw = null;
 
 function updateStatusCards(config) {
     if (config.battery_default_percent !== undefined) {
@@ -530,11 +743,49 @@ document.getElementById('btn-enroll').addEventListener('click', async () => {
     }
 });
 
+// Set while the wizard's registration form is awaiting its admin-scan
+// confirmation, so the success auth-notification advances the wizard.
+let wizardRegisterPending = false;
+
+document.getElementById('wizard-register-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const statusEl = document.getElementById('wizard-register-status');
+    try {
+        const username = document.getElementById('wizard-username').value;
+        const password = document.getElementById('wizard-password').value;
+
+        statusEl.textContent = 'Submitting registration...';
+        const encoder = new TextEncoder();
+        const userBytes = encoder.encode(username);
+        const hashBytes = await hashPassword(password);
+
+        const payload = new Uint8Array(2 + userBytes.length + hashBytes.length);
+        payload[0] = SDF_AUTH_OPCODE_REGISTER;
+        payload[1] = userBytes.length;
+        payload.set(userBytes, 2);
+        payload.set(hashBytes, 2 + userBytes.length);
+
+        wizardRegisterPending = true;
+        await authChar.writeValue(payload);
+        statusEl.textContent = 'Please scan the Admin Finger on the device to confirm.';
+    } catch (err) {
+        wizardRegisterPending = false;
+        statusEl.textContent = `Error: ${err.message}`;
+    }
+});
+
 function handleEnrollNotification(event) {
     const value = new Uint8Array(event.target.value.buffer);
     const decoder = new TextDecoder();
     const jsonStr = decoder.decode(value);
-    
+
+    // Wizard step 1 uses the same enrollment notifications as the dashboard
+    // panel - route them to the wizard UI while the wizard is active.
+    if (wizardIsActive()) {
+        handleWizardEnrollNotification(jsonStr);
+        return;
+    }
+
     try {
         const data = JSON.parse(jsonStr);
         const progressDiv = document.getElementById('enroll-progress');
@@ -562,6 +813,41 @@ function handleEnrollNotification(event) {
         }
     } catch (e) {
         console.warn('Enroll notification not valid JSON:', jsonStr);
+    }
+}
+
+// Wizard-scoped mirror of the dashboard enrollment notification handling.
+function handleWizardEnrollNotification(jsonStr) {
+    let data;
+    try {
+        data = JSON.parse(jsonStr);
+    } catch (e) {
+        console.warn('Enroll notification not valid JSON:', jsonStr);
+        return;
+    }
+    const statusEl = document.getElementById('wizard-enroll-status');
+    const progressDiv = document.getElementById('wizard-enroll-progress');
+    const stepText = document.getElementById('wizard-enroll-step-text');
+    const progressBar = document.getElementById('wizard-enroll-progress-bar');
+    const messageDiv = document.getElementById('wizard-enroll-message');
+
+    if (data.status === 'success') {
+        progressDiv.style.display = 'none';
+        document.getElementById('btn-wizard-enroll-admin').disabled = false;
+        statusEl.textContent = 'Admin enrolment successful.';
+        showWizardStep('wizard-step-register');
+        document.getElementById('wizard-step-indicator').textContent =
+            'Admin enrolled - register your account below.';
+    } else if (data.status === 'failed') {
+        progressDiv.style.display = 'none';
+        document.getElementById('btn-wizard-enroll-admin').disabled = false;
+        statusEl.textContent =
+            `Enrolment failed at step ${data.step} (error ${data.error_code}) - try again.`;
+    } else if (data.step !== undefined) {
+        const maxSteps = 3;
+        stepText.textContent = `Step ${data.step} of ${maxSteps}`;
+        progressBar.style.width = `${(data.step / maxSteps) * 100}%`;
+        messageDiv.textContent = `Place finger for scan ${data.step} of ${maxSteps}...`;
     }
 }
 

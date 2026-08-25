@@ -619,6 +619,31 @@ Every command has an exact length. A write longer than 65 bytes — the largest 
 
 Any other opcode is rejected with `BLE_ATT_ERR_WRITE_NOT_PERMITTED`. `LOGOUT` carries no operands, so a padded `LOGOUT` is an invalid-length error and does **not** log the connection out.
 
+### BLE Companion Setup-State Wire Format
+
+The Setup-State characteristic (`7d5a0005-5c2b-4f8a-9e3d-1a2b3c4d5e6f`) is read-only, `READ | READ_ENC`: readable on an encrypted but unauthenticated link, before any account exists — this is how the first-time setup wizard determines which phase the device is in prior to login. It is deliberately not NOTIFY-capable (the persisted CCCD budget is fully committed) and has no write path.
+
+Reads return exactly 1 byte, mirroring `sdf_services_setup_state_t`:
+
+| Value | Meaning |
+|---|---|
+| `0x00` | Setup not started (no enrolled users) |
+| `0x01` | Admin enrolled (no web account yet) |
+| `0x02` | Web account registered (Nuki not yet paired) |
+| `0x03` | Nuki paired (setup not finished) |
+| `0x04` | Setup complete (latch set) |
+
+The values are in wizard step order, and every one below `0x04` is derived on
+read from independently-mutable state; only `0x04` comes from the latch. The
+`0x02` rung exists so `0x01` is unambiguous: without it a device with a paired
+Nuki but no account still read as "Admin enrolled", the wizard resumed at
+registration instead of Nuki pairing, and completion could succeed on a device
+nobody could log into.
+
+Exposing only this enumeration keeps the authentication gate on the Config, Enrollment and OTA characteristics intact: without a completed login those still return `BLE_ATT_ERR_INSUFFICIENT_AUTHEN`.
+
+Two Config-characteristic action requests support the wizard's final steps, both accepted only on an authenticated session: `{"action":"setup_nuki_pair"}` (initial Nuki pairing while the setup-completion latch is unset; replies `{"setup_nuki_pair":true|false}`) and `{"action":"finish_setup"}` (explicit completion; replies `{"finish_setup":true}` or `{"finish_setup":false,"step":"admin_enrollment"|"registration"|"nuki_pairing"|"internal_error"}`). The three step names identify the first outstanding prerequisite; `internal_error` covers a failure that is not an unmet prerequisite, so the app retries completion instead of returning the user to a step that already succeeded. A failure after the setup-completion latch has been written rolls that latch back, leaving the device in the setup phase and completable on retry..
+
 ### BLE Companion GATT Write Staging
 
 A GATT access callback must hand an inbound payload to an application callback *after* releasing the component lock — callbacks may re-enter `sdf_ble_companion`, so they never run under it. The payload therefore needs storage outliving the locked region, and it cannot be a 512-byte stack frame: every GATT access callback runs on the NimBLE host task (`CONFIG_BT_NIMBLE_HOST_TASK_STACK_SIZE` = 4096).
@@ -738,8 +763,8 @@ The OTA update mechanism is implemented in the `sdf_ota` component and provides:
 
 ### Trigger Paths
 - **Zigbee OTA** (existing, enhanced): Coordinator pushes image via Zigbee OTA cluster; device delegates to `sdf_ota` for version check, signature verification, and commit
-- **CLI**: `ota trigger zigbee://` initiates immediate Zigbee OTA query; future paths for HTTP/BLE planned
-- **BLE Peripheral** (architecture only): Future GATT service for smartphone-initiated updates
+- **CLI**: `ota trigger zigbee://` initiates immediate Zigbee OTA query
+- **BLE Companion** (implemented): bonded/encrypted GATT characteristic (`sdf_ble_companion_ota.c`); client declares image size (BEGIN), streams MTU-sized CHUNKs, commits (END) through the same `sdf_ota` session API
 
 ### Version Management
 - Semantic version from git tags: `v<major>.<minor>.<patch>[-<commit-count>-g<short-hash>]`
@@ -748,11 +773,11 @@ The OTA update mechanism is implemented in the `sdf_ota` component and provides:
 - Comparison: major.minor.patch numerically; pre-release suffixes compare lower than release
 
 ### Signature Verification
-- ECDSA P-256 (`secp256r1`) over the image's SHA-256 digest, mandatory, enforced by `CONFIG_SDF_OTA_SIGNATURE_VERIFY=y` (default `y`)
-- Public key (65 bytes, uncompressed EC point `0x04 || X || Y`) embedded in firmware `.rodata`
-- Private key held offline; images signed with `tools/sdf_sign_ota.py` (appends 64-byte raw `r‖s` signature + 4-byte magic `SDF\x01`)
-- The digest is accumulated incrementally as the image streams in, so verification needs no buffer proportional to the image and imposes no maximum image size
-- Verification happens in app before `esp_ota_end()`; bootloader does NOT verify
+- ESP-IDF Secure Boot V2 signed-app verification (`CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y`); no eFuse burned, `CONFIG_SECURE_BOOT` stays off — protects against remote/network attackers, not physical access
+- Images are signed by `idf.py build` with the project key `ota_signing_key.pem` (P-256 PEM; auto-generated on first build or injected from the `OTA_SIGNING_KEY` CI secret); signing appends a 4 KB-aligned pad plus a 4096-byte signature sector to the image
+- Trust anchor is the running app's own signature block: an image is accepted only if signed by the same key as the firmware already on the device, so the first image must be flashed signed over serial
+- Verification happens inside `esp_ota_end()` and gates the staging-to-final copy; `ESP_ERR_OTA_VALIDATE_FAILED` maps to `SDF_ERR_OTA_SIGNATURE_INVALID`, emitted as the `OTA_SIGNATURE_INVALID` audit event
+- Key rotation (and any crossing of the old-footer/new-IDF format boundary) requires a serial reflash — only signature block 0 is consulted, so a new key cannot be staged over the air
 
 ### Rollback
 - **Automatic**: Bootloader rollback enabled (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`); on boot failure (WDT, crash loop) reverts to previous partition

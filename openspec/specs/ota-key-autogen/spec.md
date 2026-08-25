@@ -5,24 +5,33 @@ Specifies the requirements for automatic generation and management of OTA signin
 
 ## Requirements
 
-### Requirement: Auto-generation of OTA signing key
-The system SHALL automatically generate an ECDSA P-256 (`secp256r1`) private key (`ota_private.key`) and extract its public key during the build process if the private key does not already exist. The extracted public key SHALL be a 65-byte uncompressed EC point (`0x04 || X || Y`).
+### Requirement: Auto-generation of the Image Signing Key
+The system SHALL automatically generate an ECDSA P-256 (`secp256r1`) private signing key in PEM format during the build process if it does not already exist, and SHALL use it to sign the built application image. The build SHALL NOT extract or embed a standalone public key blob, because the public key is carried inside the image's signature block.
 
-#### Scenario: Developer builds firmware without existing key
-- **WHEN** the `ota_private.key` file is missing in the project
-- **THEN** the CMake build script automatically invokes the key generation tool to create a new P-256 `ota_private.key` before proceeding with the build.
+#### Scenario: Developer builds firmware without an existing key
+- **WHEN** the OTA signing key file is missing in the project
+- **THEN** the build automatically generates a new P-256 signing key in PEM format before proceeding with the build
 
-#### Scenario: CI builds firmware with injected key
-- **WHEN** the `ota_private.key` file already exists (e.g., injected via CI secrets)
-- **THEN** the CMake build script uses the existing key and does NOT generate a new one.
+#### Scenario: CI builds firmware with an injected key
+- **WHEN** the OTA signing key file already exists (e.g. injected via CI secrets)
+- **THEN** the build uses the existing key and does NOT generate a new one
 
-#### Scenario: Extracted public key is uncompressed
-- **WHEN** the build extracts the public key from `ota_private.key` for embedding
-- **THEN** the extracted key is 65 bytes in uncompressed form, not a 32-byte raw key
+#### Scenario: No public key artifact is produced
+- **WHEN** the build completes
+- **THEN** no standalone public-key binary is generated or embedded into the application
+
+#### Scenario: Regenerated key does not silently break updates
+- **WHEN** the signing key is regenerated while devices in the field run firmware signed by the previous key
+- **THEN** images signed with the new key are rejected by those devices
+- **AND** the build surfaces that the key was newly generated rather than reused
 
 ### Requirement: Prevent key commits
-The repository configuration SHALL prevent OTA private keys from being tracked by version control.
+The repository configuration SHALL prevent OTA signing keys from being tracked by version control, and SHALL NOT leave superseded key artifacts tracked after the signing scheme changes.
 
 #### Scenario: Developer attempts to commit keys
-- **WHEN** a developer generates an `ota_private.key` locally
-- **THEN** Git ignores the file according to the `.gitignore` rules.
+- **WHEN** a developer's build generates an OTA signing key locally
+- **THEN** Git ignores the file according to the `.gitignore` rules
+
+#### Scenario: Superseded key artifacts are untracked
+- **WHEN** the repository is inspected after the signing scheme change
+- **THEN** no key material belonging to the retired custom footer scheme remains tracked

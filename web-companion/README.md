@@ -4,8 +4,23 @@ This directory contains the static Web Companion app for the Smart Door Bridge.
 
 ## Features
 - **Web Bluetooth (WebBLE)**: Connects directly to the ESP32-C6 over BLE.
-- **Authentication**: Local SHA256 hashing for secure login and registration.
-- **Device Dashboard**: Trigger HTTPS OTA updates natively via the browser.
+- **First-Time Setup Wizard**: Mandatory, guided flow for claiming an unclaimed device (Admin enrolment → account registration → Nuki pairing → explicit finish).
+- **Authentication**: Local SHA256 hashing for secure login and registration (challenge-response LOGIN).
+- **Device Dashboard**: Config, enrollment, Nuki re-pair, Zigbee join and OTA updates natively via the browser.
+
+## First-Time Setup Wizard
+
+A brand-new or factory-reset device enters a **setup phase**: it advertises openly so any companion can connect. When this app connects to a device whose setup state characteristic reports "not complete", it presents the setup wizard instead of the login form:
+
+1. **Enrol the Admin Fingerprint** — three scans; creates User ID 1 with admin permission.
+2. **Register Your Account** — offered only after the Admin exists (registration is confirmed with an Admin finger scan).
+3. **Pair Your Nuki Lock** — put the lock into pairing mode first, then start pairing from the wizard.
+4. **Finish Setup** — an explicit completion request. On success the device locks itself to this browser's companion and switches to filtered advertising.
+
+The wizard reads the device's setup state before login and resumes at the reported step after reconnects within one setup phase.
+
+> [!IMPORTANT]
+> The setup phase is **time-bounded** (about 15 minutes per arm). If the window lapses mid-wizard, all progress is erased on the device and you must press its physical button to re-arm and start over.
 
 ## Deployment to GitHub Pages
 

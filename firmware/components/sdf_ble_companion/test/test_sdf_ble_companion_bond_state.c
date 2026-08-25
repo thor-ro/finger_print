@@ -175,3 +175,86 @@ void test_addr_eq_compares_type_and_value(void) {
     TEST_ASSERT_TRUE(sdf_ble_companion_addr_eq(&a, &b));
     TEST_ASSERT_FALSE(sdf_ble_companion_addr_eq(&a, &c));
 }
+
+/* ---------------------------------------------------------------------------
+ * Setup-phase decisions (app-guided-first-time-setup): advertising-mode
+ * selection, the single-connection cap, and intersection seeding.
+ * ------------------------------------------------------------------------- */
+
+void test_adv_mode_selection_covers_all_latch_armed_combinations(void) {
+    /* Pairing window wins over everything. */
+    TEST_ASSERT_EQUAL(SDF_BLE_COMPANION_ADV_MODE_PAIRING_WINDOW,
+                      sdf_ble_companion_select_advertising_mode(true, false, true));
+    TEST_ASSERT_EQUAL(SDF_BLE_COMPANION_ADV_MODE_PAIRING_WINDOW,
+                      sdf_ble_companion_select_advertising_mode(true, true, false));
+
+    /* Latch unset: armed -> unfiltered setup; disarmed -> silence. */
+    TEST_ASSERT_EQUAL(SDF_BLE_COMPANION_ADV_MODE_UNFILTERED_SETUP,
+                      sdf_ble_companion_select_advertising_mode(false, false, true));
+    TEST_ASSERT_EQUAL(SDF_BLE_COMPANION_ADV_MODE_NOT_ADVERTISING,
+                      sdf_ble_companion_select_advertising_mode(false, false, false));
+
+    /* Latch set: sparse filtered default regardless of armed state. */
+    TEST_ASSERT_EQUAL(SDF_BLE_COMPANION_ADV_MODE_SPARSE_FILTERED,
+                      sdf_ble_companion_select_advertising_mode(false, true, true));
+    TEST_ASSERT_EQUAL(SDF_BLE_COMPANION_ADV_MODE_SPARSE_FILTERED,
+                      sdf_ble_companion_select_advertising_mode(false, true, false));
+}
+
+void test_second_connection_terminated_only_while_latch_unset(void) {
+    /* Latch unset: any second inbound connection is terminated... */
+    TEST_ASSERT_TRUE(sdf_ble_companion_should_terminate_second_connection(false, 1));
+    TEST_ASSERT_TRUE(sdf_ble_companion_should_terminate_second_connection(false, 2));
+    /* ...but a first connection never is. */
+    TEST_ASSERT_FALSE(sdf_ble_companion_should_terminate_second_connection(false, 0));
+
+    /* Latch set: ordinary limit governs - the cap never fires (the slot
+     * accounting in BLE_GAP_EVENT_CONNECT still bounds at MAX_CONNECTIONS). */
+    TEST_ASSERT_FALSE(sdf_ble_companion_should_terminate_second_connection(true, 1));
+    TEST_ASSERT_FALSE(sdf_ble_companion_should_terminate_second_connection(true, 3));
+}
+
+void test_seed_intersection_abandoned_setup_bond_is_not_seeded(void) {
+    sdf_ble_companion_bond_state_t state;
+    sdf_ble_companion_bond_state_init(&state);
+    sdf_ble_companion_addr_t squatter = make_addr(9);
+
+    sdf_ble_companion_addr_t bonded[] = {squatter};
+    size_t seeded = sdf_ble_companion_allow_list_seed_intersection(
+        &state, bonded, 1, NULL, 0);
+
+    /* A bond made during an abandoned setup phase has no admission record,
+     * so it grants nothing across a reboot. */
+    TEST_ASSERT_EQUAL(0, seeded);
+    TEST_ASSERT_FALSE(sdf_ble_companion_bond_is_allow_listed(&state, &squatter));
+}
+
+void test_seed_intersection_admitted_and_bonded_peer_is_seeded(void) {
+    sdf_ble_companion_bond_state_t state;
+    sdf_ble_companion_bond_state_init(&state);
+    sdf_ble_companion_addr_t owner = make_addr(4);
+    sdf_ble_companion_addr_t other_owner = make_addr(5);
+
+    sdf_ble_companion_addr_t bonded[] = {owner};
+    sdf_ble_companion_addr_t admitted[] = {owner, other_owner};
+
+    size_t seeded = sdf_ble_companion_allow_list_seed_intersection(
+        &state, bonded, 1, admitted, 2);
+    TEST_ASSERT_EQUAL(1, seeded);
+    TEST_ASSERT_TRUE(sdf_ble_companion_bond_is_allow_listed(&state, &owner));
+}
+
+void test_seed_intersection_admission_without_bond_grants_nothing(void) {
+    sdf_ble_companion_bond_state_t state;
+    sdf_ble_companion_bond_state_init(&state);
+    sdf_ble_companion_addr_t ghost = make_addr(6);
+
+    sdf_ble_companion_addr_t bonded[SDF_BLE_COMPANION_BOND_TABLE_MAX] = {0};
+    sdf_ble_companion_addr_t admitted[] = {ghost};
+
+    /* Admission record exists but NimBLE forgot the keys - no resurrection. */
+    size_t seeded = sdf_ble_companion_allow_list_seed_intersection(
+        &state, bonded, 0, admitted, 1);
+    TEST_ASSERT_EQUAL(0, seeded);
+    TEST_ASSERT_FALSE(sdf_ble_companion_bond_is_allow_listed(&state, &ghost));
+}

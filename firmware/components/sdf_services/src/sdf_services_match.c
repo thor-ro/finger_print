@@ -304,22 +304,22 @@ void sdf_match_task(void *arg) {
         ESP_LOGI(TAG, "===============================================");
         ESP_LOGI(TAG, "DEVICE STATE: CLAIMED (%zu enrolled users)", count);
         ESP_LOGI(TAG, "===============================================");
-        ESP_LOGI(TAG, "AVAILABLE CONFIGURATION ACTIONS:");
-        ESP_LOGI(TAG, " -> Short press: Enroll a new standard user.");
-        ESP_LOGI(TAG, " -> Triple press: Enroll a new admin user.");
-        ESP_LOGI(TAG, " -> Double press: Pair to Nuki Smart Lock (Phase 2).");
-        ESP_LOGI(TAG, " -> Hold 3 sec: Join Zigbee Network (Phase 3).");
+        ESP_LOGI(TAG, "AVAILABLE CONFIGURATION ACTIONS (via Web Companion app):");
+        ESP_LOGI(TAG, " -> Enroll a new standard user or admin (Enrollment panel).");
+        ESP_LOGI(TAG, " -> Double press: open BLE Companion pairing window.");
+        ESP_LOGI(TAG, " -> Request Nuki re-pair / Zigbee join from the dashboard.");
         ESP_LOGI(TAG, " -> Hold 8 sec: Factory Reset.");
-        ESP_LOGI(TAG, "(All actions require your Admin fingerprint validation!)");
+        ESP_LOGI(TAG, "(App actions require your Admin fingerprint validation!)");
         ESP_LOGI(TAG, "===============================================");
     } else {
         ESP_LOGI(TAG, "===============================================");
         ESP_LOGI(TAG, "DEVICE STATE: UNCLAIMED (0 enrolled users)");
         ESP_LOGI(TAG, "===============================================");
-        ESP_LOGI(TAG, "NEXT STEP (PHASE 1):");
-        ESP_LOGI(TAG, " -> Short press Configuration Button once to begin Admin Enrollment.");
-        ESP_LOGI(TAG, " -> Place finger 3 times. LED flashes green after each scan.");
-        ESP_LOGI(TAG, " -> LED breathes WHITE until the button is pressed.");
+        ESP_LOGI(TAG, "NEXT STEP:");
+        ESP_LOGI(TAG, " -> Connect with the Web Companion app to run the setup wizard");
+        ESP_LOGI(TAG, "    (Admin enrolment, account registration, Nuki pairing).");
+        ESP_LOGI(TAG, " -> If advertising has lapsed, press the Configuration Button once");
+        ESP_LOGI(TAG, "    to re-arm the setup phase.");
         ESP_LOGI(TAG, "===============================================");
 
         led_breathe_white();

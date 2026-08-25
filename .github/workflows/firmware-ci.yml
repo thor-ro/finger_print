@@ -99,7 +99,17 @@ jobs:
           # never otherwise referenced by this workflow.
           set -o pipefail
           . "${IDF_PATH:-/opt/esp/idf}/export.sh" >/dev/null
-          scripts/run_ota_signature_gate.sh
+          # Tee the whole gate run (its internal tees pass stdout through) so
+          # the next step can assert the provisioned key was reused, exactly
+          # like build-firmware does.
+          scripts/run_ota_signature_gate.sh | tee /tmp/ota-signature-gate.log
+
+      - name: Confirm the provisioned signing key was reused
+        run: |
+          if grep -q "Generated a new signing key" /tmp/ota-signature-gate.log; then
+            echo "::error::Gate fixture generated a new signing key instead of reusing the one from the OTA_SIGNING_KEY secret. The staged images would not match what already-provisioned devices trust." >&2
+            exit 1
+          fi
 
   test-firmware:
     name: test-firmware (linux target — partial coverage, see AGENTS.md)

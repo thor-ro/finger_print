@@ -82,8 +82,6 @@ void sdf_services_execute_admin_action(sdf_services_admin_action_t action,
                                        sdf_services_admin_action_cb action_cb,
                                        void *action_ctx);
 void sdf_services_pulse_pending_action_led(sdf_services_admin_action_t action);
-bool sdf_services_try_bootstrap_admin_action(sdf_services_admin_action_t action,
-                                             sdf_services_admin_origin_t origin);
 
 /* Task declarations */
 void sdf_match_task(void *arg);
@@ -105,12 +103,32 @@ void sdf_enroll_task_deinit_queue(void);
 esp_err_t sdf_button_init(void);
 esp_err_t sdf_button_deinit(void);
 
+/* Setup-phase button dispatch: executes an admin action directly via the
+ * configured admin_action_cb without entering the pending-admin-action
+ * wait. Used by the factory-reset gesture (no Admin fingerprint required -
+ * see the device-setup-phase spec). */
+void sdf_button_execute_direct(sdf_services_admin_action_t action);
+
+/* Setup-phase module (sdf_services_setup.c) - host-test hooks. */
+void sdf_services_setup_phase_reset_for_test(void);
+void sdf_services_setup_phase_boot_arm(void);
+/* Time-injected cores of the public notifications, so host tests can drive
+ * the arm window / deadline / idle clocks deterministically. */
+void sdf_services_setup_phase_arm_at(int64_t now_us);
+void sdf_services_setup_phase_notify_connected_at(uint16_t conn_handle,
+                                                  int64_t now_us);
+void sdf_services_setup_phase_notify_disconnected_at(int64_t now_us);
+void sdf_services_setup_phase_notify_gatt_activity_at(int64_t now_us);
+
+/* Zeros the in-RAM enrolled-user cache and persists the zeroed record to
+ * NVS (sdf_services.c). Used by the setup-phase timeout wipe, which cannot
+ * rely on a whole-flash erase having already covered the persisted record. */
+void sdf_services_reset_enrolled_user_cache(void);
+
 /* Admin action dispatch, exposed so host (linux target) unit tests can drive it
  * directly without real hardware - see test_sdf_services.c. */
-sdf_services_admin_action_t sdf_button_resolve_single_click_action(void);
 void sdf_button_dispatch_action(sdf_services_admin_action_t action);
-void sdf_services_dispatch_admin_action(sdf_services_admin_action_t action,
-                                        sdf_services_admin_origin_t origin);
+void sdf_services_dispatch_admin_action(sdf_services_admin_action_t action);
 
 /* Task start/stop */
 esp_err_t sdf_services_start_tasks(void);

@@ -36,6 +36,10 @@ typedef enum {
     /* Web Companion */
     SDF_EVENT_ROUTER_WEB_REG_AUTH_RESULT,
 
+    /* Setup phase (device-setup-phase): emitted by sdf_services' setup
+     * module when a timer or the button requires a BLE-side action. */
+    SDF_EVENT_ROUTER_SETUP_PHASE,
+
     /* Button */
     SDF_EVENT_ROUTER_BUTTON_PRESS,
     SDF_EVENT_ROUTER_BUTTON_LONG_PRESS,
@@ -90,7 +94,6 @@ typedef struct {
 
 typedef struct {
     uint8_t action;
-    uint8_t origin;
 } sdf_event_router_admin_payload_t;
 
 typedef struct {
@@ -135,6 +138,25 @@ typedef struct {
     bool authorized;
 } sdf_event_router_web_reg_auth_result_payload_t;
 
+/* Setup-phase actions the BLE Companion Service executes on receipt:
+ * - TIMEOUT: the arm window or setup deadline expired. Clear all persisted
+ *   bonds, terminate the setup connection, stop advertising (the phase is
+ *   disarmed - the device-side wipe already ran before this event).
+ * - IDLE_DROP: the connection idle timer expired. Terminate only
+ *   conn_handle and re-arm advertising; the deadline and all state stay.
+ * - RECLAIM: button press. Terminate the current setup connection (if any)
+ *   and re-arm unfiltered advertising; both timers were restarted. */
+typedef enum {
+    SDF_EVENT_ROUTER_SETUP_PHASE_ACTION_TIMEOUT = 0,
+    SDF_EVENT_ROUTER_SETUP_PHASE_ACTION_IDLE_DROP = 1,
+    SDF_EVENT_ROUTER_SETUP_PHASE_ACTION_RECLAIM = 2,
+} sdf_event_router_setup_phase_action_t;
+
+typedef struct {
+    uint8_t action;
+    uint16_t conn_handle;
+} sdf_event_router_setup_phase_payload_t;
+
 typedef enum {
     SDF_EVENT_ROUTER_BUTTON_PRESS_SINGLE = 1,
     SDF_EVENT_ROUTER_BUTTON_PRESS_DOUBLE = 2,
@@ -177,6 +199,7 @@ typedef struct {
         sdf_event_router_admin_auth_payload_t admin_auth;
         sdf_event_router_admin_action_complete_payload_t admin_action_complete;
         sdf_event_router_web_reg_auth_result_payload_t web_reg_auth_result;
+        sdf_event_router_setup_phase_payload_t setup_phase;
         sdf_event_router_button_payload_t button;
         sdf_event_router_audit_payload_t audit;
     } payload;

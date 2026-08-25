@@ -125,42 +125,49 @@ static void sdf_admin_task_emit_action_complete(sdf_services_admin_action_t acti
 }
 
 /**
- * @brief Resolve single-click's action dynamically at press consumption time based on
- * the device's current setup state, per the "State-Dependent Single-Click
- * Setup Action" requirement:
- *   - Unclaimed (no enrolled users)              -> ENROLL
- *   - Claimed, Nuki not yet paired                -> NUKI_PAIR
- *   - Claimed, Nuki already paired (setup complete) -> ENROLL
+ * @brief Executes an admin action directly via the configured admin_action_cb,
+ * without entering the pending-admin-action wait. Used by the factory-reset
+ * gesture: factory reset is the recovery path for a lost or unreadable Admin
+ * fingerprint, so gating it on the fingerprint it recovers from would make it
+ * unreachable (device-setup-phase spec). No origin plumbing exists anymore -
+ * every other request path follows the ordinary pending-action flow.
  */
-sdf_services_admin_action_t sdf_button_resolve_single_click_action(void) {
-    sdf_services_setup_state_t setup_state = sdf_services_get_setup_state();
+void sdf_button_execute_direct(sdf_services_admin_action_t action) {
+    ESP_LOGI(TAG, "Admin action direct execution: action=%d", (int)action);
 
-    if (setup_state == SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE) {
-        return SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR;
+    sdf_services_state_t *s = sdf_services_state();
+    if (s == NULL || s->lock == NULL) {
+        return;
     }
-    return SDF_SERVICES_ADMIN_ACTION_ENROLL;
+
+    if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+        return;
+    }
+
+    sdf_services_admin_action_cb action_cb = s->config.admin_action_cb;
+    void *action_ctx = s->config.admin_action_ctx;
+    xSemaphoreGive(s->lock);
+
+    if (action_cb != NULL) {
+        action_cb(action_ctx, action);
+    }
 }
 
 /**
- * @brief Shared dispatch body for a resolved admin action, parameterized by
- * request origin (local physical vs remote).
+ * @brief Shared dispatch body for a remotely-requested admin action.
  *
- * Consults sdf_services_try_bootstrap_admin_action() passing the specified origin
- * to determine whether the action can bypass admin-fingerprint authorization
- * (e.g. on an unclaimed device with 0 enrolled users from local physical interaction).
- * If not bypassed, sets the pending admin action and pulses the pending action LED
- * awaiting admin fingerprint.
+ * Sets the pending admin action and pulses the pending action LED awaiting
+ * the authorizing Admin fingerprint. Every admin-action request path follows
+ * this ordinary authorization flow without exception: the old unauthenticated
+ * bootstrap bypass is gone (first-time setup runs through the companion-app
+ * wizard over the setup phase, and factory reset executes directly at its
+ * gesture).
  *
  * Not static: declared in sdf_services_internal.h so it can be driven
  * directly by host (linux target) unit tests - see test_sdf_services.c.
  */
-void sdf_services_dispatch_admin_action(sdf_services_admin_action_t action,
-                                        sdf_services_admin_origin_t origin) {
-    ESP_LOGI(TAG, "Admin action dispatch: action=%d origin=%d", (int)action, (int)origin);
-
-    if (sdf_services_try_bootstrap_admin_action(action, origin)) {
-        return;
-    }
+void sdf_services_dispatch_admin_action(sdf_services_admin_action_t action) {
+    ESP_LOGI(TAG, "Admin action dispatch: action=%d", (int)action);
 
     sdf_services_state_t *s = sdf_services_state();
     if (s == NULL || s->lock == NULL) {
@@ -185,7 +192,7 @@ void sdf_services_dispatch_admin_action(sdf_services_admin_action_t action,
 }
 
 void sdf_button_dispatch_action(sdf_services_admin_action_t action) {
-    sdf_services_dispatch_admin_action(action, SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL);
+    sdf_services_dispatch_admin_action(action);
 }
 
 void sdf_admin_task(void *arg) {
@@ -226,34 +233,56 @@ void sdf_admin_task(void *arg) {
         if (xQueueReceive(s_admin_state.event_queue, &event, pdMS_TO_TICKS(wait_ms)) == pdTRUE) {
             switch (event.type) {
                 case SDF_EVENT_ROUTER_BUTTON_PRESS: {
-                    sdf_services_admin_action_t action = SDF_SERVICES_ADMIN_ACTION_NONE;
+                    /* Long press: factory reset executes directly, with no
+                     * pending-admin-action wait and no Admin fingerprint -
+                     * it is the recovery path for a lost/unreadable Admin
+                     * fingerprint (device-setup-phase spec). */
+                    if (event.payload.button.press_type ==
+                        SDF_EVENT_ROUTER_BUTTON_PRESS_LONG) {
+                        led_pulse_red();
+                        sdf_button_execute_direct(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
+                        break;
+                    }
+
+                    /* While the device is unclaimed (setup phase armed or
+                     * lapsed), every non-long press is the reclaim-and-re-arm
+                     * gesture: terminate the current setup connection, re-arm
+                     * advertising, restart both timers. No pending admin
+                     * action is ever set - no button gesture reaches admin
+                     * actions during the setup phase. */
+                    if (sdf_services_setup_phase_owns_buttons()) {
+                        sdf_services_setup_phase_button_reclaim();
+                        break;
+                    }
+
                     switch (event.payload.button.press_type) {
-                        case SDF_EVENT_ROUTER_BUTTON_PRESS_SINGLE:
-                            action = sdf_button_resolve_single_click_action();
-                            break;
                         case SDF_EVENT_ROUTER_BUTTON_PRESS_DOUBLE:
-                            action = SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW;
+                            /* Double-click requests the BLE Companion pairing
+                             * window; bound only once the setup-completion
+                             * latch is set (checked above via owns_buttons).
+                             * Single-click has no action left to resolve -
+                             * first-time setup runs through the companion-app
+                             * wizard, so it does nothing. */
+                            sdf_button_dispatch_action(
+                                SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
                             break;
-                        case SDF_EVENT_ROUTER_BUTTON_PRESS_LONG:
-                            action = SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET;
+                        case SDF_EVENT_ROUTER_BUTTON_PRESS_SINGLE:
+                            ESP_LOGI(TAG,
+                                     "Single click ignored (setup is app-guided; "
+                                     "no button setup action exists)");
                             break;
                         default:
                             ESP_LOGW(TAG, "Unknown button press type: %d", (int)event.payload.button.press_type);
                             break;
                     }
-                    if (action != SDF_SERVICES_ADMIN_ACTION_NONE) {
-                        sdf_button_dispatch_action(action);
-                    }
                     break;
                 }
 
                 case SDF_EVENT_ROUTER_ADMIN_ACTION_REQUEST: {
-                    ESP_LOGI(TAG, "Admin action request: %u (origin %u)",
-                             (unsigned)event.payload.admin.action,
-                             (unsigned)event.payload.admin.origin);
+                    ESP_LOGI(TAG, "Admin action request: %u",
+                             (unsigned)event.payload.admin.action);
                     sdf_services_dispatch_admin_action(
-                        (sdf_services_admin_action_t)event.payload.admin.action,
-                        (sdf_services_admin_origin_t)event.payload.admin.origin);
+                        (sdf_services_admin_action_t)event.payload.admin.action);
                     break;
                 }
 
@@ -274,6 +303,20 @@ void sdf_admin_task(void *arg) {
                 default:
                     break;
             }
+        }
+
+        /* Setup-phase timer sweep. The loop wakes at least once a second
+         * (SDF_ADMIN_IDLE_WAIT_CAP_MS), which is ample precision for the
+         * multi-minute arm window, deadline and idle timers. */
+        switch (sdf_services_setup_phase_poll(esp_timer_get_time())) {
+            case SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP:
+                sdf_services_setup_phase_timeout_wipe();
+                break;
+            case SDF_SERVICES_SETUP_POLL_DROP_IDLE_CONN:
+                sdf_services_setup_phase_idle_drop();
+                break;
+            case SDF_SERVICES_SETUP_POLL_NONE:
+                break;
         }
 
         /* Check for admin action timeout */

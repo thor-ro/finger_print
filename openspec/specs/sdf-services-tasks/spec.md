@@ -558,32 +558,12 @@ The `sdf_admin_task` and `sdf_services` SHALL support an "Admin Auth" state wher
 - **THEN** the function reports the login as invalid
 - **AND** the comparison does not use an early-exit algorithm that could leak which byte first differed
 
-### Requirement: State-Dependent Single-Click Setup Action
-The `sdf_button_task` SHALL determine the action triggered by a single-click gesture dynamically at press time based on the device's current setup state, rather than from a fixed static gesture-to-action mapping. Setup state SHALL be derived from existing persisted state (enrolled user count, and whether `sdf_storage_nuki_load()` succeeds), not from a new dedicated flag.
-
-#### Scenario: Single-click on an unclaimed device
-- **WHEN** a single-click occurs
-- **AND** the device has zero enrolled users
-- **THEN** the system triggers `SDF_SERVICES_ADMIN_ACTION_ENROLL`
-
-#### Scenario: Single-click on a claimed device with setup incomplete
-- **WHEN** a single-click occurs
-- **AND** the device has at least one enrolled user
-- **AND** `sdf_storage_nuki_load()` does not report previously persisted Nuki credentials
-- **THEN** the system triggers `SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR`
-- **AND** the action follows the existing admin-fingerprint pending-action authorization flow, since an admin necessarily already exists in this state
-
-#### Scenario: Single-click on a claimed device with setup complete
-- **WHEN** a single-click occurs
-- **AND** the device has at least one enrolled user
-- **AND** `sdf_storage_nuki_load()` reports previously persisted Nuki credentials
-- **THEN** the system triggers `SDF_SERVICES_ADMIN_ACTION_ENROLL`
-
 ### Requirement: Double-Press Requests BLE Companion Pairing Window
-The button task SHALL bind `BUTTON_DOUBLE_CLICK` to request the BLE Companion Service's admin-fingerprint-gated device pairing window, following the same `pending_admin_action` authorization flow used by every other admin action.
+The button task SHALL bind `BUTTON_DOUBLE_CLICK` to request the BLE Companion Service's admin-fingerprint-gated device pairing window, following the same `pending_admin_action` authorization flow used by every other admin action. This binding SHALL apply only once the device's setup-completion latch is set. While the device is in the setup phase, a button press SHALL instead reclaim the setup connection and re-arm the setup phase, and SHALL set no pending admin action.
 
 #### Scenario: Double-click requests the pairing window
 - **WHEN** a double-click occurs on the physical button
+- **AND** the setup-completion latch is set
 - **AND** no other admin action is currently pending
 - **THEN** the system sets `pending_admin_action` to request the BLE Companion pairing window
 - **AND** awaits an Admin fingerprint scan within the pending-action timeout, per the existing admin-fingerprint pending-action pattern
@@ -593,18 +573,10 @@ The button task SHALL bind `BUTTON_DOUBLE_CLICK` to request the BLE Companion Se
 - **AND** `pending_admin_action` is already set to a different action
 - **THEN** the double-click SHALL NOT change the pending action
 
-### Requirement: Nuki Pairing Unreachable By Button After Setup Complete
-Once setup is complete (Nuki credentials persisted), no button gesture SHALL be capable of re-triggering `SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR`. Re-pairing after setup completion SHALL only be reachable via a full factory reset (which clears persisted Nuki credentials, returning the device to the setup-incomplete state) or via an authenticated BLE Companion trigger.
-
-#### Scenario: Single-click after setup complete does not re-trigger pairing
-- **WHEN** setup is already complete
-- **AND** a single-click occurs
-- **THEN** the system triggers `SDF_SERVICES_ADMIN_ACTION_ENROLL`, not `NUKI_PAIR`
-
-#### Scenario: Factory reset re-opens the Nuki pairing window
-- **WHEN** a factory reset completes
-- **THEN** persisted Nuki credentials are cleared
-- **AND** the next single-click, after an admin is re-enrolled, triggers `SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR` again
+#### Scenario: Double-click during the setup phase does not request a pairing window
+- **WHEN** a double-click occurs while the setup-completion latch is unset
+- **THEN** no pairing window is requested and no pending admin action is set
+- **AND** the press is handled as a setup-phase reclaim/re-arm
 
 ### Requirement: Admin-Only Actions Not Bound To Physical Button Gestures
 The button task SHALL NOT bind any gesture to `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` or `SDF_SERVICES_ADMIN_ACTION_ZB_JOIN`. These actions SHALL only be reachable via an authenticated BLE Companion Service request.
@@ -618,55 +590,6 @@ The button task SHALL NOT bind any gesture to `SDF_SERVICES_ADMIN_ACTION_ENROLL_
 - **WHEN** the button is held for 3 seconds
 - **THEN** no admin action is triggered
 - **AND** `pending_admin_action` state is unaffected
-
-### Requirement: Simplified Pre-Enrollment Bootstrap Branch
-On an unclaimed device (zero enrolled users), the admin-action authorization path's immediate-execution bootstrap branch SHALL route `SDF_SERVICES_ADMIN_ACTION_ENROLL` directly into local enrollment, and SHALL route every other button-reachable action into the configured admin-action execution callback. `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` SHALL NOT reach this path at all, since it is no longer bound to any button gesture.
-
-#### Scenario: Unclaimed device, single-click still enrolls immediately
-- **WHEN** a single-click occurs
-- **AND** the device has zero enrolled users
-- **THEN** the system starts enrollment immediately, without requiring admin authorization
-
-#### Scenario: Unclaimed device, a non-enroll button action executes immediately
-- **WHEN** a button gesture bound to an admin action other than `SDF_SERVICES_ADMIN_ACTION_ENROLL` occurs
-- **AND** the device has zero enrolled users
-- **THEN** the action is executed immediately via the admin-action execution callback, without admin-fingerprint authorization
-- **AND** no pending admin action is left set
-
-#### Scenario: Admin-only action cannot reach the bootstrap branch
-- **WHEN** the device has zero enrolled users
-- **THEN** `SDF_SERVICES_ADMIN_ACTION_ENROLL_ADMIN` is not reachable by any button gesture and therefore never enters the bootstrap branch
-
-### Requirement: Unauthenticated Bootstrap Bypass Is Restricted To Local Physical Origin
-The zero-enrolled-users bootstrap bypass — executing an admin action without admin-fingerprint authorization because no admin exists to give it — SHALL be granted only to requests originating from a physical interaction with the device. A remotely-originated admin action request SHALL NOT be granted the bypass, regardless of how many users are enrolled.
-
-#### Scenario: Local physical request on an unclaimed device
-- **WHEN** an admin action is requested by physical interaction with the device
-- **AND** the device has zero enrolled users
-- **THEN** the action executes immediately without admin-fingerprint authorization
-
-#### Scenario: Remote request on an unclaimed device
-- **WHEN** an admin action is requested remotely
-- **AND** the device has zero enrolled users
-- **THEN** the request SHALL NOT execute without authorization
-- **AND** it follows the ordinary admin-fingerprint pending-action flow, which cannot be satisfied while no admin exists
-
-#### Scenario: Local physical request on a claimed device
-- **WHEN** an admin action is requested by physical interaction with the device
-- **AND** the device has at least one enrolled user
-- **THEN** the bypass does not apply and the request follows the ordinary admin-fingerprint pending-action flow
-
-### Requirement: Bootstrap Bypass Decision Is Single-Sited
-The decision of whether a given admin action request may execute without admin-fingerprint authorization SHALL be made in one place, consulted by every path that can set or execute an admin action, rather than being reimplemented per request path.
-
-#### Scenario: A new request path is introduced
-- **WHEN** a new path for requesting an admin action is added
-- **THEN** it obtains its authorization decision from the same single decision point as every existing path
-- **AND** it cannot grant the bypass without passing an explicit request origin to that decision point
-
-#### Scenario: Bypass is taken
-- **WHEN** the single decision point grants the bootstrap bypass
-- **THEN** any previously pending admin action state is cleared before the action executes, so the bypassed action does not leave a stale pending action behind
 
 ### Requirement: Pending Admin Action LED Indication Is Path-Independent
 When an admin action becomes pending (awaiting admin-fingerprint authorization), the system SHALL produce the LED indication assigned to that action, and that indication SHALL be identical regardless of which request path caused the action to become pending (physical button gesture, event-router admin-action request, or direct authenticated request).

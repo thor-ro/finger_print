@@ -75,6 +75,17 @@
 #define SDF_BLE_COMPANION_CONFIG_ACTION_NUKI_REPAIR "nuki_repair"
 #define SDF_BLE_COMPANION_CONFIG_ACTION_ENROLL_ADMIN "enroll_admin"
 #define SDF_BLE_COMPANION_CONFIG_ACTION_ZB_JOIN "zb_join"
+/* Explicit setup-completion request (device-setup-phase spec): accepted only
+ * on an authenticated session, which Config's access gate already enforces.
+ * Prerequisites are checked by sdf_app's handler, which reports the first
+ * outstanding wizard step back via sdf_ble_companion_reply_setup_complete(). */
+#define SDF_BLE_COMPANION_CONFIG_ACTION_FINISH_SETUP "finish_setup"
+/* Initial Nuki pairing, reachable only while the setup-completion latch is
+ * unset: the wizard's Nuki step uses this instead of nuki_repair (which
+ * stays gated on setup being complete). The time-bounded, singly-occupied
+ * setup phase is the authorization - no separate fingerprint scan exists
+ * yet. */
+#define SDF_BLE_COMPANION_CONFIG_ACTION_SETUP_NUKI_PAIR "setup_nuki_pair"
 
 #define SDF_BLE_COMPANION_SVC_UUID128 \
     0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
@@ -95,6 +106,10 @@
 #define SDF_BLE_COMPANION_OTA_UUID128 \
     0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
     0x8a, 0x4f, 0x2b, 0x5c, 0x04, 0x00, 0x5a, 0x7d
+
+#define SDF_BLE_COMPANION_SETUP_STATE_UUID128 \
+    0x6f, 0x5e, 0x4d, 0x3c, 0x2b, 0x1a, 0x3d, 0x9e, \
+    0x8a, 0x4f, 0x2b, 0x5c, 0x05, 0x00, 0x5a, 0x7d
 
 /* Default-mode advertising: sparse and allow-list-filtered (see
  * sdf_ble_companion_start_advertising_sparse() and design.md "Sparse,
@@ -133,6 +148,7 @@ static uint16_t s_auth_val_handle = 0;
 static uint16_t s_config_val_handle = 0;
 static uint16_t s_enroll_val_handle = 0;
 static uint16_t s_ota_val_handle = 0;
+static uint16_t s_setup_state_val_handle = 0;
 
 
 
@@ -151,6 +167,7 @@ static void sdf_ble_companion_restart_advertising(void);
 
 void sdf_ble_companion_start_advertising_sparse(void);
 void sdf_ble_companion_start_advertising_pairing(void);
+void sdf_ble_companion_start_advertising_setup(void);
 
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_conn(uint16_t conn_handle);
 static sdf_ble_companion_connection_t *sdf_ble_companion_get_free_conn(void);
@@ -265,6 +282,10 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
     if (!s_initialized) {
         return BLE_ATT_ERR_UNLIKELY;
     }
+
+    /* Any GATT access counts as activity for the setup phase's connection
+     * idle timer. */
+    sdf_services_setup_phase_notify_gatt_activity();
 
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "auth_access: lock contention");
@@ -457,6 +478,16 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                         if (rc != 0) {
                             ESP_LOGW(TAG, "ble_store_util_delete_peer failed: %d", rc);
                         }
+                        /* Revoking trust clears both records: without this,
+                         * a surviving admission record would silently
+                         * re-admit the evicted peer if it re-bonded later
+                         * (ble-companion-admission). */
+                        esp_err_t adm_err = sdf_storage_admission_remove(
+                            identity.type, identity.val);
+                        if (adm_err != ESP_OK) {
+                            ESP_LOGW(TAG, "admission_remove failed: %s",
+                                     esp_err_to_name(adm_err));
+                        }
                         sdf_ble_companion_push_allow_list();
                         ble_gap_terminate(conn_handle, BLE_ERR_REM_USER_CONN_TERM);
                     }
@@ -567,6 +598,25 @@ static bool sdf_ble_companion_parse_admin_action_request(
     return matched;
 }
 
+/* Returns true if `data` is exactly `{"action":"finish_setup"}` - the
+ * explicit setup-completion request. Checked before the admin-action parse
+ * because it is not an admin action: no fingerprint gate, but strictly
+ * authenticated-session-only (Config's access callback already guarantees
+ * that). */
+static bool sdf_ble_companion_is_finish_setup_request(const uint8_t *data,
+                                                       size_t len) {
+    static const char req[] = "{\"action\":\"" SDF_BLE_COMPANION_CONFIG_ACTION_FINISH_SETUP "\"}";
+    return len == sizeof(req) - 1 &&
+           memcmp(data, req, sizeof(req) - 1) == 0;
+}
+
+static bool sdf_ble_companion_is_setup_nuki_pair_request(const uint8_t *data,
+                                                          size_t len) {
+    static const char req[] = "{\"action\":\"" SDF_BLE_COMPANION_CONFIG_ACTION_SETUP_NUKI_PAIR "\"}";
+    return len == sizeof(req) - 1 &&
+           memcmp(data, req, sizeof(req) - 1) == 0;
+}
+
 /* Post-staging dispatch for a characteristic write. Runs with s_lock
  * released, `data` (len bytes) pointing at the staged payload and `cb` a
  * snapshot of s_callbacks taken under the lock. Returns the ATT status. */
@@ -613,19 +663,36 @@ static int sdf_ble_companion_stage_write(struct os_mbuf *om, size_t len,
 static int sdf_ble_companion_dispatch_config_write(
     uint16_t conn_handle, const sdf_ble_companion_callbacks_t *cb,
     const uint8_t *data, size_t len) {
+    if (sdf_ble_companion_is_setup_nuki_pair_request(data, len)) {
+        if (cb->on_setup_nuki_pair) {
+            cb->on_setup_nuki_pair(cb->ctx, conn_handle);
+        }
+        return 0;
+    }
+
+    if (sdf_ble_companion_is_finish_setup_request(data, len)) {
+        /* Explicit setup completion. Config's authenticated-only gate is
+         * the acceptance condition; prerequisites are checked by sdf_app,
+         * which reports any outstanding step back to this connection. */
+        if (cb->on_setup_complete) {
+            cb->on_setup_complete(cb->ctx, conn_handle);
+        }
+        return 0;
+    }
+
     sdf_services_admin_action_t requested_action;
     if (sdf_ble_companion_parse_admin_action_request(data, len, &requested_action)) {
-        /* NUKI_REPAIR is only reachable once initial Nuki setup is already
-         * complete - initial pairing happens via the physical button flow,
-         * not this trigger. Rejected synchronously (no pending state
-         * entered), matching how an unauthenticated write is already
-         * rejected synchronously by the caller. ENROLL_ADMIN/ZB_JOIN have no
-         * equivalent precondition: an authenticated companion session
-         * already implies an Admin fingerprint exists (it had to authorize
-         * this session's own WEB_REG_AUTH), so there's no "not set up yet"
-         * state to guard against for those two. */
+        /* NUKI_REPAIR is only reachable once setup is complete - initial
+         * pairing happens in the companion-app wizard, not this trigger.
+         * Rejected synchronously (no pending state entered), matching how
+         * an unauthenticated write is already rejected synchronously by
+         * the caller. ENROLL_ADMIN/ZB_JOIN have no equivalent precondition:
+         * an authenticated companion session already implies an Admin
+         * fingerprint exists (it had to authorize this session's own
+         * WEB_REG_AUTH), so there's no "not set up yet" state to guard
+         * against for those two. */
         if (requested_action == SDF_SERVICES_ADMIN_ACTION_NUKI_REPAIR &&
-            sdf_services_get_setup_state() != SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE) {
+            sdf_services_get_setup_state() != SDF_SERVICES_SETUP_STATE_COMPLETE) {
             return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
         }
         if (cb->on_admin_action_request) {
@@ -673,6 +740,10 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
     if (!s_initialized) {
         return BLE_ATT_ERR_UNLIKELY;
     }
+
+    /* Any GATT access counts as activity for the setup phase's connection
+     * idle timer. */
+    sdf_services_setup_phase_notify_gatt_activity();
 
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "config_access: lock contention");
@@ -750,6 +821,10 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
         return BLE_ATT_ERR_UNLIKELY;
     }
 
+    /* Any GATT access counts as activity for the setup phase's connection
+     * idle timer. */
+    sdf_services_setup_phase_notify_gatt_activity();
+
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "enroll_access: lock contention");
         return BLE_ATT_ERR_UNLIKELY;
@@ -794,6 +869,10 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
         return BLE_ATT_ERR_UNLIKELY;
     }
 
+    /* Any GATT access counts as activity for the setup phase's connection
+     * idle timer. */
+    sdf_services_setup_phase_notify_gatt_activity();
+
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) != pdTRUE) {
         ESP_LOGW(TAG, "ota_access: lock contention");
         return BLE_ATT_ERR_UNLIKELY;
@@ -825,6 +904,39 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
     }
     xSemaphoreGive(s_lock);
     return BLE_ATT_ERR_UNLIKELY;
+}
+
+/* Setup-state characteristic: read-only, readable on an encrypted but
+ * unauthenticated link (READ_ENC without an authentication flag - Just
+ * Works pairing cannot satisfy MITM-authenticated access, and the wizard
+ * must read setup state before any account exists). Deliberately left
+ * non-NOTIFY so the persisted-CCCD capacity requirement stays untouched.
+ *
+ * Wire format: 1 byte, values mirroring sdf_services_setup_state_t:
+ *   0 = setup not started, 1 = Admin enrolled, 2 = account registered,
+ *   3 = Nuki paired,       4 = setup complete.
+ * Exposing nothing but this enumeration keeps the auth gate on the Config/
+ * Enrollment/OTA characteristics intact. */
+static int sdf_ble_companion_setup_state_access(uint16_t conn_handle,
+                                                 uint16_t attr_handle,
+                                                 struct ble_gatt_access_ctxt *ctxt,
+                                                 void *arg) {
+    (void)conn_handle;
+    (void)attr_handle;
+    (void)arg;
+
+    /* See the equivalent guard in sdf_ble_companion_auth_access(). */
+    if (!s_initialized) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    if (ctxt->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+        return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
+    }
+
+    uint8_t state = (uint8_t)sdf_services_get_setup_state();
+    int rc = os_mbuf_append(ctxt->om, &state, sizeof(state));
+    return rc == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
 }
 
 static const struct ble_gatt_chr_def s_characteristics[] = {
@@ -880,6 +992,15 @@ static const struct ble_gatt_chr_def s_characteristics[] = {
                  BLE_GATT_CHR_F_NOTIFY,
         .val_handle = &s_ota_val_handle,
     },
+    {
+        .uuid = BLE_UUID128_DECLARE(SDF_BLE_COMPANION_SETUP_STATE_UUID128),
+        .access_cb = sdf_ble_companion_setup_state_access,
+        /* Readable on an encrypted-but-unauthenticated link: the wizard
+         * needs setup state before any account (and so before login)
+         * exists. No WRITE and no NOTIFY - see the callback's comment. */
+        .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC,
+        .val_handle = &s_setup_state_val_handle,
+    },
     { 0 }
 };
 
@@ -904,25 +1025,64 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
             if (event->connect.status == 0) {
                 ESP_LOGI(TAG, "Connected, conn_handle=%d", event->connect.conn_handle);
 
+                /* Setup-phase single-connection cap, enforced at connect
+                 * rather than relying on advertising not being re-armed
+                 * while a link is up (device-setup-phase spec). While the
+                 * latch is unset, any second inbound connection is
+                 * terminated immediately; the first client's session is
+                 * unaffected. Once the latch is set the ordinary
+                 * MAX_CONNECTIONS slot limit applies again. */
+                bool setup_complete = false;
+                sdf_storage_setup_complete_load(&setup_complete);
+
+                /* Count peers and claim the slot under ONE acquisition. Taking
+                 * the lock twice let the cap fail open: if the counting take
+                 * timed out, connected_others stayed 0, the cap was skipped,
+                 * and a second take that then succeeded would admit a second
+                 * concurrent setup connection. The cap is an invariant the
+                 * spec requires to be enforced, so it must not be decided on
+                 * a count that a timeout can silently zero. */
+                bool cap_exceeded = false;
                 bool slot_claimed = false;
                 if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_free_conn();
-                    if (conn) {
-                        /* Full zero, not a field-by-field reset: this slot may be
-                         * reused from a previous connection (see the equivalent
-                         * memset in BLE_GAP_EVENT_DISCONNECT below), and stale
-                         * config_value/enroll_value/ota_value/pending_login_challenge
-                         * from that prior session must not be readable by whoever
-                         * ends up authenticated on this new one. */
-                        memset(conn, 0, sizeof(*conn));
-                        conn->conn_handle = event->connect.conn_handle;
-                        conn->connected = true;
-                        conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
-                        slot_claimed = true;
+                    size_t connected_others = 0;
+                    for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+                        if (s_connections[i].connected &&
+                            s_connections[i].conn_handle != event->connect.conn_handle) {
+                            connected_others++;
+                        }
+                    }
+                    cap_exceeded = sdf_ble_companion_should_terminate_second_connection(
+                        setup_complete, connected_others);
+                    if (!cap_exceeded) {
+                        sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_free_conn();
+                        if (conn) {
+                            /* Full zero, not a field-by-field reset: this slot may be
+                             * reused from a previous connection (see the equivalent
+                             * memset in BLE_GAP_EVENT_DISCONNECT below), and stale
+                             * config_value/enroll_value/ota_value/pending_login_challenge
+                             * from that prior session must not be readable by whoever
+                             * ends up authenticated on this new one. */
+                            memset(conn, 0, sizeof(*conn));
+                            conn->conn_handle = event->connect.conn_handle;
+                            conn->connected = true;
+                            conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
+                            slot_claimed = true;
+                        }
                     }
                     xSemaphoreGive(s_lock);
                 } else {
                     ESP_LOGW(TAG, "gap_event connect: lock contention");
+                }
+
+                if (cap_exceeded) {
+                    ESP_LOGW(TAG,
+                             "Setup phase already has a client; terminating second "
+                             "inbound connection %d",
+                             event->connect.conn_handle);
+                    ble_gap_terminate(event->connect.conn_handle,
+                                      BLE_ERR_REM_USER_CONN_TERM);
+                    break;
                 }
 
                 if (!slot_claimed) {
@@ -941,6 +1101,14 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
                 int rc = ble_gattc_exchange_mtu(event->connect.conn_handle, NULL, NULL);
                 if (rc != 0) {
                     ESP_LOGW(TAG, "Failed to request MTU exchange: %d", rc);
+                }
+
+                /* The setup deadline starts at the first accepted
+                 * connection during the setup phase. */
+                sdf_storage_setup_complete_load(&setup_complete);
+                if (!setup_complete) {
+                    sdf_services_setup_phase_notify_connected(
+                        event->connect.conn_handle);
                 }
             } else {
                 ESP_LOGW(TAG, "Connection failed: %d", event->connect.status);
@@ -967,6 +1135,8 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
             } else {
                 ESP_LOGW(TAG, "gap_event disconnect: lock contention");
             }
+            sdf_services_setup_phase_notify_disconnected(
+                event->disconnect.conn.conn_handle);
             sdf_ble_companion_restart_advertising();
             break;
         }
@@ -1022,6 +1192,16 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
                          "BLE Companion pairing window: device admitted to allow "
                          "list, conn_handle=%d",
                          event->enc_change.conn_handle);
+                /* Persist the admission record: allow-list trust was
+                 * deliberately granted here, so it must survive a reboot as
+                 * an explicit fact rather than being re-inferred from the
+                 * bond NimBLE just persisted (ble-companion-admission). */
+                esp_err_t adm_err = sdf_storage_admission_add(identity.type,
+                                                              identity.val);
+                if (adm_err != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to persist admission record: %s",
+                             esp_err_to_name(adm_err));
+                }
                 esp_timer_stop(s_pairing_window_timer);
                 sdf_ble_companion_push_allow_list();
             }
@@ -1033,21 +1213,16 @@ static int sdf_ble_companion_gap_event(struct ble_gap_event *event, void *arg) {
     return 0;
 }
 
-/* Re-populates the allow list from NimBLE's own NVS-persisted bond store so a
- * reboot doesn't strand every already-paired companion device behind the
- * filtered-advertising default (see sdf_ble_companion_bond_state.h). Only
- * allow-list *membership* is restored - failed-login counters intentionally
- * start at zero every boot, they are never persisted to NVS (see design.md
- * "Decisions").
+/* Re-populates the allow list from the intersection of persisted admission
+ * records (sdf_storage) and NimBLE's own NVS-persisted bond store, so a
+ * reboot doesn't strand admitted companions behind filtered advertising
+ * while never trusting a bond that wasn't deliberately admitted
+ * (ble-companion-admission spec). Only allow-list *membership* is restored -
+ * failed-login counters intentionally start at zero every boot.
  *
  * Runs from the host-sync hook rather than sdf_ble_companion_init(), because
  * ble_store_util_bonded_peers() is a bond *store read*: it takes ble_hs_lock()
- * and so needs a host that exists. sdf_ble_companion_init() runs before
- * nimble_port_init() (sdf_app.c:1810 vs 1865), where ble_hs_mutex is still
- * zero-initialized, and NimBLE gives no error return for that case - it
- * dereferences the null handle and panics. Registering the GATT database
- * before host start is fine and still happens in init(); reading host-owned
- * state before host start is not. See fix-ble-bond-seed-init-order.
+ * and so needs a host that exists. See fix-ble-bond-seed-init-order.
  *
  * Seeds once per s_bond_state lifetime: a NimBLE resync fires this hook
  * again, and re-seeding there would let a controller reset resurrect a bond
@@ -1058,6 +1233,22 @@ static void sdf_ble_companion_seed_allow_list(void) {
     }
     s_allow_list_seeded = true;
 
+    /* Admissions first: an absent/empty store yields zero entries with
+     * ESP_OK (absent-key convention), so a device with no admissions - e.g.
+     * one whose setup phase lapsed - seeds nothing below. */
+    sdf_storage_admission_t admissions[SDF_STORAGE_ADMISSION_MAX];
+    size_t num_admissions = 0;
+    esp_err_t adm_err = sdf_storage_admission_load_all(
+        admissions, SDF_STORAGE_ADMISSION_MAX, &num_admissions);
+    if (adm_err != ESP_OK) {
+        /* Without a trustworthy admission set the intersection cannot be
+         * computed - seed nothing rather than falling back to trusting
+         * bonds alone. Recoverable via the pairing window. */
+        ESP_LOGW(TAG, "admission_load_all failed: %s; allow list left empty",
+                 esp_err_to_name(adm_err));
+        return;
+    }
+
     ble_addr_t bonded[SDF_BLE_COMPANION_BOND_TABLE_MAX];
     int num_peers = 0;
     /* Called without s_lock held: this file's rule is that s_lock is never
@@ -1065,27 +1256,108 @@ static void sdf_ble_companion_seed_allow_list(void) {
     int rc = ble_store_util_bonded_peers(bonded, &num_peers,
                                           SDF_BLE_COMPANION_BOND_TABLE_MAX);
     if (rc != 0) {
-        /* Unlike before the move, this branch is now genuinely reachable.
-         * An empty allow list means no companion can reconnect until the
-         * admin-gated pairing window is used - recoverable, unlike the boot
-         * loop that reading the store too early produced. */
+        /* An empty allow list means no companion can reconnect until a
+         * pairing window admits it - recoverable, unlike the boot loop that
+         * reading the store too early produced. */
         ESP_LOGW(TAG, "ble_store_util_bonded_peers failed: %d; allow list left empty", rc);
         return;
+    }
+
+    /* Normalize both stores into the pure intersection helper's addr shape. */
+    sdf_ble_companion_addr_t bonded_addrs[SDF_BLE_COMPANION_BOND_TABLE_MAX];
+    for (int i = 0; i < num_peers; i++) {
+        bonded_addrs[i].type = bonded[i].type;
+        memcpy(bonded_addrs[i].val, bonded[i].val, sizeof(bonded[i].val));
+    }
+    sdf_ble_companion_addr_t admitted[SDF_STORAGE_ADMISSION_MAX];
+    for (size_t a = 0; a < num_admissions; a++) {
+        admitted[a].type = admissions[a].addr_type;
+        memcpy(admitted[a].val, admissions[a].addr, sizeof(admitted[a].val));
     }
 
     if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) != pdTRUE) {
         ESP_LOGW(TAG, "seed_allow_list: lock contention, allow list left empty");
         return;
     }
-    for (int i = 0; i < num_peers; i++) {
-        sdf_ble_companion_addr_t addr;
-        addr.type = bonded[i].type;
-        memcpy(addr.val, bonded[i].val, sizeof(addr.val));
-        sdf_ble_companion_bond_allow_list_add(&s_bond_state, &addr);
-    }
+    /* Intersection rule: a bonded peer becomes allow-listed only if an
+     * explicit admission record exists for its identity. A bond without
+     * admission (e.g. made during an abandoned setup phase) grants nothing;
+     * an admission whose keys are gone can't resurrect a peer either. */
+    size_t seeded = sdf_ble_companion_allow_list_seed_intersection(
+        &s_bond_state, bonded_addrs, (size_t)num_peers, admitted, num_admissions);
     xSemaphoreGive(s_lock);
 
-    ESP_LOGI(TAG, "Seeded BLE Companion allow list with %d bonded peer(s)", num_peers);
+    ESP_LOGI(TAG, "Seeded BLE Companion allow list: %d bonded peer(s), %u admission record(s), %u seeded",
+             num_peers, (unsigned)num_admissions, (unsigned)seeded);
+}
+
+/* BLE-side half of the setup-phase actions emitted by sdf_services' setup
+ * module (see SDF_EVENT_ROUTER_SETUP_PHASE). Runs on the event-router task;
+ * every NimBLE call below follows the file's no-s_lock-across-NimBLE rule. */
+static void sdf_ble_companion_setup_phase_handler(void *ctx,
+                                                   const sdf_event_router_event_t *event) {
+    (void)ctx;
+    if (!s_initialized || !event ||
+        event->type != SDF_EVENT_ROUTER_SETUP_PHASE) {
+        return;
+    }
+
+    switch (event->payload.setup_phase.action) {
+        case SDF_EVENT_ROUTER_SETUP_PHASE_ACTION_TIMEOUT: {
+            /* Arm window or setup deadline expired: erase every persisted
+             * bond (partial setup state), terminate the setup connection,
+             * and stop advertising - the phase is already disarmed, so
+             * restart_advertising() would correctly stay silent, but call
+             * nothing rather than rely on that: just stop. */
+            ESP_LOGW(TAG, "Setup phase timeout: clearing bonds, stopping advertising");
+            int rc = ble_store_clear();
+            if (rc != 0) {
+                ESP_LOGW(TAG, "ble_store_clear failed: %d", rc);
+            }
+            for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+                if (s_connections[i].connected) {
+                    ble_gap_terminate(s_connections[i].conn_handle,
+                                      BLE_ERR_REM_USER_CONN_TERM);
+                }
+            }
+            ble_gap_adv_stop();
+            /* The bond store is gone; drop any in-RAM allow-list state so a
+             * later reboot's intersection seeding starts consistent. */
+            if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+                sdf_ble_companion_bond_state_init(&s_bond_state);
+                xSemaphoreGive(s_lock);
+            }
+            break;
+        }
+
+        case SDF_EVENT_ROUTER_SETUP_PHASE_ACTION_IDLE_DROP:
+            ESP_LOGI(TAG, "Setup connection idle timeout, dropping conn_handle=%d",
+                     (int)event->payload.setup_phase.conn_handle);
+            ble_gap_terminate(event->payload.setup_phase.conn_handle,
+                              BLE_ERR_REM_USER_CONN_TERM);
+            /* The disconnect event this triggers calls restart_advertising(),
+             * which re-arms unfiltered setup advertising; the deadline keeps
+             * running and no state was erased. */
+            break;
+
+        case SDF_EVENT_ROUTER_SETUP_PHASE_ACTION_RECLAIM:
+            ESP_LOGI(TAG, "Setup-phase button reclaim");
+            for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+                if (s_connections[i].connected) {
+                    ble_gap_terminate(s_connections[i].conn_handle,
+                                      BLE_ERR_REM_USER_CONN_TERM);
+                }
+            }
+            /* Each termination lands in BLE_GAP_EVENT_DISCONNECT, which
+             * restarts advertising in the current (armed, unfiltered) mode.
+             * If no client was connected, restart explicitly so an idle
+             * adv-stop state still resumes advertising. */
+            sdf_ble_companion_restart_advertising();
+            break;
+
+        default:
+            break;
+    }
 }
 
 static void sdf_ble_companion_on_host_sync(void *ctx) {
@@ -1196,11 +1468,18 @@ void sdf_ble_companion_start_advertising_pairing(void) {
 
 /* Single choke point for (re)starting advertising in whichever mode
  * currently applies - called after every disconnect, at boot (host sync),
- * when the pairing window opens, and when it closes (admission or
- * timeout). Always stops any advertising procedure already in progress
- * first (ble_gap_adv_start() fails with BLE_HS_EALREADY otherwise); that
- * call is a harmless, silently-ignored no-op (BLE_HS_EALREADY) when nothing
- * was advertising, e.g. right after a peer just connected. */
+ * when the pairing window opens, and when it closes (admission or timeout),
+ * and on setup-phase idle-drop/reclaim events. Always stops any advertising
+ * procedure already in progress first (ble_gap_adv_start() fails with
+ * BLE_HS_EALREADY otherwise); that call is a harmless, silently-ignored
+ * no-op (BLE_HS_EALREADY) when nothing was advertising, e.g. right after a
+ * peer just connected.
+ *
+ * Mode selection (device-setup-phase / ble-companion-service specs):
+ *   1. pairing window open        -> unfiltered, fast (pairing-window mode)
+ *   2. latch unset + phase armed  -> unfiltered, connectable (setup phase)
+ *   3. latch unset + disarmed     -> not advertising at all
+ *   4. latch set                  -> sparse, allow-list-filtered default */
 static void sdf_ble_companion_restart_advertising(void) {
     int stop_rc = ble_gap_adv_stop();
     if (stop_rc != 0 && stop_rc != BLE_HS_EALREADY) {
@@ -1215,11 +1494,63 @@ static void sdf_ble_companion_restart_advertising(void) {
         ESP_LOGW(TAG, "restart_advertising: lock contention, defaulting to sparse");
     }
 
-    if (window_open) {
-        sdf_ble_companion_start_advertising_pairing();
+    /* A latch read failure is treated as unset - the same fail-open choice
+     * sdf_services' boot arm makes - so a transient NVS error cannot strand
+     * an unclaimed device advertising filtered against an empty allow list
+     * (unreachable). */
+    bool setup_complete = false;
+    esp_err_t latch_err = sdf_storage_setup_complete_load(&setup_complete);
+    if (latch_err != ESP_OK && latch_err != ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "setup latch load failed (%s); treating as unset",
+                 esp_err_to_name(latch_err));
+        setup_complete = false;
+    }
+
+    switch (sdf_ble_companion_select_advertising_mode(
+        window_open, setup_complete, sdf_services_setup_phase_is_armed())) {
+        case SDF_BLE_COMPANION_ADV_MODE_PAIRING_WINDOW:
+            sdf_ble_companion_start_advertising_pairing();
+            return;
+        case SDF_BLE_COMPANION_ADV_MODE_UNFILTERED_SETUP:
+            sdf_ble_companion_start_advertising_setup();
+            return;
+        case SDF_BLE_COMPANION_ADV_MODE_NOT_ADVERTISING:
+            ESP_LOGI(TAG, "Setup phase disarmed - not advertising");
+            return;
+        case SDF_BLE_COMPANION_ADV_MODE_SPARSE_FILTERED:
+        default:
+            break;
+    }
+
+    sdf_ble_companion_push_allow_list();
+    sdf_ble_companion_start_advertising_sparse();
+}
+
+/* Setup-phase advertising: unfiltered and connectable so an arbitrary,
+ * unbonded companion client can reach the first-time setup wizard. Runs
+ * only while the setup-completion latch is unset and the phase is armed -
+ * see sdf_ble_companion_restart_advertising(). */
+void sdf_ble_companion_start_advertising_setup(void) {
+    struct ble_gap_adv_params adv_params = {
+        .conn_mode = BLE_GAP_CONN_MODE_UND,
+        .disc_mode = BLE_GAP_DISC_MODE_GEN,
+        .itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN,
+        .itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX,
+        .filter_policy = BLE_HCI_ADV_FILT_NONE,
+    };
+
+    int rc = ble_gap_adv_set_data(s_adv_data, s_adv_data_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to set advertising data: %d", rc);
+        return;
+    }
+
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                           &adv_params, sdf_ble_companion_gap_event, NULL);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Failed to start setup-phase advertising: %d", rc);
     } else {
-        sdf_ble_companion_push_allow_list();
-        sdf_ble_companion_start_advertising_sparse();
+        ESP_LOGI(TAG, "Unfiltered setup-phase advertising started");
     }
 }
 
@@ -1362,6 +1693,14 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
                                      NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to subscribe to enrollment failed: %s", esp_err_to_name(err));
+    }
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_SETUP_PHASE,
+                                     SDF_EVENT_ROUTER_PRIO_HIGH,
+                                     sdf_ble_companion_setup_phase_handler,
+                                     NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to subscribe to setup-phase events: %s", esp_err_to_name(err));
     }
 
     s_initialized = true;
@@ -1623,6 +1962,80 @@ esp_err_t sdf_ble_companion_notify_ota(uint16_t conn_handle, const uint8_t *data
 
     int rc = ble_gatts_notify_custom(conn_handle, s_ota_val_handle, om);
     return rc == 0 ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t sdf_ble_companion_reply_setup_complete(uint16_t conn_handle,
+                                                  bool completed,
+                                                  const char *outstanding_step) {
+    char payload[96];
+    int n;
+    if (completed) {
+        n = snprintf(payload, sizeof(payload), "{\"finish_setup\":true}");
+    } else {
+        n = snprintf(payload, sizeof(payload),
+                     "{\"finish_setup\":false,\"step\":\"%s\"}",
+                     outstanding_step ? outstanding_step : "unknown");
+    }
+    if (n <= 0 || (size_t)n >= sizeof(payload)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return sdf_ble_companion_notify_config(conn_handle, (const uint8_t *)payload,
+                                            (size_t)n);
+}
+
+bool sdf_ble_companion_get_conn_identity(uint16_t conn_handle,
+                                          uint8_t *addr_type, uint8_t addr6[6]) {
+    if (addr_type == NULL || addr6 == NULL) {
+        return false;
+    }
+    struct ble_gap_conn_desc desc;
+    if (ble_gap_conn_find(conn_handle, &desc) != 0) {
+        return false;
+    }
+    *addr_type = desc.peer_id_addr.type;
+    memcpy(addr6, desc.peer_id_addr.val, 6);
+    return true;
+}
+
+/* Completion-path tail, driven by sdf_app after it has persisted the
+ * admission record and the setup-completion latch: adds the just-admitted
+ * identity to the runtime allow list, pushes it into the controller's
+ * Filter Accept List, and re-evaluates advertising mode - with the latch
+ * now set this switches to sparse, allow-list-filtered advertising, and
+ * the ordinary connection limit applies again because the connect-time cap
+ * derives from the latch. */
+esp_err_t sdf_ble_companion_admit_and_switch_to_filtered(uint8_t addr_type,
+                                                          const uint8_t addr[6]) {
+    if (addr == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!s_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    bool added = false;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(100)) == pdTRUE) {
+        sdf_ble_companion_addr_t identity;
+        identity.type = addr_type;
+        memcpy(identity.val, addr, sizeof(identity.val));
+        added = sdf_ble_companion_bond_allow_list_add(&s_bond_state, &identity);
+        xSemaphoreGive(s_lock);
+    } else {
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (!added) {
+        ESP_LOGW(TAG, "admit_and_switch: allow-list table full");
+        return ESP_ERR_NO_MEM;
+    }
+
+    /* Must precede restart_advertising(): NimBLE rejects ble_gap_wl_set()
+     * while an advertising procedure using the list is active, and
+     * restart_advertising() stops any current procedure first anyway. */
+    sdf_ble_companion_push_allow_list();
+    sdf_ble_companion_restart_advertising();
+    return ESP_OK;
 }
 
 esp_err_t sdf_ble_companion_broadcast_ota(const uint8_t *data, size_t len) {

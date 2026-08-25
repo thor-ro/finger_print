@@ -449,18 +449,97 @@ void test_ble_admin_action_should_not_resolve_for_other_actions(void) {
 
 /* Setup-state helper */
 
-void test_setup_state_unclaimed_when_no_enrolled_users(void) {
+void test_setup_state_not_started_when_no_enrolled_users_and_latch_unset(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_UNCLAIMED, sdf_services_get_setup_state());
+  sdf_storage_setup_complete_clear();
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_NOT_STARTED,
+                    sdf_services_get_setup_state());
+}
+
+/* Intermediate setup states stay derived from enrolled-user state, persisted
+ * web accounts and persisted Nuki credentials - they drive only wizard step
+ * selection. Walked in wizard step order so a regression that collapses two
+ * of them shows up as the wrong resume point rather than silently. */
+void test_setup_state_intermediate_states_are_derived_in_step_order(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_storage_setup_complete_clear();
+  sdf_storage_web_user_clear_all();
+  sdf_storage_nuki_clear();
+
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_ADMIN_ENROLLED,
+                    sdf_services_get_setup_state());
+
+  /* Registration lands before Nuki pairing: the state must distinguish
+   * "still needs an account" from "needs Nuki pairing", or the wizard
+   * resumes at a step the user already finished and completion can be
+   * accepted on a device with no way to log in. */
+  sdf_storage_web_user_t user = {0};
+  strncpy(user.username, "owner", sizeof(user.username) - 1);
+  user.permission = 3;
+  user.valid = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &user));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_REGISTERED,
+                    sdf_services_get_setup_state());
+
+  uint8_t key[32] = {0x42};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(12345, key));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_NUKI_PAIRED,
+                    sdf_services_get_setup_state());
+
+  /* Pairing the Nuki without an account must NOT reach the terminal
+   * pre-completion state - that is the path that would otherwise claim the
+   * device with nobody able to log in. */
+  sdf_storage_web_user_clear_all();
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_ADMIN_ENROLLED,
+                    sdf_services_get_setup_state());
+
+  sdf_storage_nuki_clear();
+}
+
+/* The latch is the single completion record: once set it must survive any
+ * independently-mutable operation - deleting every user, clearing Nuki
+ * credentials - and only factory reset clears it. */
+void test_setup_state_latch_survives_user_and_credential_deletion(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  nvs_flash_init();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_save(true));
+
+  /* Deleting the last enrolled user does not reopen the setup phase. */
+  sdf_services_state()->enrolled_user_bmp = 0;
+  memset(sdf_services_state()->enrolled_perm_packed, 0,
+         sizeof(sdf_services_state()->enrolled_perm_packed));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_COMPLETE,
+                    sdf_services_get_setup_state());
+
+  /* Clearing Nuki credentials does not either. */
+  sdf_storage_nuki_clear();
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_COMPLETE,
+                    sdf_services_get_setup_state());
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_clear());
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_NOT_STARTED,
+                    sdf_services_get_setup_state());
+}
+
+/* The Setup-State characteristic exposes sdf_services_get_setup_state()'s
+ * value as one raw byte on the wire. Pinning the enum values here keeps the
+ * firmware-side wire format stable against accidental renumbering. */
+void test_setup_state_wire_byte_values_are_stable(void) {
+  TEST_ASSERT_EQUAL(0, SDF_SERVICES_SETUP_STATE_NOT_STARTED);
+  TEST_ASSERT_EQUAL(1, SDF_SERVICES_SETUP_STATE_ADMIN_ENROLLED);
+  TEST_ASSERT_EQUAL(2, SDF_SERVICES_SETUP_STATE_REGISTERED);
+  TEST_ASSERT_EQUAL(3, SDF_SERVICES_SETUP_STATE_NUKI_PAIRED);
+  TEST_ASSERT_EQUAL(4, SDF_SERVICES_SETUP_STATE_COMPLETE);
 }
 
 /* Button dispatch: BLE Companion pairing-window admin action (double-click).
- * enrolled_user_bmp is set directly on the internal state (rather than via
- * a real enrollment) so the "0 users, execute immediately" bypass in
- * sdf_button_dispatch_action() is not taken and the admin-fingerprint
- * pending-action gate is actually exercised - mirrors how NUKI_PAIR's own
- * gate is only reachable once a device is claimed. */
+ * The dispatch itself always follows the ordinary pending-action flow; the
+ * setup-phase routing decision (reclaim instead of dispatch while the latch
+ * is unset) lives in the admin task's BUTTON_PRESS case. */
 
 void test_button_dispatch_ble_pairing_window_sets_pending_action(void) {
   ensure_services_initialized();
@@ -516,127 +595,50 @@ void test_request_admin_action_ble_pairing_window_sets_pending_action(void) {
                     sdf_services_state()->pending_admin_action);
 }
 
-void test_bootstrap_bypass_rejected_for_unspecified_origin_on_zero_user_device(void) {
+/* The unauthenticated bootstrap bypass is retired: no button gesture reaches
+ * an admin action during the setup phase (the press reclaims the setup
+ * connection instead), and factory reset executes directly at its gesture.
+ * Every admin-action request path now follows the ordinary pending-action
+ * flow - including on a device with zero enrolled users. */
+void test_dispatch_admin_action_on_zero_user_device_sets_pending_action(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  sdf_services_state()->initialized = true;
 
-  /* Helper explicitly rejects unspecified origin (0) on zero-user device */
   TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
-  TEST_ASSERT_FALSE(sdf_services_try_bootstrap_admin_action(
-      SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, SDF_SERVICES_ADMIN_ORIGIN_UNSPECIFIED));
-}
+  sdf_services_dispatch_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
 
-void test_bootstrap_bypass_rejected_for_remote_origin_on_zero_user_device(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  sdf_services_state()->initialized = true;
-
-  /* Helper explicitly rejects remote origin on zero-user device */
-  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
-  TEST_ASSERT_FALSE(sdf_services_try_bootstrap_admin_action(
-      SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, SDF_SERVICES_ADMIN_ORIGIN_REMOTE));
-
-  /* sdf_services_request_admin_action() sets pending action rather than bypassing */
-  TEST_ASSERT_EQUAL(
-      ESP_OK,
-      sdf_services_request_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW));
   TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
                     sdf_services_state()->pending_admin_action);
 }
 
-void test_bootstrap_bypass_clears_existing_pending_action_before_execution(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  sdf_services_state()->initialized = true;
+static sdf_services_admin_action_t s_test_direct_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+static void *s_test_direct_cb_ctx = NULL;
 
-  /* Simulate a stale or pre-existing pending action */
-  sdf_services_state()->pending_admin_action = SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET;
-  sdf_services_state()->pending_admin_action_start_us = 12345678LL;
-
-  /* On a 0-user device with local physical origin, bypass executes and clears pending state */
-  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
-  TEST_ASSERT_TRUE(sdf_services_try_bootstrap_admin_action(
-      SDF_SERVICES_ADMIN_ACTION_ENROLL, SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL));
-
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
-                    sdf_services_state()->pending_admin_action);
-  TEST_ASSERT_EQUAL(0, sdf_services_state()->pending_admin_action_start_us);
+static void test_direct_action_cb(void *ctx, sdf_services_admin_action_t action) {
+  s_test_direct_cb_ctx = ctx;
+  s_test_direct_cb_action = action;
 }
 
-static sdf_services_admin_action_t s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-static void *s_test_bootstrap_cb_ctx = NULL;
-
-static void test_bootstrap_action_cb(void *ctx, sdf_services_admin_action_t action) {
-  s_test_bootstrap_cb_ctx = ctx;
-  s_test_bootstrap_cb_action = action;
-}
-
-void test_bootstrap_bypass_routes_non_enroll_action_to_action_cb_without_pending_action(void) {
+/* Factory reset requires no Admin fingerprint: the long-press gesture routes
+ * through sdf_button_execute_direct(), which invokes the action callback
+ * immediately and never touches pending-admin-action state. */
+void test_factory_reset_direct_execution_sets_no_pending_action(void) {
   ensure_services_initialized();
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
 
-  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-  s_test_bootstrap_cb_ctx = NULL;
-  sdf_services_state()->config.admin_action_cb = test_bootstrap_action_cb;
+  s_test_direct_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
+  s_test_direct_cb_ctx = NULL;
+  sdf_services_state()->config.admin_action_cb = test_direct_action_cb;
   sdf_services_state()->config.admin_action_ctx = (void *)0xABCD;
 
-  /* On a 0-user device, button dispatch for a non-ENROLL action (e.g. BLE_PAIRING_WINDOW or FACTORY_RESET)
-   * immediately invokes admin_action_cb and leaves no pending admin action set. */
-  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
-  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW);
+  /* Even with zero readable admins there is no fingerprint gate to bypass:
+   * the reset simply proceeds. */
+  SDF_SERVICES_BMP_CLEAR(sdf_services_state()->enrolled_user_bmp, 1);
+  sdf_button_execute_direct(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
 
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, s_test_bootstrap_cb_action);
-  TEST_ASSERT_EQUAL_PTR((void *)0xABCD, s_test_bootstrap_cb_ctx);
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
-                    sdf_services_state()->pending_admin_action);
-
-  /* Also test FACTORY_RESET */
-  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-  s_test_bootstrap_cb_ctx = NULL;
-  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
-
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET, s_test_bootstrap_cb_action);
-  TEST_ASSERT_EQUAL_PTR((void *)0xABCD, s_test_bootstrap_cb_ctx);
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
-                    sdf_services_state()->pending_admin_action);
-}
-
-void test_dispatch_admin_action_remote_origin_on_zero_user_device_sets_pending_action(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-
-  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-  s_test_bootstrap_cb_ctx = NULL;
-  sdf_services_state()->config.admin_action_cb = test_bootstrap_action_cb;
-  sdf_services_state()->config.admin_action_ctx = (void *)0xABCD;
-
-  /* On a 0-user device, remote origin must NOT bypass authorization; it sets pending action */
-  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
-  sdf_services_dispatch_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
-                                     SDF_SERVICES_ADMIN_ORIGIN_REMOTE);
-
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE, s_test_bootstrap_cb_action);
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
-                    sdf_services_state()->pending_admin_action);
-}
-
-void test_dispatch_admin_action_local_physical_origin_on_zero_user_device_bypasses_authorization(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-
-  s_test_bootstrap_cb_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-  s_test_bootstrap_cb_ctx = NULL;
-  sdf_services_state()->config.admin_action_cb = test_bootstrap_action_cb;
-  sdf_services_state()->config.admin_action_ctx = (void *)0xABCD;
-
-  /* On a 0-user device, local physical origin bypasses authorization immediately */
-  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
-  sdf_services_dispatch_admin_action(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW,
-                                     SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL);
-
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW, s_test_bootstrap_cb_action);
-  TEST_ASSERT_EQUAL_PTR((void *)0xABCD, s_test_bootstrap_cb_ctx);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET, s_test_direct_cb_action);
+  TEST_ASSERT_EQUAL_PTR((void *)0xABCD, s_test_direct_cb_ctx);
+  /* No pending admin action is set and no Admin scan is awaited. */
   TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
                     sdf_services_state()->pending_admin_action);
 }
@@ -646,51 +648,18 @@ void test_button_dispatch_claimed_device_sets_pending_action(void) {
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
   SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
 
-  /* Claimed device: bypass is rejected for local physical origin */
-  TEST_ASSERT_FALSE(sdf_services_try_bootstrap_admin_action(
-      SDF_SERVICES_ADMIN_ACTION_ENROLL, SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL));
-
   sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_ENROLL);
   TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_ENROLL,
                     sdf_services_state()->pending_admin_action);
 }
 
-void test_button_single_click_resolves_to_enroll_on_unclaimed_device(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  TEST_ASSERT_EQUAL(0, sdf_services_enrolled_user_count(sdf_services_state()->enrolled_user_bmp));
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_ENROLL, sdf_button_resolve_single_click_action());
-}
-
-void test_button_single_click_resolves_to_nuki_pair_on_claimed_incomplete_device(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
-  sdf_storage_nuki_clear();
-  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE, sdf_services_get_setup_state());
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR, sdf_button_resolve_single_click_action());
-}
-
-void test_button_single_click_resolves_to_enroll_on_claimed_complete_device(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
-  uint8_t key[32] = {0x42};
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(12345, key));
-  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE, sdf_services_get_setup_state());
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_ENROLL, sdf_button_resolve_single_click_action());
-  sdf_storage_nuki_clear();
-}
-
-void test_button_dispatch_factory_reset_on_claimed_device_sets_pending_action(void) {
-  ensure_services_initialized();
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
-  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
-
-  sdf_button_dispatch_action(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET);
-  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_FACTORY_RESET,
-                     sdf_services_state()->pending_admin_action);
-}
+/* Single-click no longer resolves to any action: first-time setup runs
+ * exclusively through the companion-app wizard, and post-completion
+ * enrolment goes through the app's Enrollment characteristic. The old
+ * resolve tests were removed with sdf_button_resolve_single_click_action().
+ *
+ * Factory reset no longer enters the pending-admin-action wait either - see
+ * test_factory_reset_direct_execution_sets_no_pending_action() above. */
 
 void test_button_press_dropped_under_backpressure_leaves_no_state(void) {
   ensure_services_initialized();
@@ -772,6 +741,211 @@ void test_button_dispatch_never_bypasses_gate_as_first_action_after_init(void) {
 
   TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NUKI_PAIR,
                     sdf_services_state()->pending_admin_action);
+}
+
+/* ---------------------------------------------------------------------------
+ * Setup-phase lifecycle (device-setup-phase): arming, the two exposure
+ * timers, the connection idle timer, and the timeout wipe. Time is driven
+ * deterministically through sdf_services_internal.h's *_at() cores; all
+ * times are microseconds.
+ * ------------------------------------------------------------------------- */
+
+#define T_ARM_WINDOW_US ((int64_t)SDF_SETUP_ARM_WINDOW_MS * 1000)
+#define T_DEADLINE_US ((int64_t)SDF_SETUP_DEADLINE_MS * 1000)
+#define T_IDLE_US ((int64_t)SDF_SETUP_CONN_IDLE_MS * 1000)
+
+void test_setup_phase_boot_arms_when_latch_unset_and_not_when_set(void) {
+  nvs_flash_init();
+  sdf_storage_setup_complete_clear();
+  sdf_services_setup_phase_reset_for_test();
+  sdf_services_setup_phase_boot_arm();
+  TEST_ASSERT_TRUE(sdf_services_setup_phase_is_armed());
+
+  /* A completed device never enters the setup phase. */
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_save(true));
+  sdf_services_setup_phase_reset_for_test();
+  sdf_services_setup_phase_boot_arm();
+  TEST_ASSERT_FALSE(sdf_services_setup_phase_is_armed());
+  sdf_storage_setup_complete_clear();
+}
+
+void test_setup_phase_arm_window_expiry_wipes_and_disarms(void) {
+  sdf_services_setup_phase_reset_for_test();
+
+  const int64_t t0 = 1000000;
+  sdf_services_setup_phase_arm_at(t0);
+
+  /* Just inside the window: still armed, no action. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t0 + T_ARM_WINDOW_US - 1));
+  TEST_ASSERT_TRUE(sdf_services_setup_phase_is_armed());
+
+  /* Expiry: wipe-and-stop, and the phase disarms. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP,
+                    sdf_services_setup_phase_poll(t0 + T_ARM_WINDOW_US));
+  sdf_services_setup_phase_timeout_wipe();
+  TEST_ASSERT_FALSE(sdf_services_setup_phase_is_armed());
+}
+
+void test_setup_phase_deadline_starts_at_first_connection_and_is_not_extended(void) {
+  sdf_services_setup_phase_reset_for_test();
+
+  const int64_t t_arm = 0;
+  sdf_services_setup_phase_arm_at(t_arm);
+
+  /* No client yet: only the arm window governs. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(T_ARM_WINDOW_US - 1));
+
+  /* First accepted connection starts the deadline. */
+  const int64_t t_conn = 5000000;
+  sdf_services_setup_phase_notify_connected_at(42, t_conn);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t_conn + T_IDLE_US - 1));
+
+  /* Activity, progress, disconnect and reconnect do not move the deadline:
+   * it still expires at t_conn + DEADLINE even after all of them. */
+  const int64_t t_late = t_conn + (int64_t)(SDF_SETUP_DEADLINE_MS - 60000) * 1000;
+  sdf_services_setup_phase_notify_gatt_activity_at(t_late);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t_late));
+
+  sdf_services_setup_phase_notify_disconnected_at(t_late);
+  sdf_services_setup_phase_notify_connected_at(42, t_late + 1000000);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP,
+                    sdf_services_setup_phase_poll(t_conn + T_DEADLINE_US));
+}
+
+void test_setup_phase_idle_timer_drops_only_the_connection(void) {
+  sdf_services_setup_phase_reset_for_test();
+
+  const int64_t t0 = 0;
+  sdf_services_setup_phase_arm_at(t0);
+  sdf_services_setup_phase_notify_connected_at(7, t0);
+
+  /* Silence up to just under the idle bound: nothing happens. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t0 + T_IDLE_US - 1));
+
+  /* GATT activity resets the idle timer but not the deadline. */
+  sdf_services_setup_phase_notify_gatt_activity_at(t0 + T_IDLE_US - 1);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t0 + 2 * T_IDLE_US - 2));
+
+  /* Idle expiry: drop the connection, stay armed, keep the deadline. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_DROP_IDLE_CONN,
+                    sdf_services_setup_phase_poll(t0 + 2 * T_IDLE_US - 2 + 1));
+  sdf_services_setup_phase_idle_drop();
+  TEST_ASSERT_TRUE(sdf_services_setup_phase_is_armed());
+
+  /* The deadline still runs from the original first connection and expires
+   * at t0 + DEADLINE regardless of the idle churn above. The idle drop does
+   * not restart the arm window either - once the deadline has started, the
+   * arm window stops governing entirely, so dropping to no-connection can
+   * never buy a fresh open-air window. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP,
+                    sdf_services_setup_phase_poll(t0 + T_DEADLINE_US));
+}
+
+/* Regression: the arm window governs only before the first connection. A
+ * disconnect or idle drop used to restart it, which handed a reconnecting
+ * (or squatting) client a fresh open-air window on every cycle - an
+ * extension the spec grants only to a physical button press. */
+void test_setup_phase_arm_window_stops_governing_once_deadline_starts(void) {
+  sdf_services_setup_phase_reset_for_test();
+
+  const int64_t t0 = 0;
+  sdf_services_setup_phase_arm_at(t0);
+  sdf_services_setup_phase_notify_connected_at(3, t0);
+
+  /* Disconnect immediately, then idle well past a full arm window with no
+   * client. The arm window must not fire - only the deadline bounds this. */
+  sdf_services_setup_phase_notify_disconnected_at(t0 + 1000);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t0 + T_ARM_WINDOW_US + 1));
+
+  /* And it still expires exactly at the original deadline. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t0 + T_DEADLINE_US - 1));
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP,
+                    sdf_services_setup_phase_poll(t0 + T_DEADLINE_US));
+}
+
+void test_setup_phase_button_press_restarts_both_timers(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_setup_phase_reset_for_test();
+
+  const int64_t t0 = 0;
+  sdf_services_setup_phase_arm_at(t0);
+  sdf_services_setup_phase_notify_connected_at(9, t0 + 1000000);
+
+  /* Near the end of the original deadline (with fresh GATT activity so the
+   * idle timer stays quiet)... */
+  const int64_t t_press = t0 + T_DEADLINE_US - 30000000;
+  sdf_services_setup_phase_notify_gatt_activity_at(t_press);
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                    sdf_services_setup_phase_poll(t_press));
+
+  /* ...a button press (arm_at is its timer restart core) restarts both
+   * timers: without it, the deadline would expire at t0 + DEADLINE. */
+  sdf_services_setup_phase_arm_at(t_press);
+
+  /* Keep the link alive with periodic activity (the client may work for the
+   * whole budget); the phase must survive until the RESTARTED deadline. */
+  for (int64_t t = t_press + 60000000; t < t_press + T_DEADLINE_US; t += 60000000) {
+    sdf_services_setup_phase_notify_gatt_activity_at(t);
+    TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_NONE,
+                      sdf_services_setup_phase_poll(t));
+  }
+  TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP,
+                    sdf_services_setup_phase_poll(t_press + T_DEADLINE_US));
+
+  /* The reclaim gesture sets no pending admin action. */
+  TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_NONE,
+                    sdf_services_state()->pending_admin_action);
+}
+
+void test_setup_phase_timeout_wipe_erases_partial_state(void) {
+  nvs_flash_init();
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  sdf_services_setup_phase_reset_for_test();
+
+  /* Seed every partial-state record the wipe must erase. */
+  sdf_storage_web_user_t user = {0};
+  strncpy(user.username, "wizard", sizeof(user.username) - 1);
+  user.valid = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &user));
+
+  uint8_t key[32] = {0x42};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(555, key));
+
+  uint8_t addr[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_admission_add(1, addr));
+
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 3);
+
+  sdf_services_setup_phase_arm_at(0);
+  sdf_services_setup_phase_timeout_wipe();
+
+  /* Phase disarmed... */
+  TEST_ASSERT_FALSE(sdf_services_setup_phase_is_armed());
+
+  /* ...and every partial record gone. The latch stays unset. */
+  sdf_storage_web_user_t loaded = {0};
+  TEST_ASSERT_NOT_EQUAL(ESP_OK, sdf_storage_web_user_load(0, &loaded));
+  uint32_t auth_id;
+  uint8_t shared[32];
+  TEST_ASSERT_NOT_EQUAL(ESP_OK, sdf_storage_nuki_load(&auth_id, shared));
+  size_t count = (size_t)-1;
+  sdf_storage_admission_t entries[SDF_STORAGE_ADMISSION_MAX];
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_storage_admission_load_all(entries, SDF_STORAGE_ADMISSION_MAX, &count));
+  TEST_ASSERT_EQUAL(0, count);
+  bool complete = false;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_setup_complete_load(&complete));
+  TEST_ASSERT_FALSE(complete);
 }
 
 /* sdf_services_enrolled_user_count() popcount correctness */

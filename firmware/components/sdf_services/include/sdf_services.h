@@ -33,21 +33,52 @@ typedef enum {
   SDF_SERVICES_ADMIN_ACTION_BLE_PAIRING_WINDOW = 9,
 } sdf_services_admin_action_t;
 
+/* Device setup progress. Completion is latched (persisted via
+ * sdf_storage_setup_complete_save()); the intermediate steps remain derived
+ * from enrolled-user state and persisted Nuki credentials, since they drive
+ * only wizard step selection and are not security-bearing. See the
+ * device-setup-phase capability (openspec/changes/app-guided-first-time-
+ * setup). */
+/* Wizard progress, in step order. Every intermediate value is derived from
+ * independently-mutable state and drives only wizard step selection; only
+ * COMPLETE is security-bearing, and it comes from the latch.
+ *
+ * REGISTERED exists so ADMIN_ENROLLED is not ambiguous between "still needs
+ * an account" and "needs Nuki pairing" - the wizard resumes on this value
+ * after a reconnect, and sdf_app's completion check requires the terminal
+ * pre-completion value rather than spot-checking each prerequisite. */
 typedef enum {
-  SDF_SERVICES_ADMIN_ORIGIN_UNSPECIFIED = 0,
-  SDF_SERVICES_ADMIN_ORIGIN_REMOTE = 1,
-  SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL = 2,
-} sdf_services_admin_origin_t;
-
-/* Device setup progress, derived from existing persisted state
- * (sdf_services_enrolled_user_count(), sdf_storage_nuki_load()) rather than a
- * dedicated flag. See the "State-Dependent Single-Click Setup Action"
- * requirement. */
-typedef enum {
-  SDF_SERVICES_SETUP_STATE_UNCLAIMED = 0,          /* no enrolled users yet */
-  SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE = 1, /* admin exists, Nuki not yet paired */
-  SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE = 2,   /* admin exists, Nuki credentials persisted */
+  SDF_SERVICES_SETUP_STATE_NOT_STARTED = 0,   /* no enrolled users yet */
+  SDF_SERVICES_SETUP_STATE_ADMIN_ENROLLED = 1, /* admin exists, no account yet */
+  SDF_SERVICES_SETUP_STATE_REGISTERED = 2,    /* account persisted, Nuki not yet paired */
+  SDF_SERVICES_SETUP_STATE_NUKI_PAIRED = 3,   /* Nuki credentials persisted, not finished */
+  SDF_SERVICES_SETUP_STATE_COMPLETE = 4,      /* setup-completion latch set */
 } sdf_services_setup_state_t;
+
+/* Setup-phase bounds (compile-time, see the device-setup-phase spec):
+ * - ARM_WINDOW: how long the device advertises openly with no client
+ *   connected, from the moment the phase was armed.
+ * - DEADLINE: how long a user has from the first accepted connection.
+ *   Never extended by activity, progress, disconnection or reconnection -
+ *   only a physical button press restarts it.
+ * - CONN_IDLE: silence bound for a single setup connection; expiring drops
+ *   only the connection, never the deadline or any state. */
+#define SDF_SETUP_ARM_WINDOW_MS 300000u
+#define SDF_SETUP_DEADLINE_MS 600000u
+#define SDF_SETUP_CONN_IDLE_MS 120000u
+
+/* Actions requested by sdf_services_setup_phase_poll() when a setup-phase
+ * timer expires. The caller (the admin task loop) executes them: WIPE_AND_
+ * STOP erases partial setup state, disarms the phase and emits
+ * SDF_EVENT_ROUTER_SETUP_PHASE(timeout) so the BLE side clears bonds,
+ * terminates the setup connection and stops advertising; DROP_IDLE_CONN
+ * emits SDF_EVENT_ROUTER_SETUP_PHASE(idle_drop) so the BLE side terminates
+ * only the silent connection and re-arms advertising. */
+typedef enum {
+  SDF_SERVICES_SETUP_POLL_NONE = 0,
+  SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP = 1,
+  SDF_SERVICES_SETUP_POLL_DROP_IDLE_CONN = 2,
+} sdf_services_setup_poll_result_t;
 
 typedef void (*sdf_services_admin_action_cb)(
     void *ctx, sdf_services_admin_action_t action);
@@ -98,10 +129,50 @@ sdf_enrollment_sm_t sdf_services_get_enrollment_state(void);
 /* Admin Action API */
 esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action);
 
-/* Setup-state query, used by the button dispatch and the BLE-triggered Nuki
- * re-pair request to decide whether the device is unclaimed, claimed with
- * setup incomplete, or claimed with setup already complete. */
+/* Setup-state query, used by the button dispatch, the BLE-triggered Nuki
+ * re-pair request and the Companion Service's setup-state characteristic to
+ * decide where in the setup journey the device is. Completion comes from the
+ * persisted latch; the intermediate states are derived. */
 sdf_services_setup_state_t sdf_services_get_setup_state(void);
+
+/* Setup-phase lifecycle (armed/disarmed + timers). The state is runtime-only:
+ * a boot with the latch unset arms the phase (first boot of an unprovisioned
+ * device, or the reboot that follows a factory reset); a timeout disarm does
+ * not survive as persisted state either - only the button re-arms after a
+ * lapse within the same power session. */
+bool sdf_services_setup_phase_is_armed(void);
+/* Arms/re-arms the phase, restarting the arm window; the setup deadline is
+ * restarted too if it had already started (the button reclaim gesture), and
+ * left unstarted otherwise. */
+void sdf_services_setup_phase_arm(void);
+/* Disarms without wiping - used by the completion path once the latch is set. */
+void sdf_services_setup_phase_disarm(void);
+/* Notifications from the BLE layer about the single setup connection. */
+void sdf_services_setup_phase_notify_connected(uint16_t conn_handle);
+void sdf_services_setup_phase_notify_disconnected(uint16_t conn_handle);
+void sdf_services_setup_phase_notify_gatt_activity(void);
+/* Timer sweep. Returns the action the caller must execute (see
+ * sdf_services_setup_poll_result_t). `now_us` is esp_timer_get_time()-style
+ * microsecond time, passed in so host tests can drive the clocks directly. */
+sdf_services_setup_poll_result_t sdf_services_setup_phase_poll(int64_t now_us);
+/* Executes SDF_SERVICES_SETUP_POLL_DROP_IDLE_CONN: emits the idle-drop event
+ * so the BLE side terminates only the silent setup connection and re-arms
+ * advertising. The deadline, all partial state and the armed phase stay
+ * untouched. */
+void sdf_services_setup_phase_idle_drop(void);
+/* Executes SDF_SERVICES_SETUP_POLL_WIPE_AND_STOP's device-side half: erases
+ * enrolled templates, web accounts, admission records and partial Nuki
+ * credentials, disarms the phase and emits the setup-timeout event for the
+ * BLE side (bond clearing + advertising stop). Template-erase failure is
+ * logged and non-fatal. */
+void sdf_services_setup_phase_timeout_wipe(void);
+/* The setup-phase button gesture: reclaim-and-re-arm. Emits the reclaim
+ * event so the BLE side terminates the current setup connection and
+ * re-arms advertising, restarts both timers, and sets no pending admin
+ * action. */
+void sdf_services_setup_phase_button_reclaim(void);
+/* True when the setup phase owns button presses (latch unset). */
+bool sdf_services_setup_phase_owns_buttons(void);
 
 /* Web Companion Auth API */
 esp_err_t sdf_services_set_web_reg_auth(const char *username,

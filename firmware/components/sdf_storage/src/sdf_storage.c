@@ -16,6 +16,8 @@
 #define SDF_STORAGE_KEY_WEB_PSEUDO_SALT_KEY "web_pseudo_salt"
 #define SDF_STORAGE_KEY_ENROLLED_USERS_BMP "enr_bmp"
 #define SDF_STORAGE_KEY_ENROLLED_USERS_PERM "enr_perm"
+#define SDF_STORAGE_KEY_SETUP_COMPLETE "setup_done"
+#define SDF_STORAGE_KEY_ADMISSION_PREFIX "adm_"
 
 static const char *TAG = "sdf_storage";
 static sdf_storage_security_status_t s_security_status = {
@@ -706,6 +708,286 @@ esp_err_t sdf_storage_enrolled_users_load(uint16_t *bmp_out, uint8_t *perm_packe
     *bmp_out = bmp;
   }
 
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_setup_complete_save(bool complete) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_set_u8(handle, SDF_STORAGE_KEY_SETUP_COMPLETE, complete ? 1u : 0u);
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_setup_complete_load(bool *complete_out) {
+  if (complete_out == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    /* Namespace never created (first boot / erased device): latch unset. */
+    *complete_out = false;
+    return ESP_OK;
+  }
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  uint8_t value = 0;
+  err = nvs_get_u8(handle, SDF_STORAGE_KEY_SETUP_COMPLETE, &value);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    /* Key never written: latch unset, not an error. */
+    *complete_out = false;
+    nvs_close(handle);
+    return ESP_OK;
+  }
+  if (err == ESP_OK) {
+    *complete_out = (value != 0);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_setup_complete_clear(void) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_erase_key(handle, SDF_STORAGE_KEY_SETUP_COMPLETE);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = ESP_OK;
+  }
+
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+static void sdf_storage_admission_key(char *buf, size_t buf_size,
+                                      size_t index) {
+  snprintf(buf, buf_size, "%s%u", SDF_STORAGE_KEY_ADMISSION_PREFIX,
+           (unsigned)index);
+}
+
+esp_err_t sdf_storage_admission_add(uint8_t addr_type, const uint8_t addr[6]) {
+  if (addr == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  uint8_t blob[7];
+  blob[0] = addr_type;
+  memcpy(&blob[1], addr, 6);
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  /* Reuse an existing identical record before appending a new one. */
+  bool already_present = false;
+  bool any_error = false;
+  size_t used = 0;
+  for (size_t i = 0; i < SDF_STORAGE_ADMISSION_MAX; i++) {
+    char key[32];
+    sdf_storage_admission_key(key, sizeof(key), i);
+
+    uint8_t stored[sizeof(blob)];
+    size_t len = sizeof(stored);
+    err = nvs_get_blob(handle, key, stored, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+      continue; /* Empty slot - not an error. */
+    }
+    if (err != ESP_OK) {
+      any_error = true;
+      break;
+    }
+    used++;
+    if (len == sizeof(blob) && memcmp(stored, blob, sizeof(blob)) == 0) {
+      already_present = true;
+    }
+  }
+
+  if (!any_error && !already_present) {
+    if (used >= SDF_STORAGE_ADMISSION_MAX) {
+      nvs_close(handle);
+      return ESP_ERR_NO_MEM;
+    }
+    char key[32];
+    sdf_storage_admission_key(key, sizeof(key), used);
+    err = nvs_set_blob(handle, key, blob, sizeof(blob));
+    if (err == ESP_OK) {
+      err = nvs_commit(handle);
+    }
+  } else if (!any_error) {
+    err = ESP_OK; /* Duplicate admitted once; nothing to write. */
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_admission_remove(uint8_t addr_type,
+                                       const uint8_t addr[6]) {
+  if (addr == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  uint8_t blob[7];
+  blob[0] = addr_type;
+  memcpy(&blob[1], addr, 6);
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  /* Compact the store so indices stay dense: remove the match and shift
+   * every later record down one slot. */
+  for (size_t i = 0; i < SDF_STORAGE_ADMISSION_MAX; i++) {
+    char key[32];
+    sdf_storage_admission_key(key, sizeof(key), i);
+
+    uint8_t stored[sizeof(blob)];
+    size_t len = sizeof(stored);
+    err = nvs_get_blob(handle, key, stored, &len);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+      err = ESP_OK;
+      break;
+    }
+    if (err != ESP_OK) {
+      break;
+    }
+
+    if (len == sizeof(blob) && memcmp(stored, blob, sizeof(blob)) == 0) {
+      /* Shift every later record down one slot; the vacated slot is the
+       * last one that held a record before the shift. */
+      size_t vacated = SDF_STORAGE_ADMISSION_MAX - 1;
+      for (size_t j = i + 1; j < SDF_STORAGE_ADMISSION_MAX; j++) {
+        char src_key[32];
+        char dst_key[32];
+        sdf_storage_admission_key(dst_key, sizeof(dst_key), j - 1);
+        sdf_storage_admission_key(src_key, sizeof(src_key), j);
+
+        uint8_t shift[sizeof(blob)];
+        size_t shift_len = sizeof(shift);
+        esp_err_t read_err =
+            nvs_get_blob(handle, src_key, shift, &shift_len);
+        if (read_err == ESP_ERR_NVS_NOT_FOUND) {
+          vacated = j - 1;
+          break;
+        }
+        if (read_err != ESP_OK) {
+          err = read_err;
+          break;
+        }
+        err = nvs_set_blob(handle, dst_key, shift, shift_len);
+        if (err != ESP_OK) {
+          break;
+        }
+      }
+      if (err == ESP_OK) {
+        char vacated_key[32];
+        sdf_storage_admission_key(vacated_key, sizeof(vacated_key), vacated);
+        esp_err_t erase_err = nvs_erase_key(handle, vacated_key);
+        if (erase_err != ESP_OK && erase_err != ESP_ERR_NVS_NOT_FOUND) {
+          err = erase_err;
+        }
+      }
+      if (err == ESP_OK) {
+        err = nvs_commit(handle);
+      }
+      break;
+    }
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_admission_load_all(sdf_storage_admission_t *entries,
+                                         size_t max_entries,
+                                         size_t *count_out) {
+  if (entries == NULL || count_out == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    /* Namespace never created - no admissions, not an error. */
+    *count_out = 0;
+    return ESP_OK;
+  }
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  size_t count = 0;
+  err = ESP_OK;
+  for (size_t i = 0; i < SDF_STORAGE_ADMISSION_MAX; i++) {
+    char key[32];
+    sdf_storage_admission_key(key, sizeof(key), i);
+
+    uint8_t blob[7];
+    size_t len = sizeof(blob);
+    esp_err_t read_err = nvs_get_blob(handle, key, blob, &len);
+    if (read_err == ESP_ERR_NVS_NOT_FOUND) {
+      break; /* Dense store: first gap ends the scan. */
+    }
+    if (read_err != ESP_OK || len != sizeof(blob)) {
+      ESP_LOGW(TAG, "admission_load_all: bad record at slot %u",
+               (unsigned)i);
+      continue;
+    }
+
+    if (count < max_entries) {
+      entries[count].addr_type = blob[0];
+      memcpy(entries[count].addr, &blob[1], 6);
+    }
+    count++;
+  }
+
+  nvs_close(handle);
+  *count_out = count;
+  return count > max_entries ? ESP_ERR_NO_MEM : ESP_OK;
+}
+
+esp_err_t sdf_storage_admission_clear_all(void) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    return ESP_OK;
+  }
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  for (size_t i = 0; i < SDF_STORAGE_ADMISSION_MAX; i++) {
+    char key[32];
+    sdf_storage_admission_key(key, sizeof(key), i);
+    nvs_erase_key(handle, key);
+  }
+
+  err = nvs_commit(handle);
   nvs_close(handle);
   return err;
 }

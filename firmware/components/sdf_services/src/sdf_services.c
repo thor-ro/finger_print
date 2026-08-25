@@ -304,69 +304,6 @@ void sdf_services_pulse_pending_action_led(sdf_services_admin_action_t action) {
   }
 }
 
-/**
- * @brief Evaluates and executes the unauthenticated bootstrap bypass for admin actions
- * on an unclaimed device (0 enrolled users).
- *
- * This function is the single authorization decision point for whether an admin
- * action may execute without admin-fingerprint authorization.
- * The bypass is granted ONLY for requests originating from local physical interaction
- * (SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL) when sdf_services_enrolled_user_count() == 0.
- * Remotely-originated requests are never granted the bypass.
- *
- * For SDF_SERVICES_ADMIN_ACTION_ENROLL, pulses the blue LED and requests enrollment (1, 3).
- * For all other actions, executes the configured admin_action_cb immediately.
- *
- * Reproduces the lock discipline exactly: acquires s_state.lock to check user count and
- * clear pending action state, releases s_state.lock, and only then executes the action.
- *
- * @param action The admin action requested.
- * @param origin The origin of the request (local physical vs remote).
- * @return true if the bypass was granted and executed, false otherwise.
- */
-bool sdf_services_try_bootstrap_admin_action(
-    sdf_services_admin_action_t action,
-    sdf_services_admin_origin_t origin) {
-  if (origin != SDF_SERVICES_ADMIN_ORIGIN_LOCAL_PHYSICAL) {
-    return false;
-  }
-
-  if (s_state.lock == NULL) {
-    return false;
-  }
-
-  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
-    return false;
-  }
-
-  if (sdf_services_enrolled_user_count(s_state.enrolled_user_bmp) != 0) {
-    xSemaphoreGive(s_state.lock);
-    return false;
-  }
-
-  /* If there are 0 users, there is no admin to authorize. Execute immediately. */
-  s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
-  s_state.pending_admin_action_start_us = 0;
-  sdf_services_admin_action_cb action_cb = s_state.config.admin_action_cb;
-  void *action_ctx = s_state.config.admin_action_ctx;
-  xSemaphoreGive(s_state.lock);
-
-  /* ENROLL_ADMIN is no longer button-reachable (see the
-   * button-admin-actions-to-companion-app change) so it can't land
-   * here - only plain ENROLL (single-click on an unclaimed device)
-   * still bypasses the admin-fingerprint gate. */
-  if (action == SDF_SERVICES_ADMIN_ACTION_ENROLL) {
-    led_pulse_blue();
-    sdf_services_request_enrollment(1, 3);
-  } else {
-    if (action_cb != NULL) {
-      action_cb(action_ctx, action);
-    }
-  }
-
-  return true;
-}
-
 void sdf_services_execute_admin_action(
     sdf_services_admin_action_t action,
     sdf_services_admin_action_cb action_cb, void *action_ctx) {
@@ -857,6 +794,11 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   s_state.initialized = true;
   xSemaphoreGive(s_state.lock);
 
+  /* Arm the setup phase on boot when the latch is unset (first boot of an
+   * unprovisioned device, or the reboot that follows a factory reset). NVS
+   * is up by now, so the latch read is valid. */
+  sdf_services_setup_phase_boot_arm();
+
   sdf_drivers_config_t drivers_config = {
       .fingerprint = s_state.config.fingerprint,
       .led = {
@@ -1211,11 +1153,6 @@ esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action) 
     return ESP_ERR_INVALID_STATE;
   }
 
-  /* Consult the bootstrap bypass helper (passing remote origin) */
-  if (sdf_services_try_bootstrap_admin_action(action, SDF_SERVICES_ADMIN_ORIGIN_REMOTE)) {
-    return ESP_OK;
-  }
-
   {
     SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
     if (guard.acquired != pdTRUE) {
@@ -1288,6 +1225,35 @@ esp_err_t sdf_services_reset_state(void) {
   return ESP_OK;
 }
 
+/* Zeros the in-RAM enrolled-user cache AND persists the zeroed record to
+ * NVS. Unlike sdf_services_reset_state() (whose callers erase all of NVS
+ * first), the setup-phase timeout wipe is selective - it must not nuke
+ * unrelated keys like the web pseudo-salt - so the enrolled-user record
+ * needs its own explicit persistence here. */
+void sdf_services_reset_enrolled_user_cache(void) {
+  if (s_state.lock == NULL) {
+    return;
+  }
+
+  if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
+    return;
+  }
+
+  s_state.enrolled_user_bmp = 0;
+  memset(s_state.enrolled_perm_packed, 0, sizeof(s_state.enrolled_perm_packed));
+  esp_err_t err = sdf_services_persist_enrolled_users_locked();
+
+  xSemaphoreGive(s_state.lock);
+
+  if (err != ESP_OK) {
+    /* Non-fatal: the timeout wipe continues; a stale enrolled-user cache
+     * key cannot outlive the next factory reset, and the sensor templates
+     * themselves were already erased above. */
+    ESP_LOGW(TAG, "Failed to persist zeroed enrolled-user cache: %s",
+             esp_err_to_name(err));
+  }
+}
+
 esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission) {
   if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
       user_id > SDF_FINGERPRINT_USER_ID_MAX || permission < 1u ||
@@ -1321,6 +1287,15 @@ esp_err_t sdf_services_request_enrollment(uint16_t user_id, uint8_t permission) 
 }
 
 sdf_services_setup_state_t sdf_services_get_setup_state(void) {
+  /* Completion is latched: written once at explicit completion and cleared
+   * only by factory reset. Derived state (enrolled users, Nuki credentials)
+   * can be mutated by unrelated operations at any time and must never
+   * reopen the setup phase on a device in service. */
+  bool complete = false;
+  if (sdf_storage_setup_complete_load(&complete) == ESP_OK && complete) {
+    return SDF_SERVICES_SETUP_STATE_COMPLETE;
+  }
+
   size_t enrolled_user_count = 0;
 
   if (s_state.lock != NULL) {
@@ -1331,15 +1306,27 @@ sdf_services_setup_state_t sdf_services_get_setup_state(void) {
   }
 
   if (enrolled_user_count == 0) {
-    return SDF_SERVICES_SETUP_STATE_UNCLAIMED;
+    return SDF_SERVICES_SETUP_STATE_NOT_STARTED;
+  }
+
+  /* Registration sits between Admin enrolment and Nuki pairing: the bridge
+   * authorizes it with an Admin fingerprint scan, so it cannot precede
+   * enrolment. Reporting it as its own state keeps the wizard from resuming
+   * at a step the user already finished, and lets the completion check
+   * require the terminal pre-completion state instead of re-deriving each
+   * prerequisite (a device must never end up claimed with no account). */
+  size_t web_user_count = 0;
+  if (sdf_storage_web_user_count(&web_user_count) != ESP_OK ||
+      web_user_count == 0) {
+    return SDF_SERVICES_SETUP_STATE_ADMIN_ENROLLED;
   }
 
   uint32_t authorization_id = 0;
   uint8_t shared_key[32] = {0};
   if (sdf_storage_nuki_load(&authorization_id, shared_key) == ESP_OK) {
-    return SDF_SERVICES_SETUP_STATE_CLAIMED_COMPLETE;
+    return SDF_SERVICES_SETUP_STATE_NUKI_PAIRED;
   }
-  return SDF_SERVICES_SETUP_STATE_CLAIMED_INCOMPLETE;
+  return SDF_SERVICES_SETUP_STATE_REGISTERED;
 }
 
 bool sdf_services_is_enrollment_active(void) {
