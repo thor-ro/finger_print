@@ -2,6 +2,43 @@
 
 This directory contains the static Web Companion app for the Smart Door Bridge.
 
+## Development (SvelteKit build)
+
+The companion is being rebuilt as a SvelteKit + Vite application (`src/`,
+`svelte.config.js`, `vite.config.ts`). Until the legacy assets are retired,
+`index.html` / `app.js` / `style.css` remain the currently deployed app and
+are untouched by the build.
+
+Requirements:
+
+- Node.js version pinned in the repository root [`.nvmrc`](../.nvmrc)
+  (use `nvm use` or any matching Node).
+
+Commands, run from this directory:
+
+```bash
+npm ci          # install exactly the versions in package-lock.json
+npm run dev     # dev server at http://localhost:5173 (secure context;
+                # localhost may use Web Bluetooth without HTTPS)
+npm run check   # svelte-check / TypeScript type checking
+npm run lint    # {@html} ban, protocol-layer purity, BLE confinement
+npm test        # Vitest suite, headless
+npm run build   # prerendered static output into build/
+npm run budget  # compare the built initial load against budget.json
+npm run gate    # all of the above gates, in CI order
+```
+
+Production builds for GitHub Pages must carry the project-site subpath:
+
+```bash
+BASE_PATH=/finger_print npm run build
+```
+
+The build emits `.nojekyll` (via `static/`) so Pages keeps the `_app`
+directory. `build/` is not committed.
+
+## Features
+
 ## Features
 - **Web Bluetooth (WebBLE)**: Connects directly to the ESP32-C6 over BLE.
 - **First-Time Setup Wizard**: Mandatory, guided flow for claiming an unclaimed device (Admin enrolment → account registration → Nuki pairing → explicit finish).

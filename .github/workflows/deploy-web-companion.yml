@@ -18,6 +18,11 @@ concurrency:
   group: "pages"
   cancel-in-progress: false
 
+env:
+  # Project-site subpath of this repository. A fork with a different
+  # repository name only needs to change this variable, not the source.
+  BASE_PATH: /finger_print
+
 jobs:
   deploy:
     environment:
@@ -28,13 +33,49 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Node.js (pinned by .nvmrc)
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: web-companion/package-lock.json
+
+      # Installs exactly the versions recorded in the committed lockfile;
+      # fails if the lockfile and package.json disagree.
+      - name: Install dependencies from the lockfile
+        working-directory: web-companion
+        run: npm ci
+
+      # Quality gates: type check, lint ({@html} ban + protocol purity +
+      # Web Bluetooth confinement), unit tests. Any failure stops the job
+      # before anything is published; the previously deployed site stays up.
+      - name: Type check
+        working-directory: web-companion
+        run: npm run check
+
+      - name: Lint
+        working-directory: web-companion
+        run: npm run lint
+
+      - name: Unit tests
+        working-directory: web-companion
+        run: npm test
+
+      - name: Build (prerendered static output)
+        working-directory: web-companion
+        run: npm run build
+
+      - name: Bundle budget
+        working-directory: web-companion
+        run: npm run budget
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: './web-companion'
+          path: './web-companion/build'
 
       - name: Deploy to GitHub Pages
         id: deployment
