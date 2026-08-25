@@ -71,6 +71,10 @@ jobs:
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
+        with:
+          # Create the Pages site with GitHub-Actions builds on first run,
+          # so a fork does not need manual Settings > Pages setup.
+          enablement: true
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
