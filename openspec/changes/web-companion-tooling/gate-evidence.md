@@ -39,29 +39,64 @@ Declared in `web-companion/budget.json`: **45 KB gzip** initial load
   `budget: 1.0 KB   measured: 44.4 KB (45458 bytes)` /
   `budget EXCEEDED by 44458 bytes`, exit 1.
 - GREEN measured from the built output (`build/index.html` + every
-  script/stylesheet it references, gzip -9): **44.4 KB** — passes with the
-  dashboard view split into a lazily-loaded chunk.
-- Task 5.4 will tighten the declared budget to measured + 20 % after the
-  first CI build confirms the figure.
+  script/stylesheet it references, gzip -9): **44.4 KB** locally — passes with
+  the dashboard view split into a lazily-loaded chunk.
+- First real CI build (run 32862110964, `BASE_PATH=/finger_print`) measured
+  **45 608 bytes**; per task 5.4 the declared budget was tightened to
+  **54 729 bytes (measured + 20 %)**.
+
+## Red-deploy proof (task 5.2)
+
+A commit adding `src/red_probe.svelte` (`{@html deliberate}`) was pushed:
+the workflow failed at **Type check**, with Lint, Unit tests, Build, Bundle
+budget, Setup Pages, Upload artifact and Deploy to GitHub Pages all
+**skipped** — nothing was published — while the live site stayed HTTP 200
+at `https://thor-ro.github.io/finger_print/`. Probe reverted afterwards.
+
+## Live Pages verification (tasks 1.4 / 5.3)
+
+Deployed site checked on 2026-08-25:
+
+```
+index: 200
+200 ./_app/immutable/entry/start.H3xDUEP0.js
+200 ./_app/immutable/chunks/Bgb5JmSr.js   (+ further chunks)
+.nojekyll: 200
+```
+
+All assets resolve under the `/finger_print/` project subpath, `_app/**`
+survived deployment (`.nojekyll` present), confirming tasks 1.4 and 5.3.
 
 ## Strict CSP (task 4.6)
 
 `src/app.html` ships `<meta http-equiv="Content-Security-Policy">`:
 `script-src 'self'`, no `'unsafe-inline'`, no `'unsafe-eval'`; also
-`object-src 'none'; base-uri 'none'; frame-ancestors 'none'`.
+`object-src 'none'; base-uri 'none'; form-action 'self'`. Styles carry
+`'unsafe-inline'` (the app shell has a style attribute; styles cannot
+execute script). `frame-ancestors` was dropped — it is ignored when a CSP
+is delivered via `<meta>`.
 
 SvelteKit's prerenderer injects ONE inline bootstrap script (it hands the
 base path to the client router). Rather than loosening the policy,
 `scripts/csp.mjs` (wired as a post-build step) pins that script's exact
-SHA-256 into `script-src 'self' 'sha256-…'`. Verified on the current build:
+SHA-256 into `script-src 'self' 'sha256-…'`, for both the adapter output
+(`build/`) and Kit's prerendered output (what `vite preview` serves), so
+local verification matches production. Any other inline script stays
+blocked.
 
-```
-script-src 'self' 'sha256-40/5VHCLFtwSb7+X9GNbZ88ERrk73xZcEgo951hCp6g='
-```
+Runtime confirmation (headless Chrome against the built output, console
+logging on):
 
-and recomputed independently — hashes match. Any other inline script stays
-blocked. The compiled bundle contains no `eval` and no further inline
-scripts (checked against `build/index.html`).
+- Before pinning: `Executing inline script violates … 'script-src 'self''`
+  — the bootstrap was blocked and the app never mounted. This is the
+  red state.
+- After pinning: app mounts and renders the connection screen
+  (verified in the rendered DOM and a screenshot), with **zero** CSP
+  violations in the console. The compiled bundle contains no `eval` and no
+  further inline scripts.
+- The deployed Pages site's policy was checked live:
+  `script-src 'self' 'sha256-PRMVzBK06LRF61nSTPeth56Mp3QjMQ8Ak6hwRzoReZE='`
+  (hash differs per build because the bootstrap embeds the base path).
 
 ## Static-output smoke check
 
@@ -73,8 +108,5 @@ deployed (adapter-static; Kit's intermediate server build under
 ## Still manual (browser/hardware)
 
 - 1.6: dev-server device picker from `localhost` (localhost is a secure
-  context, but needs an interactive browser).
-- 4.6 runtime confirmation: app exercised in a real browser under the CSP.
-- 5.2 / 5.3: workflow red-deploy behaviour and real Pages subpath +
-  `_app/**` verification.
+  context, but needs an interactive browser with a real picker gesture).
 - Section 6 parity checklist on hardware before legacy deletion.

@@ -14,48 +14,60 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { globSync } from 'node:fs';
 
 const ROOT = new URL('..', import.meta.url).pathname;
-const INDEX = join(ROOT, 'build', 'index.html');
 
-let html = readFileSync(INDEX, 'utf8');
+// Patch the adapter output (what gets deployed) and Kit's prerendered
+// output (what `vite preview` serves locally) so both carry the same
+// policy.
+const targets = [
+	...globSync(join(ROOT, 'build', '**', '*.html')),
+	...globSync(join(ROOT, '.svelte-kit', 'output', 'prerendered', '**', '*.html'))
+];
 
-// Collect every src-less <script> block's exact content.
-const inlineScripts = [];
-html = html.replace(/<script>([\s\S]*?)<\/script>/g, (_, body) => {
-	inlineScripts.push(body);
-	return `<script>${body}</script>`;
-});
+let pinned = 0;
+for (const INDEX of targets) {
+	let html = readFileSync(INDEX, 'utf8');
 
-if (inlineScripts.length === 0) {
+	// Collect every src-less <script> block's exact content.
+	const inlineScripts = [];
+	html = html.replace(/<script>([\s\S]*?)<\/script>/g, (_, body) => {
+		inlineScripts.push(body);
+		return `<script>${body}</script>`;
+	});
+
+	if (inlineScripts.length === 0) continue;
+
+	const hashes = inlineScripts.map(
+		(body) => `'sha256-${createHash('sha256').update(body).digest('base64')}'`
+	);
+
+	const metaRe = /(<meta\s+http-equiv="Content-Security-Policy"\s+content=")([^"]*)(")/;
+	const match = html.match(metaRe);
+	if (!match) {
+		console.error(`csp error  Content-Security-Policy meta tag not found in ${INDEX}`);
+		process.exit(1);
+	}
+
+	// Drop stale hashes, keep the rest of the policy intact.
+	const directives = match[2]
+		.split(';')
+		.map((d) => {
+			const parts = d.trim().split(/\s+/);
+			if (parts[0] === 'script-src') {
+				parts.splice(1, Number.MAX_SAFE_INTEGER, "'self'", ...hashes);
+			}
+			return parts.join(' ');
+		})
+		.join(';');
+
+	html = html.replace(metaRe, () => `${match[1]}${directives}${match[3]}`);
+	writeFileSync(INDEX, html);
+	pinned++;
+	console.log(`csp: ${INDEX.replace(ROOT, '')} <- ${hashes.join(' ')}`);
+}
+
+if (pinned === 0) {
 	console.log('csp: no inline scripts found; policy unchanged');
-	process.exit(0);
 }
-
-const hashes = inlineScripts.map(
-	(body) => `'sha256-${createHash('sha256').update(body).digest('base64')}'`
-);
-
-const metaRe = /(<meta\s+http-equiv="Content-Security-Policy"\s+content=")([^"]*)(")/;
-const match = html.match(metaRe);
-if (!match) {
-	console.error('csp error  Content-Security-Policy meta tag not found in build/index.html');
-	process.exit(1);
-}
-
-// Drop stale hashes, keep the rest of the policy intact.
-const directives = match[2]
-	.split(';')
-	.map((d) => {
-		const parts = d.trim().split(/\s+/);
-		if (parts[0] === 'script-src') {
-			parts.splice(1, Number.MAX_SAFE_INTEGER, "'self'", ...hashes);
-		}
-		return parts.join(' ');
-	})
-	.join(';');
-
-html = html.replace(metaRe, () => `${match[1]}${directives}${match[3]}`);
-writeFileSync(INDEX, html);
-
-console.log(`csp: pinned ${hashes.length} inline-script hash(es): ${hashes.join(' ')}`);
