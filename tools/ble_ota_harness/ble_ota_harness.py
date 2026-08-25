@@ -63,6 +63,11 @@ class Harness:
         self.args = args
         self.results: dict[str, str] = {}
 
+    async def run(self) -> int:
+        if self.args.scenario == "identity":
+            return await self.run_identity()
+        return await self.run_ota()
+
     def cases_completed(self) -> int:
         """Completed OTA signature cases only - prelogin_reject also lives in
         self.results but is not one of the three cases the N/3 denominator of
@@ -85,7 +90,160 @@ class Harness:
         except asyncio.TimeoutError:
             return False
 
-    async def run(self) -> int:
+    async def _connect_client(self, bridge: EmulatorBleBridge) -> CompanionClient:
+        """Shared connection setup: discover, pair (LE SC Just Works),
+        subscribe and negotiate MTU. Returns the ready client."""
+        central = await create_central(bridge)
+        address = await find_companion(central, timeout_s=self.args.scan_timeout)
+        connection = await asyncio.wait_for(
+            central.connect(
+                address,
+                own_address_type=hci.OwnAddressType.PUBLIC,
+                timeout=self.args.connect_timeout,
+            ),
+            timeout=self.args.connect_timeout + 5,
+        )
+        print(f"connected to {address}", flush=True)
+        await asyncio.wait_for(connection.pair(), timeout=self.args.pair_timeout)
+        if not connection.is_encrypted:
+            raise CompanionError("link not encrypted after pairing")
+        print("paired (LE SC Just Works, encrypted)", flush=True)
+
+        client = CompanionClient(central, connection)
+        await client.discover()
+        await client.subscribe()
+        mtu = await client.negotiate_mtu(247)
+        print(f"subscribed; negotiated ATT MTU {mtu}", flush=True)
+        return client
+
+    async def run_identity(self) -> int:
+        """companion-identity task 9.3: register -> login -> demote ->
+        refused-access, against the ble_ota_gate fixture's identity hooks
+        (enrolled-admin seed + one-shot demotion on the second Web
+        Registration Authorization). The second REGISTER doubles as the
+        re-registration/password-reset path: its credential replaces the
+        first in place, then the fixture demotes the bound admin and every
+        later authority decision on this still-open connection must refuse.
+
+        Terminal line:
+          BLE_OTA_HARNESS_RESULT status=PASS scenario=identity
+              preauth_config_refused=OK register_bind=OK login=OK
+              authorized_access=OK reregister_replace=OK
+              demoted_access_refused=OK demoted_login_refused=OK
+        """
+        bridge = EmulatorBleBridge(self.args.device_port, self.args.central_port)
+        await bridge.start(debug=self.args.debug)
+        results: dict[str, str] = {}
+        try:
+            client = await self._connect_client(bridge)
+            client.require_config_discovered()
+            client.require_enroll_discovered()
+
+            # 1. Pre-auth Config read must be refused.
+            try:
+                await client.read_config()
+                emit("FAIL", "scenario=identity preauth_config_refused=NOT_REJECTED")
+                return 1
+            except ProtocolError as exc:
+                if exc.error_code != ATT_ERR_INSUFFICIENT_AUTHENTICATION:
+                    emit("FAIL", f"scenario=identity preauth_config_refused="
+                                 f"WRONG_ERR_{exc.error_code:#04x}")
+                    return 1
+            results["preauth_config_refused"] = "OK"
+            print("pre-auth Config read refused", flush=True)
+
+            # 2. Register (fixture approval #1 binds the credential to the
+            # seeded enrolled admin, user 1).
+            password = self.args.password
+            reset_password = self.args.reset_password
+            await client.register("harness", password)
+            results["register_bind"] = "OK"
+
+            # 3. Challenge-response login with the registered credential.
+            await client.login("harness", password)
+            results["login"] = "OK"
+            print("registered and logged in", flush=True)
+
+            # 4. Authorized access: an Enrollment-characteristic read must
+            # now succeed (same live-authority gate as Config; the empty
+            # value keeps this probe to a single ACL PDU - the esp-emu wedge
+            # below is sensitive to multi-PDU server responses).
+            await client.read_enroll()
+            results["authorized_access"] = "OK"
+            print("authorized Enrollment read OK", flush=True)
+
+            # 5. Re-registration (password reset): replaces the stored
+            # credential; fixture approval #2 also demotes the bound admin.
+            try:
+                await client.register("harness", reset_password)
+            except asyncio.TimeoutError:
+                # The device demonstrably processed this REGISTER (its reply
+                # notification is initiated host-side). When the reply never
+                # reaches us AND a trivial follow-up op also stalls, this is
+                # the documented esp-emu BLE pipeline wedge (~30 inbound ACL
+                # packets/boot silently dropped, esp-emu 0.39.x-0.40.x) - not
+                # a firmware refusal. Classify it explicitly rather than
+                # mis-reporting a PASS/FAIL either way.
+                wedge = False
+                try:
+                    await asyncio.wait_for(client.auth.read_value(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    wedge = True
+                except Exception:  # noqa: BLE001 - any answer proves transport alive
+                    wedge = False
+                if wedge:
+                    emit("FAIL", "scenario=identity demote_trigger=WEDGE_EMU "
+                                 "(esp-emu HCI pipeline wedge; see "
+                                 "add-ble-ota-emulator-harness design.md D6)")
+                else:
+                    emit("FAIL", "scenario=identity demote_trigger=NO_REPLY")
+                return 1
+            print("re-registered (credential replaced; fixture demoted user 1)",
+                  flush=True)
+            results["reregister_replace"] = "OK"
+
+            # 6. Demoted access: same open, authenticated connection - the
+            # Enrollment read must now be refused because the bound user's
+            # live permission is no longer admin.
+            try:
+                await client.read_enroll()
+                emit("FAIL", "scenario=identity demoted_access_refused=NOT_REJECTED")
+                return 1
+            except ProtocolError as exc:
+                if exc.error_code != ATT_ERR_INSUFFICIENT_AUTHENTICATION:
+                    emit("FAIL", f"scenario=identity demoted_access_refused="
+                                 f"WRONG_ERR_{exc.error_code:#04x}")
+                    return 1
+            results["demoted_access_refused"] = "OK"
+            print("demoted Config read refused on open connection", flush=True)
+
+            # 7. A non-admin can no longer authenticate at all: LOGIN_VERIFY
+            # is refused even though the (replaced) credential is correct.
+            try:
+                await client.login("harness", reset_password)
+                emit("FAIL", "scenario=identity demoted_login_refused=LOGIN_ACCEPTED")
+                return 1
+            except ProtocolError:
+                pass  # LOGIN_VERIFY write rejected: exactly right
+            except CompanionError as exc:
+                # Notification arrived but not RESULT_OK: also a refusal.
+                if "rejected" not in str(exc):
+                    raise
+            results["demoted_login_refused"] = "OK"
+            print("demoted login refused (non-admin cannot authenticate)", flush=True)
+
+            detail = " ".join(f"{k}={v}" for k, v in results.items())
+            emit("PASS", f"scenario=identity {detail}")
+            return 0
+        except SystemExit:
+            return 1
+        except Exception as exc:  # noqa: BLE001 - any failure must be loud
+            emit("FAIL", f"scenario=identity {exc!r}")
+            return 1
+        finally:
+            await bridge.close()
+
+    async def run_ota(self) -> int:
         bridge = EmulatorBleBridge(self.args.device_port, self.args.central_port)
         await bridge.start(debug=self.args.debug)
         try:
@@ -290,11 +448,12 @@ class Harness:
 
 async def amain() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--scenario", choices=("ota", "identity"), default="ota")
     parser.add_argument("--device-port", type=int, default=14431)
     parser.add_argument("--central-port", type=int, default=14432)
-    parser.add_argument("--tampered-image", type=str, required=True)
-    parser.add_argument("--foreign-image", type=str, required=True)
-    parser.add_argument("--valid-image", type=str, required=True)
+    parser.add_argument("--tampered-image", type=str, required=False)
+    parser.add_argument("--foreign-image", type=str, required=False)
+    parser.add_argument("--valid-image", type=str, required=False)
     parser.add_argument("--scan-timeout", type=float, default=120.0)
     parser.add_argument("--connect-timeout", type=float, default=15.0)
     parser.add_argument("--pair-timeout", type=float, default=30.0)
@@ -303,8 +462,14 @@ async def amain() -> int:
     parser.add_argument("--inter-chunk-delay", type=float, default=0.05)
     parser.add_argument("--chunk-size", type=int, default=0)
     parser.add_argument("--password", default="correct horse battery staple")
+    parser.add_argument("--reset-password", default="staple battery horse correct")
     parser.add_argument("--debug", action="store_true")
     args = parser.parse_args()
+    if args.scenario == "ota":
+        missing = [name for name in ("tampered_image", "foreign_image", "valid_image")
+                   if not getattr(args, name)]
+        if missing:
+            parser.error(f"--scenario ota requires: --{', --'.join(m.replace('_', '-') for m in missing)}")
     return await Harness(args).run()
 
 

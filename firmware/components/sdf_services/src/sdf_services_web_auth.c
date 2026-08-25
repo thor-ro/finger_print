@@ -120,14 +120,35 @@ sdf_services_web_auth_challenge_t sdf_services_web_auth_make_pseudo_challenge(
 }
 
 sdf_services_web_auth_registration_decision_t sdf_services_web_auth_decide_registration(
-    const char *username, const uint8_t *password_hash, size_t hash_len,
+    const char *name, const uint8_t *password_hash, size_t hash_len,
     const uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN],
-    uint8_t permission, bool admin_authorized) {
+    uint16_t authorizing_user_id, bool admin_authorized,
+    bool name_available) {
   sdf_services_web_auth_registration_decision_t decision = {0};
   decision.reply_authorized = admin_authorized;
 
-  if (!admin_authorized || !username || !password_hash || !salt ||
+  if (!admin_authorized || !name || !password_hash || !salt ||
       hash_len != SDF_STORAGE_WEB_USER_HASH_LEN) {
+    return decision;
+  }
+
+  /* Refuse rather than persist an unbound credential: the alternative
+   * failure mode is an account belonging to nobody, which the live
+   * authority lookup would then resolve against a nonexistent user on
+   * every request (companion-identity design.md "Registration refuses
+   * rather than persists unbound"). The client is told the registration
+   * was not granted so it never waits on a credential that was not saved. */
+  if (authorizing_user_id < SDF_STORAGE_FP_USER_ID_MIN ||
+      authorizing_user_id > SDF_STORAGE_FP_USER_ID_MAX) {
+    decision.reply_authorized = false;
+    return decision;
+  }
+
+  /* The submitted name is the user's name and the login identifier; a name
+   * already held by a different enrolled user is refused with nothing
+   * persisted. */
+  if (!name_available) {
+    decision.reply_authorized = false;
     return decision;
   }
 
@@ -139,9 +160,10 @@ sdf_services_web_auth_registration_decision_t sdf_services_web_auth_decide_regis
   }
 
   decision.should_persist = true;
-  strncpy(decision.user.username, username, SDF_STORAGE_WEB_USER_NAME_MAX - 1);
-  decision.user.username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
-  decision.user.permission = permission;
+  decision.user_id = authorizing_user_id;
+  strncpy(decision.user.name, name, SDF_STORAGE_WEB_USER_NAME_MAX - 1);
+  decision.user.name[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
+  decision.user.has_credential = true;
   decision.user.valid = true;
   memcpy(decision.user.salt, salt, SDF_STORAGE_WEB_USER_SALT_LEN);
   memcpy(decision.user.stretched_credential, stretched, SDF_STORAGE_WEB_USER_STRETCHED_LEN);

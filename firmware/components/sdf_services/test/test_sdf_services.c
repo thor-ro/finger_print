@@ -4,16 +4,40 @@
 
 #include "nvs_flash.h"
 
+#include "sdkconfig.h"
+
 #include "sdf_services.h"
 #include "sdf_services_internal.h"
 #include "sdf_event_router.h"
 #include "sdf_platform_time.h"
+
+#ifdef CONFIG_IDF_TARGET_LINUX
+/* Last-admin-delete-guard tests drive the real fingerprint owner task
+ * through the Linux mock UART's scripted-response hook - both exist only
+ * for the host target (see the guard-test section near the end of this
+ * file). */
+#include "fingerprint.h"
+#include "sdf_mock_linux_drivers.h"
+#endif
 
 /* Test-only fault injector for sdf_storage_enrolled_users_save(), compiled
  * into sdf_storage only when SDF_STORAGE_TESTING is defined (see
  * firmware/test_runner/main/CMakeLists.txt) - see its definition in
  * sdf_storage.c for why cache-enrolled-user-state needs this seam. */
 extern void test_sdf_storage_set_enrolled_users_save_fail_count(uint32_t count);
+
+static sdf_storage_web_user_t make_web_user_record(const char *name,
+                                                    bool has_credential) {
+  sdf_storage_web_user_t user = {0};
+  strncpy(user.name, name, sizeof(user.name) - 1);
+  if (has_credential) {
+    memset(user.salt, 0xCD, sizeof(user.salt));
+    memset(user.stretched_credential, 0xAB, sizeof(user.stretched_credential));
+    user.has_credential = true;
+  }
+  user.valid = true;
+  return user;
+}
 
 /* Needed only for make_response()'s independent reference HMAC below - see
  * sdf_services_web_auth.c for why these defines/private headers are needed
@@ -263,8 +287,9 @@ void test_web_auth_verify_response_all_zero_response_is_invalid(void) {
 
 void test_web_auth_make_login_challenge_uses_stored_salt_and_nonce(void) {
   sdf_storage_web_user_t user = {0};
-  strncpy(user.username, "alice", sizeof(user.username) - 1);
+  strncpy(user.name, "alice", sizeof(user.name) - 1);
   memset(user.salt, 0x33, sizeof(user.salt));
+  user.has_credential = true;
   user.valid = true;
 
   uint8_t nonce[SDF_SERVICES_WEB_AUTH_NONCE_LEN];
@@ -306,8 +331,9 @@ void test_web_auth_make_pseudo_challenge_differs_by_username(void) {
  * an error/empty response that would itself leak "user not found"). */
 void test_web_auth_known_and_unknown_challenges_are_same_shape(void) {
   sdf_storage_web_user_t user = {0};
-  strncpy(user.username, "alice", sizeof(user.username) - 1);
+  strncpy(user.name, "alice", sizeof(user.name) - 1);
   memset(user.salt, 0x33, sizeof(user.salt));
+  user.has_credential = true;
   user.valid = true;
 
   uint8_t pseudo_key[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN];
@@ -337,12 +363,15 @@ void test_web_auth_decide_registration_authorized_persists_user(void) {
   memset(salt, 0x22, sizeof(salt));
 
   sdf_services_web_auth_registration_decision_t decision =
-      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), salt, 2, true);
+      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), salt,
+                                                1, true, true);
 
   TEST_ASSERT_TRUE(decision.should_persist);
   TEST_ASSERT_TRUE(decision.reply_authorized);
-  TEST_ASSERT_EQUAL_STRING("bob", decision.user.username);
-  TEST_ASSERT_EQUAL(2, decision.user.permission);
+  /* Task 3.1: the credential binds to the authorizing admin's user id. */
+  TEST_ASSERT_EQUAL(1, decision.user_id);
+  TEST_ASSERT_EQUAL_STRING("bob", decision.user.name);
+  TEST_ASSERT_TRUE(decision.user.has_credential);
   TEST_ASSERT_TRUE(decision.user.valid);
   TEST_ASSERT_EQUAL_UINT8_ARRAY(salt, decision.user.salt, sizeof(salt));
   /* Stretched credential must not equal the raw received hash - that's the
@@ -364,10 +393,439 @@ void test_web_auth_decide_registration_denied_does_not_persist(void) {
   memset(salt, 0x22, sizeof(salt));
 
   sdf_services_web_auth_registration_decision_t decision =
-      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), salt, 2, false);
+      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), salt,
+                                                1, false, true);
 
   TEST_ASSERT_FALSE(decision.should_persist);
   TEST_ASSERT_FALSE(decision.reply_authorized);
+}
+
+void test_web_auth_decide_registration_unbound_refused(void) {
+  /* Task 3.3: no authorizing user id captured -> refuse, persist nothing,
+   * and do not tell the client the registration was granted either. */
+  uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash, 0x11, sizeof(hash));
+  uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+  memset(salt, 0x22, sizeof(salt));
+
+  sdf_services_web_auth_registration_decision_t unbound =
+      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), salt,
+                                                0, true, true);
+  TEST_ASSERT_FALSE(unbound.should_persist);
+  TEST_ASSERT_FALSE(unbound.reply_authorized);
+
+  sdf_services_web_auth_registration_decision_t out_of_range =
+      sdf_services_web_auth_decide_registration("bob", hash, sizeof(hash), salt,
+                                                SDF_STORAGE_FP_USER_ID_MAX + 1, true, true);
+  TEST_ASSERT_FALSE(out_of_range.should_persist);
+  TEST_ASSERT_FALSE(out_of_range.reply_authorized);
+}
+
+/* Task 4.1 (decision side): a submitted name already held by a different
+ * enrolled user is refused - the caller resolves `name_available` via
+ * sdf_services_find_name_holder(); here we pin that the decision honours it
+ * by refusing with nothing persisted and no authorized reply. */
+void test_web_auth_decide_registration_name_collision_refused(void) {
+  uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash, 0x11, sizeof(hash));
+  uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+  memset(salt, 0x22, sizeof(salt));
+
+  sdf_services_web_auth_registration_decision_t decision =
+      sdf_services_web_auth_decide_registration("taken", hash, sizeof(hash), salt,
+                                                2, true, false);
+  TEST_ASSERT_FALSE(decision.should_persist);
+  TEST_ASSERT_FALSE(decision.reply_authorized);
+}
+
+/* ---------------------------------------------------------------------------
+ * companion-identity 2.x: the authorizing admin's user id lives in
+ * sdf_services' owned pending-request state, captured at claim time and
+ * read back by the getter - never carried in an event payload.
+ * ------------------------------------------------------------------------- */
+
+static const uint8_t kTestRegHash[SDF_STORAGE_WEB_USER_HASH_LEN] = {0x5A};
+
+static void seed_pending_web_reg(void) {
+  /* reset_state() deliberately leaves the web-reg pending state alone (it
+   * is owned BLE-request state, not enrolled-user state), so drop any
+   * request left over from an earlier test first. */
+  sdf_services_clear_web_reg_auth();
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_services_set_web_reg_auth("newname", kTestRegHash,
+                                                  SDF_STORAGE_WEB_USER_HASH_LEN));
+  /* A registration authorization is only claimable while a WEB_REG_AUTH
+   * admin action is actually pending - mirror how a real request arrives. */
+  sdf_services_state()->pending_admin_action =
+      SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH;
+}
+
+/* Task 2.5: the user id of the admin whose scan claimed the pending WEB_REG_AUTH
+ * action is captured into owned state and returned by the getter. */
+void test_web_reg_auth_authorizer_captured_on_claim(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  seed_pending_web_reg();
+
+  sdf_fingerprint_match_t match = {.user_id = 7, .permission = 3};
+  TEST_ASSERT_TRUE(sdf_services_try_claim_admin_action(&match));
+
+  char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+  uint16_t authorizer = 0xFFFF;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_get_web_reg_auth(username,
+                                                          sizeof(username),
+                                                          &authorizer));
+  TEST_ASSERT_EQUAL_STRING("newname", username);
+  TEST_ASSERT_EQUAL(7, authorizer);
+}
+
+/* Task 2.5: a non-admin scan denies the request - nothing is authorized and
+ * no user id is captured (the value stays absent for the timeout path too:
+ * both resolve through sdf_services_clear_web_reg_auth(), which zeroes it -
+ * pinned by the clear test below). */
+void test_web_reg_auth_authorizer_absent_on_denial(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  seed_pending_web_reg();
+
+  sdf_fingerprint_match_t non_admin = {.user_id = 4, .permission = 1};
+  TEST_ASSERT_TRUE(sdf_services_try_claim_admin_action(&non_admin));
+
+  char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+  uint16_t authorizer = 0xFFFF;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_get_web_reg_auth(username,
+                                                          sizeof(username),
+                                                          &authorizer));
+  TEST_ASSERT_EQUAL(0, authorizer);
+}
+
+/* Task 2.4: every clear path drops the captured id together with the rest
+ * of the pending-request state. */
+void test_web_reg_auth_clear_drops_captured_user_id(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  seed_pending_web_reg();
+
+  sdf_fingerprint_match_t match = {.user_id = 3, .permission = 3};
+  TEST_ASSERT_TRUE(sdf_services_try_claim_admin_action(&match));
+
+  sdf_services_clear_web_reg_auth();
+
+  char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+  uint16_t authorizer = 0xFFFF;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND,
+                    sdf_services_get_web_reg_auth(username, sizeof(username),
+                                                  &authorizer));
+}
+
+/* Task 2.5: the WEB_REG_AUTH_RESULT event payload carries exactly one bool
+ * ("authorized"). Identity material must never ride on the event - it flows
+ * through the owned pending-request state instead. If this size assert ever
+ * fails because a field was added back, that rule has been broken. */
+void test_web_reg_auth_result_event_carries_no_identity_payload(void) {
+  typedef struct {
+    bool authorized;
+  } expected_payload_t;
+  TEST_ASSERT_EQUAL(sizeof(expected_payload_t),
+                    sizeof(((sdf_event_router_event_t *)0)->payload.web_reg_auth_result));
+}
+
+/* ---------------------------------------------------------------------------
+ * companion-identity 3.x/5.x: bound persistence against unified records.
+ * ------------------------------------------------------------------------- */
+
+/* Task 3.5: first registration binds - saving the decision against the
+ * authorizing admin's user id creates exactly one resolvable account. */
+void test_registration_binds_credential_to_user_id(void) {
+  nvs_flash_init();
+  sdf_storage_web_user_clear_all();
+
+  uint8_t hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash, 0x11, sizeof(hash));
+  uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+  memset(salt, 0x22, sizeof(salt));
+
+  sdf_services_web_auth_registration_decision_t decision =
+      sdf_services_web_auth_decide_registration("alice", hash, sizeof(hash), salt,
+                                                1, true, true);
+  TEST_ASSERT_TRUE(decision.should_persist);
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_storage_web_user_save(decision.user_id, &decision.user));
+
+  /* The account resolves under the admin's own user id... */
+  sdf_storage_web_user_t loaded = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &loaded));
+  TEST_ASSERT_EQUAL_STRING("alice", loaded.name);
+  TEST_ASSERT_TRUE(loaded.has_credential);
+  /* ...and by login name. */
+  uint16_t holder = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_find_name_holder("alice", &holder));
+  TEST_ASSERT_EQUAL(1, holder);
+
+  sdf_storage_web_user_clear_all();
+}
+
+/* Task 3.5: re-registration by the same admin replaces the credential in
+ * place; a response derived from the previous credential no longer verifies. */
+void test_reregistration_replaces_previous_credential(void) {
+  nvs_flash_init();
+  sdf_storage_web_user_clear_all();
+
+  uint8_t old_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(old_hash, 0x11, sizeof(old_hash));
+  uint8_t old_salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+  memset(old_salt, 0x22, sizeof(old_salt));
+
+  sdf_services_web_auth_registration_decision_t first =
+      sdf_services_web_auth_decide_registration("alice", old_hash, sizeof(old_hash),
+                                                old_salt, 1, true, true);
+  TEST_ASSERT_TRUE(first.should_persist);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(first.user_id, &first.user));
+
+  /* Old credential verifies against its stored stretched credential... */
+  uint8_t nonce[SDF_SERVICES_WEB_AUTH_NONCE_LEN];
+  memset(nonce, 0x44, sizeof(nonce));
+  uint8_t old_stretched[SDF_STORAGE_WEB_USER_STRETCHED_LEN];
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_services_web_auth_stretch_credential(
+                        old_hash, sizeof(old_hash), old_salt,
+                        SDF_SERVICES_WEB_AUTH_PBKDF2_ITERATIONS, old_stretched));
+  uint8_t old_response[SDF_SERVICES_WEB_AUTH_RESPONSE_LEN];
+  make_response(old_stretched, nonce, old_response);
+  TEST_ASSERT_TRUE(sdf_services_web_auth_verify_response(
+      first.user.stretched_credential, nonce, sizeof(nonce), old_response,
+      sizeof(old_response)));
+
+  /* ...then re-registration with a fresh salt/hash replaces it. */
+  uint8_t new_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(new_hash, 0x77, sizeof(new_hash));
+  uint8_t new_salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+  memset(new_salt, 0x88, sizeof(new_salt));
+
+  sdf_services_web_auth_registration_decision_t second =
+      sdf_services_web_auth_decide_registration("alice", new_hash, sizeof(new_hash),
+                                                new_salt, 1, true, true);
+  TEST_ASSERT_TRUE(second.should_persist);
+  TEST_ASSERT_EQUAL(1, second.user_id); /* same admin, same account */
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(second.user_id, &second.user));
+
+  /* Exactly one account still exists... */
+  size_t count = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
+  TEST_ASSERT_EQUAL(1, count);
+
+  /* ...the fresh credential material replaced the old (fresh salt), and */
+  TEST_ASSERT_NOT_EQUAL(0, memcmp(second.user.salt, first.user.salt,
+                                  SDF_STORAGE_WEB_USER_SALT_LEN));
+  TEST_ASSERT_NOT_EQUAL(0, memcmp(second.user.stretched_credential,
+                                  first.user.stretched_credential,
+                                  SDF_STORAGE_WEB_USER_STRETCHED_LEN));
+  /* ...a response computed from the previous credential is rejected. */
+  TEST_ASSERT_FALSE(sdf_services_web_auth_verify_response(
+      second.user.stretched_credential, nonce, sizeof(nonce), old_response,
+      sizeof(old_response)));
+
+  sdf_storage_web_user_clear_all();
+}
+
+/* Task 3.5: two different admins registering hold two separate accounts -
+ * neither replaces the other. */
+void test_two_admins_hold_separate_accounts(void) {
+  nvs_flash_init();
+  sdf_storage_web_user_clear_all();
+
+  uint8_t hash_a[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash_a, 0x11, sizeof(hash_a));
+  uint8_t hash_b[SDF_STORAGE_WEB_USER_HASH_LEN];
+  memset(hash_b, 0x33, sizeof(hash_b));
+  uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
+  memset(salt, 0x22, sizeof(salt));
+
+  sdf_services_web_auth_registration_decision_t reg_a =
+      sdf_services_web_auth_decide_registration("alice", hash_a, sizeof(hash_a),
+                                                salt, 1, true, true);
+  TEST_ASSERT_TRUE(reg_a.should_persist);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(reg_a.user_id, &reg_a.user));
+
+  sdf_services_web_auth_registration_decision_t reg_b =
+      sdf_services_web_auth_decide_registration("bob", hash_b, sizeof(hash_b),
+                                                salt, 2, true, true);
+  TEST_ASSERT_TRUE(reg_b.should_persist);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(reg_b.user_id, &reg_b.user));
+
+  /* Alice's record is untouched by Bob's registration. */
+  sdf_storage_web_user_t loaded_a = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &loaded_a));
+  TEST_ASSERT_EQUAL_STRING("alice", loaded_a.name);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(reg_a.user.salt, loaded_a.salt,
+                                SDF_STORAGE_WEB_USER_SALT_LEN);
+
+  sdf_storage_web_user_t loaded_b = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(2, &loaded_b));
+  TEST_ASSERT_EQUAL_STRING("bob", loaded_b.name);
+
+  sdf_storage_web_user_clear_all();
+}
+
+/* ---------------------------------------------------------------------------
+ * companion-identity 4.x: name uniqueness across enrolled users.
+ * ------------------------------------------------------------------------- */
+
+/* Task 4.2: renaming onto a name another enrolled user holds is refused and
+ * leaves both records unchanged. */
+void test_set_user_name_refuses_duplicate_of_other_user(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  nvs_flash_init();
+
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 2);
+
+  sdf_storage_web_user_t rec1 = make_web_user_record("alice", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &rec1));
+  /* User 2 holds only a (blank) name - no credential. Uniqueness must
+   * refuse the collision anyway. */
+  sdf_storage_web_user_t rec2 = {0};
+  rec2.valid = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &rec2));
+
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sdf_services_set_user_name(2, "alice"));
+
+  /* Both records unchanged. */
+  sdf_storage_web_user_t check1 = {0}, check2 = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &check1));
+  TEST_ASSERT_EQUAL_STRING("alice", check1.name);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(2, &check2));
+  TEST_ASSERT_EQUAL('\0', check2.name[0]);
+  TEST_ASSERT_FALSE(check2.has_credential);
+
+  sdf_storage_web_user_clear_all();
+}
+
+/* Task 4.2 (no-op case): renaming to the user's own current name succeeds. */
+void test_set_user_name_to_own_name_is_noop_success(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  nvs_flash_init();
+
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
+  sdf_storage_web_user_t rec = make_web_user_record("alice", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &rec));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_set_user_name(1, "alice"));
+
+  sdf_storage_web_user_t check = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &check));
+  TEST_ASSERT_EQUAL_STRING("alice", check.name);
+  TEST_ASSERT_TRUE(check.has_credential);
+
+  sdf_storage_web_user_clear_all();
+}
+
+/* Task 4.2: setting a fresh name merges into the existing record without
+ * destroying a stored credential. */
+void test_set_user_name_preserves_existing_credential(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  nvs_flash_init();
+
+  SDF_SERVICES_BMP_SET(sdf_services_state()->enrolled_user_bmp, 1);
+  sdf_storage_web_user_t rec = {0}; /* valid record, no name yet */
+  memset(rec.salt, 0xCD, sizeof(rec.salt));
+  memset(rec.stretched_credential, 0xAB, sizeof(rec.stretched_credential));
+  rec.has_credential = true;
+  rec.valid = true;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &rec));
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_set_user_name(1, "carol"));
+
+  sdf_storage_web_user_t check = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &check));
+  TEST_ASSERT_EQUAL_STRING("carol", check.name);
+  TEST_ASSERT_TRUE(check.has_credential);
+  TEST_ASSERT_EQUAL_MEMORY(rec.stretched_credential, check.stretched_credential,
+                           SDF_STORAGE_WEB_USER_STRETCHED_LEN);
+
+  sdf_storage_web_user_clear_all();
+}
+
+/* Task 4.1 helper coverage: find_name_holder scans name-only records too -
+ * uniqueness spans all enrolled users, not just credential holders. */
+void test_find_name_holder_sees_records_without_credentials(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  nvs_flash_init();
+
+  sdf_storage_web_user_t name_only = make_web_user_record("standard", false);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(5, &name_only));
+
+  uint16_t holder = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_find_name_holder("standard", &holder));
+  TEST_ASSERT_EQUAL(5, holder);
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND,
+                    sdf_services_find_name_holder("nobody", &holder));
+
+  sdf_storage_web_user_clear_all();
+}
+
+/* ---------------------------------------------------------------------------
+ * companion-identity 6.x: session authority resolved live from the bound
+ * user via sdf_services_user_is_enrolled_admin().
+ * ------------------------------------------------------------------------- */
+
+/* Task 6.6: authority is re-read per call from the enrolled-user cache -
+ * the same query returns different answers as the cache changes, which is
+ * what makes demotion/deletion take effect on an open session without any
+ * cascade over account records. */
+void test_user_is_enrolled_admin_rereads_cache_per_call(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 3);
+  TEST_ASSERT_TRUE(sdf_services_user_is_enrolled_admin(1));
+
+  /* Demotion takes effect immediately on the next read. */
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 1);
+  TEST_ASSERT_FALSE(sdf_services_user_is_enrolled_admin(1));
+
+  /* Re-promotion is visible again - proof each call reads current state. */
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 3);
+  TEST_ASSERT_TRUE(sdf_services_user_is_enrolled_admin(1));
+}
+
+/* Task 6.6: deleting the bound user (cache bit cleared, exactly what
+ * sdf_services_delete_user() does after the sensor delete) strips authority
+ * on subsequent decisions - no account modification required. */
+void test_user_is_enrolled_admin_false_after_deletion_from_cache(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 2);
+  sdf_services_perm_set(s->enrolled_perm_packed, 2, 3);
+  TEST_ASSERT_TRUE(sdf_services_user_is_enrolled_admin(2));
+
+  SDF_SERVICES_BMP_CLEAR(s->enrolled_user_bmp, 2);
+  TEST_ASSERT_FALSE(sdf_services_user_is_enrolled_admin(2));
+}
+
+/* Task 6.6: a permission level below admin never confers companion
+ * authority - including reserved level 2 (companion-identity "Permission
+ * Level 2 Is Reserved And Companion-Irrelevant"). */
+void test_user_is_enrolled_admin_false_for_non_admin_levels(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, 1);
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 1);
+  TEST_ASSERT_FALSE(sdf_services_user_is_enrolled_admin(1));
+
+  sdf_services_perm_set(s->enrolled_perm_packed, 1, 2);
+  TEST_ASSERT_FALSE(sdf_services_user_is_enrolled_admin(1));
 }
 
 /* Web auth: pending-registration resolve guard */
@@ -476,11 +934,8 @@ void test_setup_state_intermediate_states_are_derived_in_step_order(void) {
    * "still needs an account" from "needs Nuki pairing", or the wizard
    * resumes at a step the user already finished and completion can be
    * accepted on a device with no way to log in. */
-  sdf_storage_web_user_t user = {0};
-  strncpy(user.username, "owner", sizeof(user.username) - 1);
-  user.permission = 3;
-  user.valid = true;
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &user));
+  sdf_storage_web_user_t user = make_web_user_record("owner", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &user));
   TEST_ASSERT_EQUAL(SDF_SERVICES_SETUP_STATE_REGISTERED,
                     sdf_services_get_setup_state());
 
@@ -913,10 +1368,8 @@ void test_setup_phase_timeout_wipe_erases_partial_state(void) {
   sdf_services_setup_phase_reset_for_test();
 
   /* Seed every partial-state record the wipe must erase. */
-  sdf_storage_web_user_t user = {0};
-  strncpy(user.username, "wizard", sizeof(user.username) - 1);
-  user.valid = true;
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &user));
+  sdf_storage_web_user_t user = make_web_user_record("wizard", false);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &user));
 
   uint8_t key[32] = {0x42};
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(555, key));
@@ -934,7 +1387,7 @@ void test_setup_phase_timeout_wipe_erases_partial_state(void) {
 
   /* ...and every partial record gone. The latch stays unset. */
   sdf_storage_web_user_t loaded = {0};
-  TEST_ASSERT_NOT_EQUAL(ESP_OK, sdf_storage_web_user_load(0, &loaded));
+  TEST_ASSERT_NOT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &loaded));
   uint32_t auth_id;
   uint8_t shared[32];
   TEST_ASSERT_NOT_EQUAL(ESP_OK, sdf_storage_nuki_load(&auth_id, shared));
@@ -993,12 +1446,13 @@ void test_enrolled_user_count_updates_after_clear(void) {
  * directly here rather than through each of the four public mutation
  * functions: those all also require a successful fp_*() sensor round trip
  * before they ever reach this helper, and the Linux host target's mock UART
- * never produces a valid frame (see test_fingerprint_owner_task.c and the
- * fp-io-owner-task change this depends on), so fp_delete_user(),
- * fp_delete_all_users(), fp_change_user_permission() and fp_enroll_step()
- * cannot be made to succeed in a host test. That pre-existing, documented
- * constraint is why the sensor-rollback and red-LED wrapper logic around
- * each of those four call sites (e.g. sdf_services_enroll.c's
+ * never produces a valid frame on its own (see test_fingerprint_owner_task.c
+ * and the fp-io-owner-task change this depends on), so fp_change_user_permission()
+ * and fp_enroll_step() cannot be made to succeed in a host test. (fp_delete_user()
+ * and fp_delete_all_users() gained one via sdf_mock_uart_queue_response() -
+ * see the last-admin-delete-guard section below.) The pre-existing constraint
+ * still explains why the remaining sensor-rollback and red-LED wrapper logic
+ * around those call sites (e.g. sdf_services_enroll.c's
  * SDF_ENROLL_ACT_COMPLETE branch) is exercised on hardware (see tasks.md
  * section 8) rather than here. */
 
@@ -1054,6 +1508,270 @@ void test_persist_enrolled_users_locked_fails_after_exhausting_retries(void) {
   test_sdf_storage_set_enrolled_users_save_fail_count(2);
   TEST_ASSERT_EQUAL(ESP_OK, sdf_services_persist_enrolled_users_locked());
 }
+
+/* ---------------------------------------------------------------------------
+ * Last-admin delete guard (last-admin-delete-guard).
+ *
+ * sdf_services_delete_user() must refuse an unenrolled id (ESP_ERR_NOT_FOUND)
+ * and the deletion of the only enrolled admin (ESP_ERR_INVALID_STATE) from a
+ * snapshot of the enrolled-user cache taken before any sensor traffic, while
+ * sdf_services_clear_all_users() stays deliberately exempt.
+ *
+ * These are host-target-only: they run the real fingerprint owner task
+ * against the Linux mock UART, scripting the sensor's ACK reply through
+ * sdf_mock_uart_queue_response() so fp_delete_user()/fp_delete_all_users()
+ * complete successfully and the cache-update/NVS-persist wrapper behind them
+ * runs exactly as it does behind a real sensor. The no-data mock could never
+ * produce that success path on its own (see the constraint noted above
+ * test_persist_enrolled_users_locked_writes_current_cache_to_nvs(), which
+ * this hook retires for the two frame-shaped ops these tests need).
+ * ------------------------------------------------------------------------- */
+
+#ifdef CONFIG_IDF_TARGET_LINUX
+
+/* Wire-format constants pinned to fingerprint.c's private defines. A drift
+ * fails loudly: fp_validate_response_impl() rejects a response whose marker,
+ * cmd or checksum byte does not match its request, so the sensor op would
+ * stop returning OK and the success-path assertions below would trip. */
+#define TEST_FP_MARKER 0xF5u
+#define TEST_FP_CMD_DELETE_USER 0x04u
+#define TEST_FP_CMD_DELETE_ALL_USERS 0x05u
+
+/* Scripts a success ACK for `cmd` in the exact frame shape
+ * fp_validate_response_impl() expects: [marker, cmd, p1, p2, ack, p,
+ * checksum, marker], checksum = XOR of bytes 1..5. */
+static void queue_sensor_ack(uint8_t cmd) {
+  uint8_t frame[8] = {TEST_FP_MARKER, cmd, 0x00, 0x00,
+                      SDF_FINGERPRINT_ACK_SUCCESS, 0x00, 0x00,
+                      TEST_FP_MARKER};
+  frame[6] = (uint8_t)(frame[1] ^ frame[2] ^ frame[3] ^ frame[4] ^ frame[5]);
+  sdf_mock_uart_queue_response(frame, sizeof(frame));
+}
+
+static void delete_guard_test_setup(void) {
+  ensure_services_initialized();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_reset_state());
+  nvs_flash_init();
+  sdf_mock_uart_reset();
+
+  /* Same arbitrary-but-in-range driver config the owner-task suite uses -
+   * the mock UART/GPIO never touch real hardware. */
+  const sdf_fingerprint_driver_config_t config = {
+      .uart_port = 0,
+      .tx_pin = 0,
+      .rx_pin = 1,
+      .power_en_pin = 2,
+      .baud_rate = 115200,
+      .response_timeout_ms = 1000,
+      .rx_buffer_size = 256,
+      .tx_buffer_size = 256,
+  };
+  TEST_ASSERT_EQUAL(ESP_OK, fp_init(&config));
+}
+
+static void delete_guard_test_teardown(void) {
+  fp_deinit();
+  sdf_mock_uart_reset();
+}
+
+/* Seeds one user into both the in-RAM cache AND its persisted NVS record, so
+ * each test can assert exactly how the operation under test moved either. */
+static void seed_enrolled_user(uint16_t user_id, uint8_t permission) {
+  sdf_services_state_t *s = sdf_services_state();
+  SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, user_id);
+  sdf_services_perm_set(s->enrolled_perm_packed, user_id, permission);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_enrolled_users_save(
+                                s->enrolled_user_bmp,
+                                s->enrolled_perm_packed));
+}
+
+/* Task 3.1: deleting the sole admin is refused with ESP_ERR_INVALID_STATE,
+ * and the refusal is decided before any sensor command goes out - no UART
+ * writes, cache unchanged, NVS record unchanged. */
+void test_delete_user_refuses_sole_admin_before_sensor(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+
+  uint32_t writes_before = sdf_mock_uart_write_count();
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_STATE, sdf_services_delete_user(1));
+
+  TEST_ASSERT_EQUAL(writes_before, sdf_mock_uart_write_count());
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_TRUE(SDF_SERVICES_BMP_TEST(s->enrolled_user_bmp, 1));
+  TEST_ASSERT_EQUAL(3, sdf_services_perm_get(s->enrolled_perm_packed, 1));
+
+  uint16_t loaded_bmp = 0;
+  uint8_t loaded_perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_storage_enrolled_users_load(&loaded_bmp, loaded_perm));
+  TEST_ASSERT_TRUE(SDF_SERVICES_BMP_TEST(loaded_bmp, 1));
+
+  delete_guard_test_teardown();
+}
+
+/* Task 3.2: with two admins enrolled, deleting one succeeds and updates both
+ * the cached record and its NVS persistence; the surviving admin is intact.
+ * Also covers the "Deleting an admin while another admin remains succeeds"
+ * spec scenario. */
+void test_delete_user_allows_one_of_two_admins(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 3);
+
+  queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_FALSE(SDF_SERVICES_BMP_TEST(s->enrolled_user_bmp, 2));
+  TEST_ASSERT_TRUE(SDF_SERVICES_BMP_TEST(s->enrolled_user_bmp, 1));
+  TEST_ASSERT_EQUAL(3, sdf_services_perm_get(s->enrolled_perm_packed, 1));
+
+  uint16_t loaded_bmp = 0;
+  uint8_t loaded_perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_storage_enrolled_users_load(&loaded_bmp, loaded_perm));
+  TEST_ASSERT_EQUAL(s->enrolled_user_bmp, loaded_bmp);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(s->enrolled_perm_packed, loaded_perm,
+                                SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN);
+
+  delete_guard_test_teardown();
+}
+
+/* Task 3.3: deleting a non-admin proceeds regardless of the admin count -
+ * here with exactly one admin enrolled, the configuration the guard exists
+ * to protect. */
+void test_delete_user_allows_non_admin_with_single_admin_enrolled(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 1);
+
+  queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_FALSE(SDF_SERVICES_BMP_TEST(s->enrolled_user_bmp, 2));
+  TEST_ASSERT_TRUE(SDF_SERVICES_BMP_TEST(s->enrolled_user_bmp, 1));
+  TEST_ASSERT_EQUAL(3, sdf_services_perm_get(s->enrolled_perm_packed, 1));
+
+  delete_guard_test_teardown();
+}
+
+/* Task 3.4: an id that is not set in the snapshot bitmap is reported as
+ * ESP_ERR_NOT_FOUND without any sensor traffic - distinguishable from the
+ * ESP_FAIL a failing sensor round-trip produces for an enrolled user. */
+void test_delete_user_unenrolled_id_not_found_without_sensor_traffic(void) {
+  delete_guard_test_setup();
+  /* User 2 is an enrolled non-admin, so a delete request for it WOULD be
+   * allowed past the guards - making the contrast below purely about
+   * not-found vs. sensor failure. */
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 1);
+
+  uint32_t writes_before = sdf_mock_uart_write_count();
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_services_delete_user(7));
+  TEST_ASSERT_EQUAL(writes_before, sdf_mock_uart_write_count());
+
+  /* With no scripted reply the same request for the enrolled non-admin
+   * fails at the sensor instead - a different code, leaving the cache (and
+   * its bit for user 2) untouched because the mutation path is never
+   * reached. */
+  TEST_ASSERT_EQUAL(ESP_FAIL, sdf_services_delete_user(2));
+  TEST_ASSERT_TRUE(SDF_SERVICES_BMP_TEST(
+      sdf_services_state()->enrolled_user_bmp, 2));
+
+  delete_guard_test_teardown();
+}
+
+/* Task 3.5: clear-all is exempt from the guard - a single-admin device is
+ * still wiped completely, cache and NVS both zeroed. */
+void test_clear_all_users_still_clears_single_admin_device(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 1);
+
+  queue_sensor_ack(TEST_FP_CMD_DELETE_ALL_USERS);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_clear_all_users());
+
+  TEST_ASSERT_EQUAL(0, sdf_services_state()->enrolled_user_bmp);
+
+  uint16_t loaded_bmp = 0xFFFF;
+  uint8_t loaded_perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN];
+  memset(loaded_perm, 0xAA, sizeof(loaded_perm));
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_storage_enrolled_users_load(&loaded_bmp, loaded_perm));
+  TEST_ASSERT_EQUAL(0, loaded_bmp);
+  uint8_t zero_perm[SDF_STORAGE_ENROLLED_USERS_PERM_PACKED_LEN] = {0};
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(zero_perm, loaded_perm, sizeof(zero_perm));
+
+  delete_guard_test_teardown();
+}
+
+/* companion-identity 5.3: deleting a user destroys their unified record -
+ * including any bound credential - and their name afterwards answers as an
+ * unknown name for login purposes (find_by_name() misses, so LOGIN_INIT
+ * routes through the pseudo-salt challenge). */
+void test_delete_user_destroys_bound_credential(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 3);
+
+  sdf_storage_web_user_clear_all();
+  sdf_storage_web_user_t account = make_web_user_record("alice", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &account));
+  /* A separate record for the surviving admin - deletion must not touch it. */
+  sdf_storage_web_user_t survivor_seed = make_web_user_record("bob", false);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &survivor_seed));
+
+  queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+
+  /* The record - name, salt and stretched credential - is gone. */
+  sdf_storage_web_user_t loaded = {0};
+  TEST_ASSERT_NOT_EQUAL(ESP_OK, sdf_storage_web_user_load(2, &loaded));
+
+  /* A LOGIN_INIT for that name now resolves as unknown: find_by_name()
+   * misses, which is exactly the condition that routes the challenge
+   * through the pseudo-salt path. */
+  uint16_t holder = 0;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND,
+                    sdf_services_find_name_holder("alice", &holder));
+
+  /* The surviving admin's record is untouched. */
+  sdf_storage_web_user_t survivor = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &survivor));
+  TEST_ASSERT_EQUAL_STRING("bob", survivor.name);
+
+  sdf_storage_web_user_clear_all();
+  delete_guard_test_teardown();
+}
+
+/* companion-identity 5.3/4.3: deletion releases the name implicitly by
+ * clearing the record - no separate reclamation step exists - so the same
+ * name can be re-registered for another user afterwards. */
+void test_deleted_name_is_available_for_reuse(void) {
+  delete_guard_test_setup();
+  seed_enrolled_user(1, 3);
+  seed_enrolled_user(2, 1);
+
+  sdf_storage_web_user_clear_all();
+  sdf_storage_web_user_t account = make_web_user_record("shared", false);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &account));
+
+  queue_sensor_ack(TEST_FP_CMD_DELETE_USER);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_delete_user(2));
+
+  /* The freed name can now be given to another enrolled user. */
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_services_set_user_name(1, "shared"));
+
+  sdf_storage_web_user_t check = {0};
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &check));
+  TEST_ASSERT_EQUAL_STRING("shared", check.name);
+
+  sdf_storage_web_user_clear_all();
+  delete_guard_test_teardown();
+}
+
+#endif /* CONFIG_IDF_TARGET_LINUX */
 
 void test_button_init_deinit_stop_start_cycle(void) {
   ensure_services_initialized();

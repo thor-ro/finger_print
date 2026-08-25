@@ -6,6 +6,8 @@ This directory contains the static Web Companion app for the Smart Door Bridge.
 - **Web Bluetooth (WebBLE)**: Connects directly to the ESP32-C6 over BLE.
 - **First-Time Setup Wizard**: Mandatory, guided flow for claiming an unclaimed device (Admin enrolment → account registration → Nuki pairing → explicit finish).
 - **Authentication**: Local SHA256 hashing for secure login and registration (challenge-response LOGIN).
+- **Admin-Bound Accounts**: A companion account is an attribute of a fingerprint user, not a standalone record. The name you submit at registration is your name **on the device** (and must be unique), and the account belongs to the admin whose fingerprint scan confirms it. Session authority is derived live from that admin's current permission: demoting or deleting the bound admin immediately removes the account's access.
+- **Re-Registration = Password Reset**: Registering again with an admin's scan replaces that admin's existing password in place — this is the supported way to reset a forgotten password. The app warns before submitting for exactly this reason.
 - **Device Dashboard**: Config, enrollment, Nuki re-pair, Zigbee join and OTA updates natively via the browser.
 
 ## First-Time Setup Wizard

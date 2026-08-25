@@ -48,6 +48,8 @@ from bumble.device import Device, Peer
 
 from bumble_espemu import (
     AUTH_UUID,
+    CONFIG_UUID,
+    ENROLL_UUID,
     OTA_UUID,
     SVC_UUID,
 )
@@ -88,6 +90,8 @@ class CompanionClient:
         self.ota_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self.auth = None
         self.ota = None
+        self.config = None
+        self.enroll = None
         self.att_mtu = 23
 
     async def discover(self) -> None:
@@ -102,6 +106,33 @@ class CompanionClient:
             )
         self.auth = uuid_strs[AUTH_UUID]
         self.ota = uuid_strs[OTA_UUID]
+        # Optional here (OTA scenarios never touch it); the identity scenario
+        # asserts on it via require_config_discovered().
+        self.config = uuid_strs.get(CONFIG_UUID)
+        self.enroll = uuid_strs.get(ENROLL_UUID)
+
+    def require_config_discovered(self) -> None:
+        if self.config is None:
+            raise CompanionError("Config characteristic not discovered")
+
+    async def read_config(self) -> bytes:
+        """Read the Config characteristic. Raises bumble ProtocolError with
+        error_code 0x05 (INSUFFICIENT_AUTHENTICATION) when the session's
+        live-derived authority does not cover it."""
+        self.require_config_discovered()
+        return await self.config.read_value()
+
+    def require_enroll_discovered(self) -> None:
+        if self.enroll is None:
+            raise CompanionError("Enrollment characteristic not discovered")
+
+    async def read_enroll(self) -> bytes:
+        """Read the Enrollment characteristic - a minimal-packet authority
+        probe (its value is empty unless an enrollment is in progress), so it
+        exercises the same live-authority gate as Config without a large
+        multi-PDU response. Same 0x05 refusal semantics as Config."""
+        self.require_enroll_discovered()
+        return await self.enroll.read_value()
 
     async def subscribe(self) -> None:
         await self.auth.subscribe(self._on_auth_notify)

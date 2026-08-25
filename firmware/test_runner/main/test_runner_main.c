@@ -72,13 +72,17 @@ extern void test_sdf_storage_ble_target_clear_already_cleared(void);
 extern void test_sdf_storage_erase_all_success(void);
 extern void test_sdf_storage_erase_all_idempotent(void);
 extern void test_sdf_storage_web_user_save_and_load_success(void);
-extern void test_sdf_storage_web_user_load_not_found(void);
+extern void test_sdf_storage_web_user_record_has_no_permission_field(void);
+extern void test_sdf_storage_web_user_load_absent_key_is_not_found(void);
 extern void test_sdf_storage_web_user_find_by_name_hit(void);
 extern void test_sdf_storage_web_user_find_by_name_miss(void);
+extern void test_sdf_storage_web_user_find_by_name_ignores_credentialless_record(void);
 extern void test_sdf_storage_web_user_clear_success(void);
 extern void test_sdf_storage_web_user_clear_all(void);
 extern void test_sdf_storage_web_user_count(void);
-extern void test_sdf_storage_web_user_save_index_at_max_rejected(void);
+extern void test_sdf_storage_web_user_counts_only_credentials(void);
+extern void test_sdf_storage_web_user_id_out_of_range_rejected(void);
+extern void test_sdf_storage_web_user_capacity_at_all_ten_ids(void);
 extern void test_sdf_storage_web_pseudo_salt_key_generates_on_first_use(void);
 extern void test_sdf_storage_web_pseudo_salt_key_persists_across_loads(void);
 extern void test_sdf_storage_web_pseudo_salt_key_null_arg_rejected(void);
@@ -163,6 +167,16 @@ extern void test_enrolled_user_count_all_ten_users(void);
 extern void test_enrolled_user_count_updates_after_clear(void);
 extern void test_persist_enrolled_users_locked_writes_current_cache_to_nvs(void);
 extern void test_persist_enrolled_users_locked_fails_after_exhausting_retries(void);
+/* Last-admin-delete-guard. Host-only: they drive the real fingerprint owner
+ * task through the Linux mock UART's scripted-response hook, which does not
+ * exist when the drivers are compiled against real hardware. */
+extern void test_delete_user_refuses_sole_admin_before_sensor(void);
+extern void test_delete_user_allows_one_of_two_admins(void);
+extern void test_delete_user_allows_non_admin_with_single_admin_enrolled(void);
+extern void test_delete_user_unenrolled_id_not_found_without_sensor_traffic(void);
+extern void test_clear_all_users_still_clears_single_admin_device(void);
+extern void test_delete_user_destroys_bound_credential(void);
+extern void test_deleted_name_is_available_for_reuse(void);
 extern void test_web_auth_stretch_credential_is_deterministic(void);
 extern void test_web_auth_stretch_credential_differs_by_salt(void);
 extern void test_web_auth_stretch_credential_invalid_args(void);
@@ -177,6 +191,22 @@ extern void test_web_auth_make_pseudo_challenge_differs_by_username(void);
 extern void test_web_auth_known_and_unknown_challenges_are_same_shape(void);
 extern void test_web_auth_decide_registration_authorized_persists_user(void);
 extern void test_web_auth_decide_registration_denied_does_not_persist(void);
+extern void test_web_auth_decide_registration_unbound_refused(void);
+extern void test_web_auth_decide_registration_name_collision_refused(void);
+extern void test_web_reg_auth_authorizer_captured_on_claim(void);
+extern void test_web_reg_auth_authorizer_absent_on_denial(void);
+extern void test_web_reg_auth_clear_drops_captured_user_id(void);
+extern void test_web_reg_auth_result_event_carries_no_identity_payload(void);
+extern void test_registration_binds_credential_to_user_id(void);
+extern void test_reregistration_replaces_previous_credential(void);
+extern void test_two_admins_hold_separate_accounts(void);
+extern void test_set_user_name_refuses_duplicate_of_other_user(void);
+extern void test_set_user_name_to_own_name_is_noop_success(void);
+extern void test_set_user_name_preserves_existing_credential(void);
+extern void test_find_name_holder_sees_records_without_credentials(void);
+extern void test_user_is_enrolled_admin_rereads_cache_per_call(void);
+extern void test_user_is_enrolled_admin_false_after_deletion_from_cache(void);
+extern void test_user_is_enrolled_admin_false_for_non_admin_levels(void);
 extern void test_web_auth_should_resolve_on_web_reg_auth_failure(void);
 extern void test_web_auth_should_not_resolve_on_web_reg_auth_success(void);
 extern void test_web_auth_should_not_resolve_for_other_actions(void);
@@ -487,13 +517,17 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_erase_all_success);
   RUN_TEST(test_sdf_storage_erase_all_idempotent);
   RUN_TEST(test_sdf_storage_web_user_save_and_load_success);
-  RUN_TEST(test_sdf_storage_web_user_load_not_found);
+  RUN_TEST(test_sdf_storage_web_user_record_has_no_permission_field);
+  RUN_TEST(test_sdf_storage_web_user_load_absent_key_is_not_found);
   RUN_TEST(test_sdf_storage_web_user_find_by_name_hit);
   RUN_TEST(test_sdf_storage_web_user_find_by_name_miss);
+  RUN_TEST(test_sdf_storage_web_user_find_by_name_ignores_credentialless_record);
   RUN_TEST(test_sdf_storage_web_user_clear_success);
   RUN_TEST(test_sdf_storage_web_user_clear_all);
   RUN_TEST(test_sdf_storage_web_user_count);
-  RUN_TEST(test_sdf_storage_web_user_save_index_at_max_rejected);
+  RUN_TEST(test_sdf_storage_web_user_counts_only_credentials);
+  RUN_TEST(test_sdf_storage_web_user_id_out_of_range_rejected);
+  RUN_TEST(test_sdf_storage_web_user_capacity_at_all_ten_ids);
   RUN_TEST(test_sdf_storage_web_pseudo_salt_key_generates_on_first_use);
   RUN_TEST(test_sdf_storage_web_pseudo_salt_key_persists_across_loads);
   RUN_TEST(test_sdf_storage_web_pseudo_salt_key_null_arg_rejected);
@@ -576,6 +610,17 @@ void app_main(void) {
   RUN_TEST(test_enrolled_user_count_updates_after_clear);
   RUN_TEST(test_persist_enrolled_users_locked_writes_current_cache_to_nvs);
   RUN_TEST(test_persist_enrolled_users_locked_fails_after_exhausting_retries);
+  /* Last-admin-delete-guard. Host-only: see the extern-declaration comment
+   * above. */
+#ifdef CONFIG_IDF_TARGET_LINUX
+  RUN_TEST(test_delete_user_refuses_sole_admin_before_sensor);
+  RUN_TEST(test_delete_user_allows_one_of_two_admins);
+  RUN_TEST(test_delete_user_allows_non_admin_with_single_admin_enrolled);
+  RUN_TEST(test_delete_user_unenrolled_id_not_found_without_sensor_traffic);
+  RUN_TEST(test_clear_all_users_still_clears_single_admin_device);
+  RUN_TEST(test_delete_user_destroys_bound_credential);
+  RUN_TEST(test_deleted_name_is_available_for_reuse);
+#endif
   RUN_TEST(test_web_auth_stretch_credential_is_deterministic);
   RUN_TEST(test_web_auth_stretch_credential_differs_by_salt);
   RUN_TEST(test_web_auth_stretch_credential_invalid_args);
@@ -590,6 +635,25 @@ void app_main(void) {
   RUN_TEST(test_web_auth_known_and_unknown_challenges_are_same_shape);
   RUN_TEST(test_web_auth_decide_registration_authorized_persists_user);
   RUN_TEST(test_web_auth_decide_registration_denied_does_not_persist);
+  RUN_TEST(test_web_auth_decide_registration_unbound_refused);
+  RUN_TEST(test_web_auth_decide_registration_name_collision_refused);
+  /* companion-identity 2.x-4.x/6.x: authorizer capture, bound registration,
+   * name uniqueness and live authority resolution. All run on the host -
+   * they exercise owned state, storage and the enrolled-user cache only. */
+  RUN_TEST(test_web_reg_auth_authorizer_captured_on_claim);
+  RUN_TEST(test_web_reg_auth_authorizer_absent_on_denial);
+  RUN_TEST(test_web_reg_auth_clear_drops_captured_user_id);
+  RUN_TEST(test_web_reg_auth_result_event_carries_no_identity_payload);
+  RUN_TEST(test_registration_binds_credential_to_user_id);
+  RUN_TEST(test_reregistration_replaces_previous_credential);
+  RUN_TEST(test_two_admins_hold_separate_accounts);
+  RUN_TEST(test_set_user_name_refuses_duplicate_of_other_user);
+  RUN_TEST(test_set_user_name_to_own_name_is_noop_success);
+  RUN_TEST(test_set_user_name_preserves_existing_credential);
+  RUN_TEST(test_find_name_holder_sees_records_without_credentials);
+  RUN_TEST(test_user_is_enrolled_admin_rereads_cache_per_call);
+  RUN_TEST(test_user_is_enrolled_admin_false_after_deletion_from_cache);
+  RUN_TEST(test_user_is_enrolled_admin_false_for_non_admin_levels);
   RUN_TEST(test_web_auth_should_resolve_on_web_reg_auth_failure);
   RUN_TEST(test_web_auth_should_not_resolve_on_web_reg_auth_success);
   RUN_TEST(test_web_auth_should_not_resolve_for_other_actions);

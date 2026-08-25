@@ -216,7 +216,7 @@ Requires: `login` (CLI authentication)
 | `user list` | List all enrolled users (ID, Permission name) | CLI login |
 | `user get <id>` | Show details for a specific user | CLI login |
 | `user add <id> <perm>` | Enroll new user locally (3 scans, requires Admin FP) | CLI login + Admin FP |
-| `user del <id>` | Delete user (requires Admin FP) | CLI login + Admin FP |
+| `user del <id>` | Delete user (requires Admin FP; refused if it would remove the last remaining admin) | CLI login + Admin FP |
 | `user permission <id> <perm>` | Change user permission level (requires Admin FP) | CLI login + Admin FP |
 
 **Permission levels:** 1 = Standard, 2 = Elevated, 3 = Admin

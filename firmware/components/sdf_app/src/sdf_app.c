@@ -1105,8 +1105,9 @@ static void sdf_app_on_web_reg_auth_result(const sdf_event_router_event_t *event
   }
 
   char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-  uint8_t permission = 0;
-  esp_err_t auth_err = sdf_services_get_web_reg_auth(username, sizeof(username), &permission);
+  uint16_t authorizing_user_id = 0;
+  esp_err_t auth_err = sdf_services_get_web_reg_auth(username, sizeof(username),
+                                                     &authorizing_user_id);
   if (auth_err != ESP_OK) {
     /* No pending request to read from (e.g. already cleared) - nothing to
      * reply to or persist. */
@@ -1117,8 +1118,9 @@ static void sdf_app_on_web_reg_auth_result(const sdf_event_router_event_t *event
 
   bool admin_authorized = event->payload.web_reg_auth_result.authorized;
 
-  ESP_LOGI(TAG, "Web registration auth result: %s for user: %s",
-           admin_authorized ? "AUTHORIZED" : "DENIED", username);
+  ESP_LOGI(TAG, "Web registration auth result: %s for user '%s' (authorizer user_id=%u)",
+           admin_authorized ? "AUTHORIZED" : "DENIED", username,
+           (unsigned)authorizing_user_id);
 
   /* Default: no user decided yet, reply mirrors the admin decision. Only
    * overwritten below once a password hash was successfully fetched, so a
@@ -1130,6 +1132,20 @@ static void sdf_app_on_web_reg_auth_result(const sdf_event_router_event_t *event
   };
 
   if (admin_authorized) {
+    /* Name uniqueness (companion-identity): the submitted name becomes the
+     * confirming admin's name and login identifier, so a name already held
+     * by a *different* enrolled user - including a name-only record without
+     * a credential - refuses the registration. */
+    bool name_available = true;
+    uint16_t holder_id = 0;
+    if (sdf_services_find_name_holder(username, &holder_id) == ESP_OK &&
+        holder_id != authorizing_user_id) {
+      ESP_LOGW(TAG,
+               "Web registration refused: name '%s' already held by user_id=%u",
+               username, (unsigned)holder_id);
+      name_available = false;
+    }
+
     uint8_t password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
     esp_err_t hash_err = sdf_services_get_web_reg_password_hash(
         password_hash, SDF_STORAGE_WEB_USER_HASH_LEN);
@@ -1139,35 +1155,32 @@ static void sdf_app_on_web_reg_auth_result(const sdf_event_router_event_t *event
       ESP_LOGE(TAG, "Failed to fetch web reg password hash: %s",
                esp_err_to_name(hash_err));
     } else {
+      /* Always route through decide_registration, including the
+       * name-taken case: it is the single place that decides both what to
+       * persist AND what to reply, and it answers a refused registration
+       * with reply_authorized = false. Short-circuiting before this call
+       * would leave the default reply (which mirrors the admin's scan)
+       * standing, telling the client registration succeeded while nothing
+       * was saved. */
       uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
       esp_fill_random(salt, sizeof(salt));
       decision = sdf_services_web_auth_decide_registration(
           username, password_hash, SDF_STORAGE_WEB_USER_HASH_LEN, salt,
-          permission, true);
+          authorizing_user_id, true, name_available);
     }
   }
 
   if (decision.should_persist) {
-    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
-      sdf_storage_web_user_t existing;
-      esp_err_t load_err = sdf_storage_web_user_load(i, &existing);
-      /* A slot is free when it holds an erased record OR when it has never
-       * been written: on a factory-fresh device the namespace/key does not
-       * exist yet and the load fails with NVS_NOT_FOUND. Treating only
-       * loaded-and-erased slots as free made the very first REGISTER on a
-       * fresh device silently drop its user (found by the
-       * add-ble-ota-emulator-harness BLE harness). Any other load error is a
-       * real storage problem, not an empty slot, so it still skips. */
-      bool slot_free =
-          (load_err == ESP_OK && !existing.valid) ||
-          load_err == ESP_ERR_NVS_NOT_FOUND;
-      if (slot_free) {
-        if (sdf_storage_web_user_save(i, &decision.user) == ESP_OK) {
-          ESP_LOGI(TAG, "Saved web user at index %u", (unsigned)i);
-          break;
-        }
-        ESP_LOGE(TAG, "Failed to save web user at index %u", (unsigned)i);
-      }
+    /* Bound persistence (companion-identity): the record is keyed by the
+     * authorizing admin's fingerprint user id. Saving against that id both
+     * creates the first account and replaces an existing credential in
+     * place - there is no separate account index space anymore. */
+    if (sdf_storage_web_user_save(decision.user_id, &decision.user) == ESP_OK) {
+      ESP_LOGI(TAG, "Saved web account for user_id=%u name='%s'",
+               (unsigned)decision.user_id, decision.user.name);
+    } else {
+      ESP_LOGE(TAG, "Failed to save web account for user_id=%u",
+               (unsigned)decision.user_id);
     }
   }
 
@@ -1195,8 +1208,9 @@ static void sdf_app_on_admin_action_complete(const sdf_event_router_event_t *eve
 
   if (sdf_services_web_auth_should_resolve_on_action_complete(action, result)) {
     char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-    uint8_t permission = 0;
-    esp_err_t err = sdf_services_get_web_reg_auth(username, sizeof(username), &permission);
+    uint16_t authorizing_user_id = 0;
+    esp_err_t err = sdf_services_get_web_reg_auth(username, sizeof(username),
+                                                  &authorizing_user_id);
     if (err == ESP_OK) {
       ESP_LOGW(TAG, "Web registration auth for user '%s' not granted: %s",
                username, esp_err_to_name(result));
@@ -1398,9 +1412,12 @@ static void sdf_app_update_zigbee_user_list(void) {
   }
 
   for (size_t i = 0; i < count; i++) {
-    char name[SDF_STORAGE_FP_USER_NAME_MAX];
-    err = sdf_storage_load_user_name(user_ids[i], name, sizeof(name));
-    if (err != ESP_OK) {
+    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
+    sdf_storage_web_user_t rec;
+    if (sdf_storage_web_user_load(user_ids[i], &rec) == ESP_OK) {
+      strncpy(name, rec.name, sizeof(name) - 1);
+      name[sizeof(name) - 1] = '\0';
+    } else {
       name[0] = '\0';
     }
 

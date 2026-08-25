@@ -58,4 +58,24 @@ esp_err_t uart_driver_delete(uart_port_t uart_num);
  * any production code path. */
 void sdf_mock_uart_set_read_delay_ms(uint32_t delay_ms);
 
+/* Scripts the sensor's next reply: the queued bytes are consumed by the
+ * following uart_read_bytes() calls (a real fp_* response frame arrives in
+ * exactly this piecemeal fashion via fp_uart_read_exact()), and once drained
+ * reads revert to "no data". Queueing a well-formed ACK frame therefore lets
+ * host tests drive fp_delete_user()/fp_delete_all_users() - and the
+ * sdf_services mutation paths behind them - through their success paths,
+ * which the plain no-data mock could never do. A second call replaces the
+ * pending reply. Not used by any production code path. */
+void sdf_mock_uart_queue_response(const uint8_t *data, size_t len);
+
+/* Cumulative bytes handed to uart_write_bytes() since the last reset. Tests
+ * assert this stays unchanged to prove an operation was refused before any
+ * sensor command went out on the wire. */
+uint32_t sdf_mock_uart_write_count(void);
+
+/* Clears the queued reply and both counters (including the read delay), so
+ * tests start from a deterministic UART state regardless of what earlier
+ * suites did. */
+void sdf_mock_uart_reset(void);
+
 #endif /* SDF_MOCK_LINUX_DRIVERS_H */

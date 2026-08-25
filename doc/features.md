@@ -8,7 +8,7 @@ Currently, the device relies heavily on Zigbee (for remote management) or local 
 ## 👥 Advanced Access Control
 The current permission model is basic (Admin vs. Standard).
 * [ ] **Schedule-Based Access:** The ability to restrict certain fingerprints to specific days or times (e.g., a cleaner or dog walker who can only unlock the door on Tuesdays between 10 AM and 12 PM). This would require implementing an RTC and time-sync via Zigbee.
-* [ ] **Elevated User Role:** Permission level 2 ("Elevated User") is currently a placeholder. We need to define its capabilities (e.g., perhaps they can unlock the door and view logs, but cannot enroll new users).
+* [ ] **Elevated User Role:** Permission level 2 ("Elevated User") is currently a placeholder. We need to define its capabilities (e.g., perhaps they can unlock the door and view logs, but cannot enroll new users). Note: level 2 confers **no companion access** — only Admin-permission users can hold a companion account or authorize a bond/registration (see the `companion-identity` capability) — so defining level 2 must not assume it grants companion features.
 * [*] **User Naming:** The system only tracks `User ID` (1-500). Allowing a text string to be associated with an ID (e.g., ID 42 = "Alice") would make Zigbee management and local CLI management much more user-friendly.
 
 ## 🔄 State Synchronization

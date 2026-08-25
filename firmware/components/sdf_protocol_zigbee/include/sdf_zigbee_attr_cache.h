@@ -36,7 +36,7 @@
  * Two derivations apply and the smaller one binds:
  *   - Capacity: sdf-services-tasks caps users at 10, and cJSON emits roughly
  *     {"id":10,"perm":255,"name":"<name>"} per entry - 31 fixed bytes plus a
- *     name of up to SDF_STORAGE_FP_USER_NAME_MAX-1 = 31 chars. That is about
+ *     name of up to SDF_STORAGE_WEB_USER_NAME_MAX-1 = 31 chars. That is about
  *     620 bytes for a full list.
  *   - Transport: SDF_ZIGBEE_ZCL_CHAR_STRING_MAX is 254.
  *

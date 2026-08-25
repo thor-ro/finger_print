@@ -517,13 +517,17 @@ The CLI commands SHALL validate User IDs against the new maximum of 10.
 - **THEN** command rejects with "Invalid user_id. Expected 1-10."
 
 ### Requirement: Web Registration Authorization
-The `sdf_admin_task` and `sdf_services` SHALL support an "Admin Auth" state where `sdf_admin_task` waits for an Admin fingerprint scan to authorize a pending Web Registration request over BLE GATT. The authorization result SHALL be routed back to the GATT server for the originating connection. The registration decision (what user record to persist, and what reply to send) SHALL be computed by a pure `sdf_services` function, independent of the GATT transport that carries the request and reply. Raw web-registration credential material (username and password hash) SHALL NOT be carried in an event-router event payload or copied into any event-router queue at any point in this flow; it SHALL be written directly into `sdf_services`' owned pending-request state, and any component that needs it (including the routing of the authorization result back to the GATT server) SHALL read it back from that owned state rather than from an event payload.
+The `sdf_admin_task` and `sdf_services` SHALL support an "Admin Auth" state where `sdf_admin_task` waits for an Admin fingerprint scan to authorize a pending Web Registration request over BLE GATT. The authorization result SHALL be routed back to the GATT server for the originating connection. The registration decision (what user record to persist, and what reply to send) SHALL be computed by a pure `sdf_services` function, independent of the GATT transport that carries the request and reply. Raw web-registration credential material (name and password hash) SHALL NOT be carried in an event-router event payload or copied into any event-router queue at any point in this flow; it SHALL be written directly into `sdf_services`' owned pending-request state, and any component that needs it (including the routing of the authorization result back to the GATT server) SHALL read it back from that owned state rather than from an event payload.
+
+When an Admin fingerprint scan authorizes a pending Web Registration request, the system SHALL capture the fingerprint user id of the matched admin into the same owned pending-request state, and the registration decision SHALL bind the persisted credential to that user id. The captured user id SHALL be subject to the same rule as the credential material: it SHALL NOT be carried in an event-router event payload.
+
+The registration decision SHALL replace the credential of a user that already holds an account rather than creating a second account for that user, and SHALL refuse to persist a credential for which no authorizing admin user id was captured.
 
 #### Scenario: Web Registration Authorized
 - **WHEN** GATT server requests web registration authorization
 - **AND** Admin finger is scanned successfully
 - **THEN** system authorizes the registration
-- **AND** GATT server saves credentials to NVS
+- **AND** GATT server saves credentials to NVS bound to the matched admin's user id
 - **AND** GATT server marks the originating connection authenticated only after the credentials are saved
 
 #### Scenario: Web Registration Denied
@@ -537,17 +541,34 @@ The `sdf_admin_task` and `sdf_services` SHALL support an "Admin Auth" state wher
 - **AND** the GATT server SHALL be notified so no BLE client is left waiting indefinitely
 
 #### Scenario: Registration request credential material bypasses the event router
-- **WHEN** the GATT server receives a Web Registration request containing a username and password hash
-- **THEN** the username and password hash are written directly into `sdf_services`' owned pending-request state
-- **AND** no event carrying the raw username or password hash is emitted or queued
+- **WHEN** the GATT server receives a Web Registration request containing a name and password hash
+- **THEN** the name and password hash are written directly into `sdf_services`' owned pending-request state
+- **AND** no event carrying the raw name or password hash is emitted or queued
+
+#### Scenario: Authorizing admin identity bypasses the event router
+- **WHEN** an Admin fingerprint scan authorizes a pending Web Registration request
+- **THEN** the matched admin's user id is written into `sdf_services`' owned pending-request state
+- **AND** no event carrying that user id is emitted or queued
 
 #### Scenario: Registration result routing reads from owned state, not from an event payload
 - **WHEN** `sdf_admin_task` resolves a pending Web Registration request (authorized or denied)
-- **THEN** the username and permission used to route the result back to the originating GATT connection are read from `sdf_services`' owned pending-request state
-- **AND** the event that signals the outcome does not itself carry the username or permission as a payload field
+- **THEN** the name and bound user id used to route the result back to the originating GATT connection are read from `sdf_services`' owned pending-request state
+- **AND** the event that signals the outcome does not itself carry the name or bound user id as a payload field
+
+#### Scenario: Registration by an admin who already holds an account
+- **WHEN** the registration decision runs for an admin whose user id already has a stored credential
+- **THEN** the decision replaces that credential rather than allocating a second account
+- **AND** the previous salt and stretched credential are not retained
+
+#### Scenario: Registration without a captured authorizer is refused
+- **WHEN** the registration decision runs with no authorizing admin user id in the pending-request state
+- **THEN** the decision refuses the registration
+- **AND** no credential is persisted
 
 ### Requirement: Web Login Verification
 `sdf_services` SHALL expose a pure function that decides whether submitted BLE companion login credentials are valid, given a previously looked-up stored user record and a submitted password hash. The comparison SHALL use a constant-time algorithm with respect to the submitted hash value.
+
+The permission that governs the resulting session SHALL NOT be taken from the stored account record. It SHALL be resolved from the enrolled-user record of the fingerprint user the account is bound to, at the time each authorization decision is made, so that a demotion or deletion of that user takes effect without the account being modified.
 
 #### Scenario: Valid login credentials
 - **WHEN** a submitted password hash matches the stored user's password hash exactly
@@ -557,6 +578,15 @@ The `sdf_admin_task` and `sdf_services` SHALL support an "Admin Auth" state wher
 - **WHEN** a submitted password hash does not match the stored user's password hash, or has an unexpected length
 - **THEN** the function reports the login as invalid
 - **AND** the comparison does not use an early-exit algorithm that could leak which byte first differed
+
+#### Scenario: Session permission resolved from the bound user
+- **WHEN** an authorization decision is made for an authenticated session
+- **THEN** the permission used is read from the enrolled-user record of the bound fingerprint user
+- **AND** it is not read from the stored account record
+
+#### Scenario: Login refused when the bound user is no longer an admin
+- **WHEN** a login is attempted against an account whose bound user's permission is no longer admin
+- **THEN** the session is not granted admin authority
 
 ### Requirement: Double-Press Requests BLE Companion Pairing Window
 The button task SHALL bind `BUTTON_DOUBLE_CLICK` to request the BLE Companion Service's admin-fingerprint-gated device pairing window, following the same `pending_admin_action` authorization flow used by every other admin action. This binding SHALL apply only once the device's setup-completion latch is set. While the device is in the setup phase, a button press SHALL instead reclaim the setup connection and re-arm the setup phase, and SHALL set no pending admin action.
@@ -797,3 +827,60 @@ The watchdog SHALL watch only the tasks that explicitly subscribe to it, and SHA
 #### Scenario: A higher-priority vendor task starves idle
 - **WHEN** the vendor radio stack occupies the CPU at a priority above idle for longer than the watchdog timeout, while every subscribed service task continues to report liveness on schedule
 - **THEN** the watchdog does not fire and the device does not reboot, because no subscribed task has stopped making progress
+
+### Requirement: Last Remaining Admin Cannot Be Deleted
+
+`sdf_services_delete_user()` SHALL reject deletion of a user whose permission is admin when that user is the only enrolled admin, and SHALL report the rejection distinctly from a sensor failure. The rejection SHALL be decided before any fingerprint sensor operation is issued, so that a refused delete costs no sensor round-trip and cannot leave the sensor and the cached enrolled-user record disagreeing.
+
+The admin count SHALL be computed from the cached enrolled-user bitmap and packed permissions, consistent with `sdf_services_change_user_permission()`, and SHALL NOT issue a sensor query.
+
+This guard protects the single admin-fingerprint gate on which every admin action depends. Losing the last admin leaves the pairing window, Enroll-Admin, Nuki re-pair, Zigbee join and Web Registration Authorization permanently unreachable, recoverable only by factory reset.
+
+`sdf_services_clear_all_users()` SHALL NOT be subject to this guard. It is a deliberate bulk erase on the factory-reset path, where removing the last admin is the intended outcome.
+
+#### Scenario: Deleting the only admin is refused
+
+- **WHEN** a caller requests deletion of an enrolled user with admin permission
+- **AND** that user is the only enrolled admin
+- **THEN** the request is rejected
+- **AND** no fingerprint sensor delete is issued
+- **AND** the cached enrolled-user record is unchanged
+
+#### Scenario: Deleting an admin while another admin remains succeeds
+
+- **WHEN** a caller requests deletion of an enrolled user with admin permission
+- **AND** at least one other enrolled user also has admin permission
+- **THEN** the deletion proceeds
+- **AND** the cached enrolled-user record and its NVS persistence are updated
+
+#### Scenario: Deleting a non-admin user is unaffected
+
+- **WHEN** a caller requests deletion of an enrolled user whose permission is not admin
+- **AND** exactly one admin is enrolled
+- **THEN** the deletion proceeds regardless of the admin count
+
+#### Scenario: Admin count is read from the cache
+
+- **WHEN** the guard evaluates how many admins are enrolled
+- **THEN** the count is derived from the cached bitmap and packed permissions
+- **AND** no fingerprint sensor query is issued to obtain it
+
+#### Scenario: Clear-all is exempt
+
+- **WHEN** all users are cleared through the bulk clear-all path
+- **THEN** the operation proceeds even though it removes the last admin
+
+### Requirement: User Deletion Validates Enrolment Before Touching The Sensor
+
+`sdf_services_delete_user()` SHALL report a request to delete a user that is not present in the cached enrolled-user record as not-found, distinctly from a sensor failure, and SHALL NOT issue a fingerprint sensor delete for that user.
+
+#### Scenario: Deleting an unenrolled user id
+
+- **WHEN** a caller requests deletion of a user id that is not set in the cached enrolled-user bitmap
+- **THEN** the request is reported as not found
+- **AND** no fingerprint sensor delete is issued
+
+#### Scenario: Not-found is distinguishable from sensor failure
+
+- **WHEN** a caller receives a rejection for deleting an unenrolled user
+- **THEN** the reported result differs from the result reported when the sensor rejects a delete for an enrolled user

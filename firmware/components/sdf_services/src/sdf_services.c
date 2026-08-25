@@ -7,6 +7,7 @@
 #include "sdf_storage.h"
 
 #include "esp_system.h"
+#include "nvs.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -469,6 +470,13 @@ bool sdf_services_try_claim_admin_action(
       action_ctx = s_state.config.admin_action_ctx;
       s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
       s_state.pending_admin_action_start_us = 0;
+      /* Capture the authorizing admin's identity at the moment of the
+       * claim (companion-identity): the registration decision binds the
+       * persisted credential to this user. Same owned pending-request
+       * state as the name/hash - never carried in an event payload. */
+      if (action == SDF_SERVICES_ADMIN_ACTION_WEB_REG_AUTH) {
+        s_state.request_web_authorizing_user_id = match->user_id;
+      }
       authorized = true;
     }
     xSemaphoreGive(s_state.lock);
@@ -892,6 +900,58 @@ esp_err_t sdf_services_persist_enrolled_users_locked(void) {
 esp_err_t sdf_services_delete_user(uint16_t user_id) {
   if (s_state.lock == NULL)
     return ESP_ERR_INVALID_STATE;
+
+  /* Snapshot the authoritative enrolled-user record before touching the
+   * sensor: both guards below are decided from the cached bitmap + packed
+   * permissions (cache-enrolled-user-state), the same compact pair and
+   * admin-count derivation sdf_services_change_user_permission() decides
+   * from. The lock is only held for the copy - see the comment above
+   * fp_delete_user() for why it must not span the UART round trip. */
+  uint16_t snap_user_bmp = 0;
+  uint8_t snap_perm_packed[sizeof(s_state.enrolled_perm_packed)];
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE) {
+      return ESP_ERR_TIMEOUT;
+    }
+    snap_user_bmp = s_state.enrolled_user_bmp;
+    memcpy(snap_perm_packed, s_state.enrolled_perm_packed,
+           sizeof(snap_perm_packed));
+  }
+
+  /* A user id that is not set in the snapshot bitmap is not enrolled -
+   * report that before any sensor traffic. Ids outside the bitmap's range
+   * cannot be set in it either, so they take the same exit. */
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
+      user_id > SDF_SERVICES_MAX_USERS ||
+      !SDF_SERVICES_BMP_TEST(snap_user_bmp, user_id)) {
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  /* Count admins from the same snapshot - identical derivation to
+   * sdf_services_change_user_permission(). */
+  size_t admin_count = 0;
+  for (uint16_t id = 1; id <= SDF_SERVICES_MAX_USERS; id++) {
+    if (SDF_SERVICES_BMP_TEST(snap_user_bmp, id) &&
+        sdf_services_perm_get(snap_perm_packed, id) == 3u) {
+      admin_count++;
+    }
+  }
+
+  if (sdf_services_perm_get(snap_perm_packed, user_id) == 3u &&
+      admin_count <= 1u) {
+    /* Deleting the only admin would permanently strand every
+     * admin-fingerprint-gated action (pairing window, Enroll-Admin, Nuki
+     * re-pair, Zigbee join, Web Registration Authorization): enrolment of a
+     * replacement requires the physical finger, and there is no sensor-side
+     * rollback once fp_delete_user() runs. Refuse before the sensor call so
+     * a rejected delete is free. ESP_ERR_INVALID_STATE rather than a new
+     * code mirrors change_user_permission()'s last-admin guard;
+     * clear_all_users() stays deliberately exempt - losing the last admin
+     * is the point of the factory-reset bulk wipe. */
+    return ESP_ERR_INVALID_STATE;
+  }
+
   /* fp_delete_user() is a blocking UART round-trip (up to the ~12s sensor
    * timeout) and is already serialized by the fingerprint driver's own
    * internal mutex, so s_state.lock does not need to be held across it -
@@ -925,7 +985,12 @@ esp_err_t sdf_services_delete_user(uint16_t user_id) {
     return ESP_FAIL;
   }
 
-  sdf_storage_delete_user_name(user_id);
+  /* Deleting the user destroys their unified record - name and any bound
+   * companion credential with it (companion-identity "Deleting A User
+   * Destroys Its Companion Account"). The name is released implicitly by
+   * the same clear; there is no separate reclamation step. Best-effort: a
+   * storage failure here must not fail an already-committed sensor delete. */
+  sdf_storage_web_user_clear(user_id);
   return ESP_OK;
 }
 
@@ -966,9 +1031,9 @@ esp_err_t sdf_services_clear_all_users(void) {
     return ESP_FAIL;
   }
 
-  for (uint16_t i = SDF_FINGERPRINT_USER_ID_MIN; i <= SDF_SERVICES_MAX_USERS; i++) {
-    sdf_storage_delete_user_name(i);
-  }
+  /* Clearing all users clears every unified record with it (names and
+   * bound credentials alike) - the factory-reset-style bulk wipe. */
+  sdf_storage_web_user_clear_all();
   return ESP_OK;
 }
 
@@ -1122,6 +1187,92 @@ esp_err_t sdf_services_change_user_permission(uint16_t user_id,
     }
     return s_state.permission_change_result;
   }
+}
+
+bool sdf_services_user_is_enrolled_admin(uint16_t user_id) {
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
+      user_id > SDF_SERVICES_MAX_USERS || s_state.lock == NULL) {
+    return false;
+  }
+
+  bool is_admin = false;
+  SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+  if (guard.acquired == pdTRUE) {
+    is_admin = SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, user_id) &&
+               sdf_services_perm_get(s_state.enrolled_perm_packed, user_id) == 3u;
+  }
+  return is_admin;
+}
+
+esp_err_t sdf_services_find_name_holder(const char *name, uint16_t *holder_id_out) {
+  if (name == NULL || name[0] == '\0' || holder_id_out == NULL ||
+      s_state.lock == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  /* Scan every unified record - including name-only records without a
+   * credential - because uniqueness spans all enrolled users, not just
+   * account holders (companion-identity "The User's Name Is The Login
+   * Identifier"). Ten records max, so the linear walk is bounded. */
+  for (uint16_t id = SDF_FINGERPRINT_USER_ID_MIN; id <= SDF_SERVICES_MAX_USERS; id++) {
+    sdf_storage_web_user_t rec;
+    esp_err_t err = sdf_storage_web_user_load(id, &rec);
+    if (err == ESP_OK && rec.valid && strcmp(rec.name, name) == 0) {
+      *holder_id_out = id;
+      return ESP_OK;
+    }
+  }
+  return ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name) {
+  if (user_id < SDF_FINGERPRINT_USER_ID_MIN || user_id > SDF_SERVICES_MAX_USERS ||
+      name == NULL || name[0] == '\0' ||
+      strlen(name) >= SDF_STORAGE_WEB_USER_NAME_MAX) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  if (s_state.lock == NULL) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  /* Enrolled check from the authoritative cache, same as every other
+   * user-scoped operation (cache-enrolled-user-state). */
+  bool enrolled = false;
+  {
+    SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+    if (guard.acquired != pdTRUE) {
+      return ESP_ERR_TIMEOUT;
+    }
+    enrolled = SDF_SERVICES_BMP_TEST(s_state.enrolled_user_bmp, user_id);
+  }
+  if (!enrolled) {
+    return ESP_ERR_NOT_FOUND;
+  }
+
+  /* Uniqueness: refuse a rename onto a name another enrolled user already
+   * holds, leaving both records unchanged. Renaming to the user's own
+   * current name falls through as a legitimate no-op-equivalent write. */
+  uint16_t holder_id = 0;
+  if (sdf_services_find_name_holder(name, &holder_id) == ESP_OK &&
+      holder_id != user_id) {
+    return ESP_ERR_INVALID_STATE;
+  }
+
+  /* Merge into the existing record so any stored credential survives the
+   * rename; an absent key (never named before) starts a fresh record. */
+  sdf_storage_web_user_t rec = {0};
+  esp_err_t err = sdf_storage_web_user_load(user_id, &rec);
+  if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+    return err;
+  }
+
+  strncpy(rec.name, name, SDF_STORAGE_WEB_USER_NAME_MAX - 1);
+  rec.name[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
+  /* A written name means a record exists; has_credential keeps whatever the
+   * previous record said (name-only records stay name-only). */
+  rec.valid = true;
+  return sdf_storage_web_user_save(user_id, &rec);
 }
 
 esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action) {
@@ -1414,8 +1565,8 @@ void sdf_services_start_pending_enrollment_if_any(void) {
 }
 
 esp_err_t sdf_services_get_web_reg_auth(char *username, size_t username_max,
-                                         uint8_t *permission) {
-  if (!username || !permission) {
+                                         uint16_t *authorizing_user_id) {
+  if (!username || !authorizing_user_id) {
     return ESP_ERR_INVALID_ARG;
   }
 
@@ -1434,7 +1585,7 @@ esp_err_t sdf_services_get_web_reg_auth(char *username, size_t username_max,
 
   strncpy(username, s_state.request_web_username, username_max - 1);
   username[username_max - 1] = '\0';
-  *permission = s_state.request_web_permission;
+  *authorizing_user_id = s_state.request_web_authorizing_user_id;
 
   xSemaphoreGive(s_state.lock);
   return ESP_OK;
@@ -1448,6 +1599,7 @@ void sdf_services_clear_web_reg_auth(void) {
   if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
     s_state.web_reg_auth_pending = false;
     s_state.request_web_username[0] = '\0';
+    s_state.request_web_authorizing_user_id = 0;
     xSemaphoreGive(s_state.lock);
   }
 }
@@ -1475,7 +1627,7 @@ esp_err_t sdf_services_set_web_reg_auth(const char *username,
   strncpy(s_state.request_web_username, username, SDF_STORAGE_WEB_USER_NAME_MAX - 1);
   s_state.request_web_username[SDF_STORAGE_WEB_USER_NAME_MAX - 1] = '\0';
   memcpy(s_state.request_web_password_hash, password_hash, hash_len);
-  s_state.request_web_permission = 1;
+  s_state.request_web_authorizing_user_id = 0;
   s_state.web_reg_auth_pending = true;
 
   xSemaphoreGive(s_state.lock);

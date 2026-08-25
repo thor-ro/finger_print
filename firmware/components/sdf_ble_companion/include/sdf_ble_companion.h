@@ -30,6 +30,13 @@ typedef struct {
     sdf_ble_companion_auth_state_t auth_state;
     bool auth_pending;
     char username[SDF_STORAGE_WEB_USER_NAME_MAX];
+    /* Fingerprint user id of the account this connection authenticated
+     * against (companion-identity). 0 = unbound. Set on a successful
+     * LOGIN_VERIFY / REGISTER confirmation; cleared on LOGOUT and by the
+     * disconnect memset. Admin authority is resolved LIVE from this id's
+     * current enrolment + permission on every restricted access - never
+     * from anything stored on the account. */
+    uint16_t bound_user_id;
     /* Outstanding LOGIN challenge for this connection - single-connection,
      * single-attempt scoped (never persisted), valid only while
      * auth_state == SDF_BLE_COMPANION_AUTH_STATE_LOGIN_CHALLENGE_ISSUED.

@@ -609,13 +609,17 @@ mcu --> bat : ADC GPIO 5\n(voltage divider)
 
 Every command has an exact length. A write longer than 65 bytes — the largest well-formed command, `REGISTER` with a maximum-length username — is rejected with `BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN` before it is copied or dispatched on. Usernames are at most `SDF_STORAGE_WEB_USER_NAME_MAX - 1` (31) bytes on the wire.
 
+The name carried by `REGISTER` and `LOGIN_INIT` is the **user's name on the device**, not a separate account username. On registration it becomes the confirming admin's device name (subject to the uniqueness rule: a name already held by another enrolled user refuses the registration), and the persisted credential binds to that admin's fingerprint user id — re-registration by the same admin replaces their stored credential in place, which is the supported password-reset path. At login, a name that belongs to an enrolled user holding no companion account is answered exactly like an unknown name (deterministic pseudo-salt challenge), so replies never reveal which users are admins.
+
 | Command | Opcode | Layout | Accepted length |
 |---|---|---|---|
 | `LOGOUT` | `0x00` | `[cmd]` | exactly 1 |
 | *(unassigned)* | `0x01` | — | rejected (retired single-message LOGIN) |
-| `REGISTER` | `0x02` | `[cmd][name_len][name][password_hash(32)]` | `2 + name_len + 32`, `1 <= name_len <= 31` |
-| `LOGIN_INIT` | `0x03` | `[cmd][name_len][name]` | `2 + name_len`, `1 <= name_len <= 31` |
+| `REGISTER` | `0x02` | `[cmd][name_len][name][password_hash(32)]` | `2 + name_len + 32`, `1 <= name_len <= 31`; name = the user's device name, credential bound to the confirming admin's user id |
+| `LOGIN_INIT` | `0x03` | `[cmd][name_len][name]` | `2 + name_len`, `1 <= name_len <= 31`; name = the user's device name |
 | `LOGIN_VERIFY` | `0x04` | `[cmd][response(32)]` | exactly 33 |
+
+An authenticated connection records the fingerprint user id of the account that authenticated it, and every subsequent Config/Enrollment/OTA access re-resolves that user's enrolment and permission from the enrolled-user cache live — a demotion or deletion of the bound user strips the session's authority at its next restricted access, without any cascade over stored accounts.
 
 Any other opcode is rejected with `BLE_ATT_ERR_WRITE_NOT_PERMITTED`. `LOGOUT` carries no operands, so a padded `LOGOUT` is an invalid-length error and does **not** log the connection out.
 

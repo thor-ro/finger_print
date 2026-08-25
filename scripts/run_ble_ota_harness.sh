@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 # Layer 2 harness runner (add-ble-ota-emulator-harness): builds the
-# ble_ota_gate fixture, derives the three test images, boots the fixture under
-# esp-emu with an HCI TCP backend, and drives the companion BLE OTA protocol
-# with the Bumble central in tools/ble_ota_harness.
+# ble_ota_gate fixture, derives the three test images (default "ota"
+# scenario), boots the fixture under esp-emu with an HCI TCP backend, and
+# drives the companion BLE protocol with the Bumble central in
+# tools/ble_ota_harness.
 #
-# Usage: scripts/run_ble_ota_harness.sh
+# Usage:
+#   scripts/run_ble_ota_harness.sh                 # default OTA-signature cases
+#   scripts/run_ble_ota_harness.sh --scenario identity   # companion-identity 9.3
 #
 # Requires: ESP-IDF environment sourced (idf.py on PATH), esp-emu on PATH,
 # and a Python interpreter with bumble (see tools/ble_ota_harness/requirements.txt;
 # the script creates/reuses a venv at /tmp/sdf_bleh_venv unless BUMBLE_PYTHON
 # points at an interpreter that already has bumble installed).
 set -euo pipefail
+
+SCENARIO="ota"
+if [[ "${1:-}" == "--scenario" ]]; then
+  SCENARIO="${2:?--scenario requires a value}"
+fi
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 FIXTURE_DIR="$REPO_ROOT/firmware/ble_ota_gate"
@@ -49,9 +57,14 @@ for f in "$APP_BIN" "$MERGED_BIN" "$ELF" "$SIGNING_KEY"; do
 done
 
 echo "== ble-ota-emulator-harness: deriving test images =="
+if [[ "$SCENARIO" == "identity" ]]; then
+  # The identity scenario never transfers images; skip derivation entirely.
+  echo "(identity scenario: no test images needed)"
+else
 "${BUMBLE_PYTHON:-python3}" "$HARNESS_DIR/prepare_images.py" \
   --app-bin "$APP_BIN" --signing-key "$SIGNING_KEY" --out-dir "$IMAGE_DIR" \
   | tee "$SCRATCH-prepare.log"
+fi
 
 if [[ -z "${BUMBLE_PYTHON:-}" ]]; then
   VENV="$SCRATCH/venv"
@@ -68,11 +81,18 @@ set -o pipefail
 RUN_EXIT=0
 # The harness must own the HCI TCP listener before esp-emu dials in (esp-emu
 # connects as a TCP client exactly once, early in its boot).
+HARNESS_ARGS=(--device-port "$DEV_PORT" --central-port "$CENTRAL_PORT")
+if [[ "$SCENARIO" == "identity" ]]; then
+  HARNESS_ARGS+=(--scenario identity)
+else
+  HARNESS_ARGS+=(
+    --tampered-image "$IMAGE_DIR/tampered.bin"
+    --foreign-image "$IMAGE_DIR/foreign.bin"
+    --valid-image "$IMAGE_DIR/valid.bin"
+  )
+fi
 "$BUMBLE_PYTHON" "$HARNESS_DIR/ble_ota_harness.py" \
-  --device-port "$DEV_PORT" --central-port "$CENTRAL_PORT" \
-  --tampered-image "$IMAGE_DIR/tampered.bin" \
-  --foreign-image "$IMAGE_DIR/foreign.bin" \
-  --valid-image "$IMAGE_DIR/valid.bin" \
+  "${HARNESS_ARGS[@]}" \
   > "$SCRATCH-harness.log" 2>&1 &
 HARNESS_PID=$!
 for _ in $(seq 1 30); do
@@ -94,7 +114,12 @@ cat "$SCRATCH-harness.log"
 
 RESULT_LINE="$(grep 'BLE_OTA_HARNESS_RESULT' "$SCRATCH-harness.log" | tail -1 || true)"
 echo "result: ${RESULT_LINE:-<none>}"
-if [[ "$RUN_EXIT" -ne 0 ]] || ! grep -q 'BLE_OTA_HARNESS_RESULT status=PASS cases_run=3/3' "$SCRATCH-harness.log"; then
+if [[ "$SCENARIO" == "identity" ]]; then
+  PASS_RE='BLE_OTA_HARNESS_RESULT status=PASS scenario=identity'
+else
+  PASS_RE='BLE_OTA_HARNESS_RESULT status=PASS cases_run=3/3'
+fi
+if [[ "$RUN_EXIT" -ne 0 ]] || ! grep -q "$PASS_RE" "$SCRATCH-harness.log"; then
   echo "::error:: (ble-ota-emulator-harness) did not report PASS - see $SCRATCH-harness.log and $SCRATCH-emu.log"
   exit 1
 fi

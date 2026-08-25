@@ -321,21 +321,22 @@ const tabLogin = document.getElementById('tab-login');
 const tabRegister = document.getElementById('tab-register');
 const authSubmit = document.getElementById('btn-auth-submit');
 const authStatus = document.getElementById('auth-status');
+const registerNote = document.getElementById('register-note');
 let isRegistering = false;
 
-tabLogin.addEventListener('click', () => {
-    isRegistering = false;
-    tabLogin.classList.add('active');
-    tabRegister.classList.remove('active');
-    authSubmit.textContent = 'Login';
-});
+function setRegistering(registering) {
+    isRegistering = registering;
+    tabLogin.classList.toggle('active', !registering);
+    tabRegister.classList.toggle('active', registering);
+    authSubmit.textContent = registering ? 'Register' : 'Login';
+    // Re-registration is the password-reset path: make the replace warning
+    // visible whenever the register form is offered (companion-identity).
+    registerNote.style.display = registering ? 'block' : 'none';
+}
 
-tabRegister.addEventListener('click', () => {
-    isRegistering = true;
-    tabRegister.classList.add('active');
-    tabLogin.classList.remove('active');
-    authSubmit.textContent = 'Register';
-});
+tabLogin.addEventListener('click', () => setRegistering(false));
+
+tabRegister.addEventListener('click', () => setRegistering(true));
 
 async function hashPassword(password) {
     const encoder = new TextEncoder();
@@ -385,6 +386,18 @@ document.getElementById('auth-form').addEventListener('submit', async (e) => {
 });
 
 async function submitRegister(username, password) {
+    // Re-registration replaces the confirming admin's existing credential
+    // in place (companion-identity). Warn before submitting so this is a
+    // deliberate choice, not an accidental overwrite.
+    const confirmed = window.confirm(
+        `Registering will bind the account to the admin whose fingerprint ` +
+        `confirms it. If that admin already has a password, it will be ` +
+        `replaced (this is the password-reset path). Continue?`
+    );
+    if (!confirmed) {
+        authStatus.textContent = 'Registration cancelled - no existing password was changed.';
+        return;
+    }
     try {
         authStatus.textContent = 'Authenticating...';
         const encoder = new TextEncoder();
@@ -750,6 +763,16 @@ let wizardRegisterPending = false;
 document.getElementById('wizard-register-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const statusEl = document.getElementById('wizard-register-status');
+    // Same ownership + replace warning as the dashboard register form: the
+    // account will belong to whichever admin's finger confirms it, and a
+    // confirming admin who already holds an account has it replaced.
+    if (!window.confirm(
+            `The account will belong to the admin who confirms it with a ` +
+            `fingerprint scan. If that admin already holds a password, it ` +
+            `will be replaced. Continue?`)) {
+        statusEl.textContent = 'Registration cancelled - no existing password was changed.';
+        return;
+    }
     try {
         const username = document.getElementById('wizard-username').value;
         const password = document.getElementById('wizard-password').value;

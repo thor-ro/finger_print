@@ -69,13 +69,15 @@
                 <!-- Step 2: Account registration -->
                 <div id="wizard-step-register" class="dashboard-section wizard-step">
                     <h3>Step 2 of 4 · Register Your Account</h3>
-                    <p>Create the companion account for this browser/device.
+                    <p>The name below is <strong>your name on the device</strong> —
+                    it is not a separate account username, and it must be unique.
                     Confirming registration requires a scan of the Admin finger
-                    just enrolled.</p>
+                    just enrolled, and the account will belong to that admin:
+                    whoever confirms with their fingerprint owns this account.</p>
                     <form id="wizard-register-form">
                         <div class="input-group">
-                            <label for="wizard-username">Username</label>
-                            <input type="text" id="wizard-username" required maxlength="16" placeholder="admin">
+                            <label for="wizard-username">Your Name (on the device)</label>
+                            <input type="text" id="wizard-username" required maxlength="16" placeholder="e.g. Alice">
                         </div>
                         <div class="input-group">
                             <label for="wizard-password">Password</label>
@@ -116,9 +118,16 @@
                 </div>
                 
                 <form id="auth-form" class="auth-form">
+                    <p id="register-note" class="status-msg" style="display: none;">
+                        Registering again does not create a second account: the
+                        account belongs to the admin whose fingerprint confirms
+                        it, and their existing password will be
+                        <strong>replaced</strong>. This is the supported way to
+                        reset a forgotten password.
+                    </p>
                     <div class="input-group">
-                        <label for="username">Username</label>
-                        <input type="text" id="username" name="username" required maxlength="16" placeholder="admin">
+                        <label for="username">Your Name (on the device)</label>
+                        <input type="text" id="username" name="username" required maxlength="16" placeholder="e.g. Alice">
                     </div>
                     <div class="input-group">
                         <label for="password">Password</label>
@@ -152,7 +161,6 @@
                             <label for="enroll-permission">Permission</label>
                             <select id="enroll-permission">
                                 <option value="1">Standard</option>
-                                <option value="2">Elevated</option>
                                 <option value="3">Admin</option>
                             </select>
                         </div>

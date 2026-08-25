@@ -348,19 +348,22 @@ esp_err_t sdf_storage_ble_target_clear(void) {
 }
 
 #define SDF_STORAGE_KEY_WEB_USER_PREFIX "web_user_"
-#define SDF_STORAGE_KEY_FP_USER_NAME_PREFIX "fp_user_name_"
 
-static void sdf_storage_web_user_key(char *buf, size_t buf_size, uint8_t index) {
-    snprintf(buf, buf_size, "%s%u", SDF_STORAGE_KEY_WEB_USER_PREFIX, (unsigned)index);
+static void sdf_storage_web_user_key(char *buf, size_t buf_size, uint16_t user_id) {
+    snprintf(buf, buf_size, "%s%u", SDF_STORAGE_KEY_WEB_USER_PREFIX, (unsigned)user_id);
 }
 
-esp_err_t sdf_storage_web_user_save(uint8_t index, const sdf_storage_web_user_t *user) {
-    if (index >= SDF_STORAGE_WEB_USER_MAX || user == NULL) {
+static bool sdf_storage_web_user_id_valid(uint16_t user_id) {
+    return user_id >= SDF_STORAGE_FP_USER_ID_MIN && user_id <= SDF_STORAGE_FP_USER_ID_MAX;
+}
+
+esp_err_t sdf_storage_web_user_save(uint16_t user_id, const sdf_storage_web_user_t *user) {
+    if (!sdf_storage_web_user_id_valid(user_id) || user == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
     char key[32];
-    sdf_storage_web_user_key(key, sizeof(key), index);
+    sdf_storage_web_user_key(key, sizeof(key), user_id);
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
@@ -377,13 +380,13 @@ esp_err_t sdf_storage_web_user_save(uint8_t index, const sdf_storage_web_user_t 
     return err;
 }
 
-esp_err_t sdf_storage_web_user_load(uint8_t index, sdf_storage_web_user_t *user) {
-    if (index >= SDF_STORAGE_WEB_USER_MAX || user == NULL) {
+esp_err_t sdf_storage_web_user_load(uint16_t user_id, sdf_storage_web_user_t *user) {
+    if (!sdf_storage_web_user_id_valid(user_id) || user == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
     char key[32];
-    sdf_storage_web_user_key(key, sizeof(key), index);
+    sdf_storage_web_user_key(key, sizeof(key), user_id);
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
@@ -401,13 +404,13 @@ esp_err_t sdf_storage_web_user_load(uint8_t index, sdf_storage_web_user_t *user)
     return err;
 }
 
-esp_err_t sdf_storage_web_user_clear(uint8_t index) {
-    if (index >= SDF_STORAGE_WEB_USER_MAX) {
+esp_err_t sdf_storage_web_user_clear(uint16_t user_id) {
+    if (!sdf_storage_web_user_id_valid(user_id)) {
         return ESP_ERR_INVALID_ARG;
     }
 
     char key[32];
-    sdf_storage_web_user_key(key, sizeof(key), index);
+    sdf_storage_web_user_key(key, sizeof(key), user_id);
 
     nvs_handle_t handle;
     esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
@@ -440,22 +443,24 @@ esp_err_t sdf_storage_web_user_count(size_t *count) {
     }
 
     size_t cnt = 0;
-    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+    for (uint16_t id = SDF_STORAGE_FP_USER_ID_MIN; id <= SDF_STORAGE_WEB_USER_MAX; id++) {
         char key[32];
-        sdf_storage_web_user_key(key, sizeof(key), i);
+        sdf_storage_web_user_key(key, sizeof(key), id);
         sdf_storage_web_user_t u;
         size_t len = sizeof(sdf_storage_web_user_t);
         err = nvs_get_blob(handle, key, &u, &len);
-        if (err == ESP_OK && u.valid) {
+        /* Only records actually holding a companion credential are counted:
+         * a name-only record is a person, not an account. */
+        if (err == ESP_OK && u.valid && u.has_credential) {
             cnt++;
         } else if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
-            /* ESP_ERR_NVS_NOT_FOUND just means this slot has never been
-             * written - expected for unused slots. Anything else (e.g. a
+            /* ESP_ERR_NVS_NOT_FOUND just means this id has never been
+             * written - expected for unenrolled users. Anything else (e.g. a
              * corrupted/truncated blob) is swallowed the same way here
-             * (the slot is simply not counted), but is worth logging since
-             * it could otherwise silently undercount valid users. */
-            ESP_LOGW(TAG, "web_user_count: unexpected error reading slot %u: %s",
-                     (unsigned)i, esp_err_to_name(err));
+             * (the record is simply not counted), but is worth logging since
+             * it could otherwise silently undercount valid accounts. */
+            ESP_LOGW(TAG, "web_user_count: unexpected error reading id %u: %s",
+                     (unsigned)id, esp_err_to_name(err));
         }
     }
 
@@ -464,8 +469,8 @@ esp_err_t sdf_storage_web_user_count(size_t *count) {
     return ESP_OK;
 }
 
-esp_err_t sdf_storage_web_user_find_by_name(const char *username, sdf_storage_web_user_t *user, uint8_t *index_out) {
-    if (username == NULL || user == NULL || index_out == NULL) {
+esp_err_t sdf_storage_web_user_find_by_name(const char *name, sdf_storage_web_user_t *user, uint16_t *id_out) {
+    if (name == NULL || user == NULL || id_out == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -475,15 +480,21 @@ esp_err_t sdf_storage_web_user_find_by_name(const char *username, sdf_storage_we
         return err;
     }
 
-    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+    for (uint16_t id = SDF_STORAGE_FP_USER_ID_MIN; id <= SDF_STORAGE_WEB_USER_MAX; id++) {
         char key[32];
-        sdf_storage_web_user_key(key, sizeof(key), i);
+        sdf_storage_web_user_key(key, sizeof(key), id);
         sdf_storage_web_user_t u;
         size_t len = sizeof(sdf_storage_web_user_t);
         err = nvs_get_blob(handle, key, &u, &len);
-        if (err == ESP_OK && u.valid && strcmp(u.username, username) == 0) {
+        /* A record with a name but no credential is not an account: the name
+         * is the login identifier only for users holding one, so such a
+         * record reports as no match (LOGIN_INIT then treats the name as
+         * unknown - see companion-identity design.md "Non-admin names answer
+         * LOGIN_INIT as unknown"). */
+        if (err == ESP_OK && u.valid && u.has_credential &&
+            strcmp(u.name, name) == 0) {
             *user = u;
-            *index_out = i;
+            *id_out = id;
             nvs_close(handle);
             return ESP_OK;
         }
@@ -500,9 +511,9 @@ esp_err_t sdf_storage_web_user_clear_all(void) {
         return err;
     }
 
-    for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
+    for (uint16_t id = SDF_STORAGE_FP_USER_ID_MIN; id <= SDF_STORAGE_WEB_USER_MAX; id++) {
         char key[32];
-        sdf_storage_web_user_key(key, sizeof(key), i);
+        sdf_storage_web_user_key(key, sizeof(key), id);
         nvs_erase_key(handle, key);
     }
 
@@ -533,82 +544,6 @@ esp_err_t sdf_storage_web_pseudo_salt_key_load_or_generate(uint8_t key_out[SDF_S
     esp_fill_random(key_out, SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN);
     err = nvs_set_blob(handle, SDF_STORAGE_KEY_WEB_PSEUDO_SALT_KEY, key_out,
                         SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN);
-    if (err == ESP_OK) {
-        err = nvs_commit(handle);
-    }
-
-    nvs_close(handle);
-    return err;
-}
-
-static void sdf_storage_fp_user_name_key(char *buf, size_t buf_size, uint16_t user_id) {
-    snprintf(buf, buf_size, "%s%u", SDF_STORAGE_KEY_FP_USER_NAME_PREFIX, (unsigned)user_id);
-}
-
-esp_err_t sdf_storage_save_user_name(uint16_t user_id, const char *name) {
-    if (user_id < SDF_STORAGE_FP_USER_ID_MIN ||
-        user_id > SDF_STORAGE_FP_USER_ID_MAX || name == NULL) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char key[32];
-    sdf_storage_fp_user_name_key(key, sizeof(key), user_id);
-
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = nvs_set_str(handle, key, name);
-    if (err == ESP_OK) {
-        err = nvs_commit(handle);
-    }
-
-    nvs_close(handle);
-    return err;
-}
-
-esp_err_t sdf_storage_load_user_name(uint16_t user_id, char *name_out, size_t max_len) {
-    if (user_id < SDF_STORAGE_FP_USER_ID_MIN ||
-        user_id > SDF_STORAGE_FP_USER_ID_MAX || name_out == NULL || max_len == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char key[32];
-    sdf_storage_fp_user_name_key(key, sizeof(key), user_id);
-
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = nvs_get_str(handle, key, name_out, &max_len);
-    nvs_close(handle);
-    return err;
-}
-
-esp_err_t sdf_storage_delete_user_name(uint16_t user_id) {
-    if (user_id < SDF_STORAGE_FP_USER_ID_MIN ||
-        user_id > SDF_STORAGE_FP_USER_ID_MAX) {
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    char key[32];
-    sdf_storage_fp_user_name_key(key, sizeof(key), user_id);
-
-    nvs_handle_t handle;
-    esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
-    if (err != ESP_OK) {
-        return err;
-    }
-
-    err = nvs_erase_key(handle, key);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        err = ESP_OK;
-    }
-
     if (err == ESP_OK) {
         err = nvs_commit(handle);
     }

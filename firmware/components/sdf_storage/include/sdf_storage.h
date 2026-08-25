@@ -45,26 +45,40 @@ esp_err_t sdf_storage_ble_target_clear(void);
 
 esp_err_t sdf_storage_erase_all(void);
 
-/* Web user account storage (max 5 users) */
-#define SDF_STORAGE_WEB_USER_MAX 5
+/* Fingerprint user-id bounds (max 10 users, user_id 1-10). Duplicated
+ * here (rather than depending on sdf_drivers/fingerprint.h's
+ * SDF_FINGERPRINT_USER_ID_MIN/MAX) to avoid a storage->drivers layering
+ * dependency - keep these two definitions in sync if the sensor's user
+ * capacity ever changes. */
+#define SDF_STORAGE_FP_USER_ID_MIN 1u
+#define SDF_STORAGE_FP_USER_ID_MAX 10u
+
+/* Unified per-user record (companion-identity): exactly one identity
+ * namespace for people known to the device. Keyed by fingerprint user id,
+ * each record carries the user's name and - only for users holding a
+ * companion account - a salt and stretched credential. The user's
+ * permission is deliberately NOT stored here: it lives in sdf_services'
+ * enrolled-permission cache, which is the single authoritative copy, and
+ * session authority is resolved live from it at decision time. */
+#define SDF_STORAGE_WEB_USER_MAX SDF_STORAGE_FP_USER_ID_MAX
 #define SDF_STORAGE_WEB_USER_NAME_MAX 32
 #define SDF_STORAGE_WEB_USER_HASH_LEN 32     /* SHA256, as received at REGISTER */
 #define SDF_STORAGE_WEB_USER_SALT_LEN 16
 #define SDF_STORAGE_WEB_USER_STRETCHED_LEN 32  /* PBKDF2-HMAC-SHA256 output */
 
 typedef struct {
-    char username[SDF_STORAGE_WEB_USER_NAME_MAX];
-    uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];
-    uint8_t stretched_credential[SDF_STORAGE_WEB_USER_STRETCHED_LEN];
-    uint8_t permission;  /* 1=standard, 2=elevated, 3=admin */
-    bool valid;
+    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
+    uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN];          /* iff has_credential */
+    uint8_t stretched_credential[SDF_STORAGE_WEB_USER_STRETCHED_LEN]; /* iff has_credential */
+    bool has_credential;
+    bool valid;   /* record exists (name set and/or credential held) */
 } sdf_storage_web_user_t;
 
-esp_err_t sdf_storage_web_user_save(uint8_t index, const sdf_storage_web_user_t *user);
-esp_err_t sdf_storage_web_user_load(uint8_t index, sdf_storage_web_user_t *user);
-esp_err_t sdf_storage_web_user_clear(uint8_t index);
+esp_err_t sdf_storage_web_user_save(uint16_t user_id, const sdf_storage_web_user_t *user);
+esp_err_t sdf_storage_web_user_load(uint16_t user_id, sdf_storage_web_user_t *user);
+esp_err_t sdf_storage_web_user_clear(uint16_t user_id);
 esp_err_t sdf_storage_web_user_count(size_t *count);
-esp_err_t sdf_storage_web_user_find_by_name(const char *username, sdf_storage_web_user_t *user, uint8_t *index_out);
+esp_err_t sdf_storage_web_user_find_by_name(const char *name, sdf_storage_web_user_t *user, uint16_t *id_out);
 esp_err_t sdf_storage_web_user_clear_all(void);
 
 /* Device-local pseudo-salt HMAC key, used to derive an indistinguishable
@@ -76,19 +90,6 @@ esp_err_t sdf_storage_web_user_clear_all(void);
 #define SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN 32
 
 esp_err_t sdf_storage_web_pseudo_salt_key_load_or_generate(uint8_t key_out[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN]);
-
-/* Fingerprint user name storage (max 10 users, user_id 1-10). Duplicated
- * here (rather than depending on sdf_drivers/fingerprint.h's
- * SDF_FINGERPRINT_USER_ID_MIN/MAX) to avoid a storage->drivers layering
- * dependency - keep these two definitions in sync if the sensor's user
- * capacity ever changes. */
-#define SDF_STORAGE_FP_USER_NAME_MAX 32
-#define SDF_STORAGE_FP_USER_ID_MIN 1u
-#define SDF_STORAGE_FP_USER_ID_MAX 10u
-
-esp_err_t sdf_storage_save_user_name(uint16_t user_id, const char *name);
-esp_err_t sdf_storage_load_user_name(uint16_t user_id, char *name_out, size_t max_len);
-esp_err_t sdf_storage_delete_user_name(uint16_t user_id);
 
 /* Enrolled-user cache: a bitmap (1 bit/user, IDs 1-10) plus packed
  * permissions (2 bits/user) persisted as the authoritative record of which

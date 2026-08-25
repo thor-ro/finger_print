@@ -207,15 +207,17 @@ void test_sdf_storage_erase_all_idempotent(void) {
 }
 
 // -----------------------------------------------------------------------------
-// Web user storage
+// Unified per-user records (companion-identity)
 // -----------------------------------------------------------------------------
 
-static sdf_storage_web_user_t make_web_user(const char *username, uint8_t permission) {
+static sdf_storage_web_user_t make_web_user(const char *name, bool has_credential) {
   sdf_storage_web_user_t user = {0};
-  strncpy(user.username, username, sizeof(user.username) - 1);
-  memset(user.salt, 0xCD, sizeof(user.salt));
-  memset(user.stretched_credential, 0xAB, sizeof(user.stretched_credential));
-  user.permission = permission;
+  strncpy(user.name, name, sizeof(user.name) - 1);
+  if (has_credential) {
+    memset(user.salt, 0xCD, sizeof(user.salt));
+    memset(user.stretched_credential, 0xAB, sizeof(user.stretched_credential));
+    user.has_credential = true;
+  }
   user.valid = true;
   return user;
 }
@@ -223,25 +225,44 @@ static sdf_storage_web_user_t make_web_user(const char *username, uint8_t permis
 void test_sdf_storage_web_user_save_and_load_success(void) {
   nvs_setup();
 
-  sdf_storage_web_user_t saved = make_web_user("alice", 1);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved));
+  sdf_storage_web_user_t saved = make_web_user("alice", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved));
 
   sdf_storage_web_user_t loaded = {0};
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(0, &loaded));
-  TEST_ASSERT_EQUAL_STRING("alice", loaded.username);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_load(1, &loaded));
+  TEST_ASSERT_EQUAL_STRING("alice", loaded.name);
   TEST_ASSERT_EQUAL_MEMORY(saved.salt, loaded.salt, SDF_STORAGE_WEB_USER_SALT_LEN);
   TEST_ASSERT_EQUAL_MEMORY(saved.stretched_credential, loaded.stretched_credential, SDF_STORAGE_WEB_USER_STRETCHED_LEN);
-  TEST_ASSERT_EQUAL(1, loaded.permission);
+  TEST_ASSERT_TRUE(loaded.has_credential);
   TEST_ASSERT_TRUE(loaded.valid);
 
   nvs_teardown();
 }
 
-void test_sdf_storage_web_user_load_not_found(void) {
+/* Task 1.3: the record deliberately carries no permission field. Every
+ * member is byte-aligned, so the struct has no padding to hide a new field
+ * in: pinning its exact size makes any added member - a returned
+ * permission byte above all - fail here. The same assertion guards the
+ * persisted NVS blob layout, which is this struct written verbatim. */
+void test_sdf_storage_web_user_record_has_no_permission_field(void) {
+  TEST_ASSERT_EQUAL(SDF_STORAGE_WEB_USER_NAME_MAX + SDF_STORAGE_WEB_USER_SALT_LEN +
+                        SDF_STORAGE_WEB_USER_STRETCHED_LEN +
+                        2 /* has_credential, valid */,
+                    sizeof(sdf_storage_web_user_t));
+}
+
+void test_sdf_storage_web_user_load_absent_key_is_not_found(void) {
   nvs_setup();
 
+  /* Namespace exists (unrelated write creates it) but this user id was
+   * never written - an absent-key read must report NVS_NOT_FOUND, which is
+   * what callers use to distinguish "no record" from "empty record". */
+  uint8_t key_to_save[32];
+  memset(key_to_save, 0xEE, 32);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_nuki_save(42, key_to_save));
+
   sdf_storage_web_user_t loaded = {0};
-  esp_err_t err = sdf_storage_web_user_load(0, &loaded);
+  esp_err_t err = sdf_storage_web_user_load(4, &loaded);
   TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, err);
 
   nvs_teardown();
@@ -250,14 +271,14 @@ void test_sdf_storage_web_user_load_not_found(void) {
 void test_sdf_storage_web_user_find_by_name_hit(void) {
   nvs_setup();
 
-  sdf_storage_web_user_t saved = make_web_user("bob", 2);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved));
+  sdf_storage_web_user_t saved = make_web_user("bob", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &saved));
 
   sdf_storage_web_user_t found = {0};
-  uint8_t index_out = 0xFF;
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_find_by_name("bob", &found, &index_out));
-  TEST_ASSERT_EQUAL(1, index_out);
-  TEST_ASSERT_EQUAL_STRING("bob", found.username);
+  uint16_t id_out = 0xFFFF;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_find_by_name("bob", &found, &id_out));
+  TEST_ASSERT_EQUAL(2, id_out);
+  TEST_ASSERT_EQUAL_STRING("bob", found.name);
 
   nvs_teardown();
 }
@@ -272,13 +293,37 @@ void test_sdf_storage_web_user_find_by_name_miss(void) {
   // with ESP_ERR_NVS_NOT_FOUND before the loop is ever reached - so save an
   // (unrelated) entry first to create the namespace and exercise the real
   // "present namespace, no matching user" miss path.
-  sdf_storage_web_user_t saved = make_web_user("someone", 1);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved));
+  sdf_storage_web_user_t saved = make_web_user("someone", false);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved));
 
   sdf_storage_web_user_t found = {0};
-  uint8_t index_out = 0xFF;
-  esp_err_t err = sdf_storage_web_user_find_by_name("nobody", &found, &index_out);
+  uint16_t id_out = 0xFFFF;
+  esp_err_t err = sdf_storage_web_user_find_by_name("nobody", &found, &id_out);
   TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, err);
+
+  nvs_teardown();
+}
+
+/* Task 1.6: a record with a name but no credential is a person, not an
+ * account - find_by_name() (the LOGIN_INIT lookup) must report it as no
+ * match so a non-admin's name falls on the unknown-name side of the
+ * indistinguishability line. */
+void test_sdf_storage_web_user_find_by_name_ignores_credentialless_record(void) {
+  nvs_setup();
+
+  sdf_storage_web_user_t name_only = make_web_user("standard", false);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(3, &name_only));
+  sdf_storage_web_user_t holder = make_web_user("admin", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &holder));
+
+  sdf_storage_web_user_t found = {0};
+  uint16_t id_out = 0xFFFF;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND,
+                    sdf_storage_web_user_find_by_name("standard", &found, &id_out));
+  /* The credential-holding name still resolves. */
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_storage_web_user_find_by_name("admin", &found, &id_out));
+  TEST_ASSERT_EQUAL(1, id_out);
 
   nvs_teardown();
 }
@@ -286,7 +331,7 @@ void test_sdf_storage_web_user_find_by_name_miss(void) {
 void test_sdf_storage_web_user_clear_success(void) {
   nvs_setup();
 
-  sdf_storage_web_user_t saved = make_web_user("carol", 1);
+  sdf_storage_web_user_t saved = make_web_user("carol", true);
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &saved));
 
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear(2));
@@ -301,9 +346,9 @@ void test_sdf_storage_web_user_clear_success(void) {
 void test_sdf_storage_web_user_clear_all(void) {
   nvs_setup();
 
-  for (uint8_t i = 0; i < SDF_STORAGE_WEB_USER_MAX; i++) {
-    sdf_storage_web_user_t saved = make_web_user("user", 1);
-    TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(i, &saved));
+  for (uint16_t id = SDF_STORAGE_FP_USER_ID_MIN; id <= SDF_STORAGE_FP_USER_ID_MAX; id++) {
+    sdf_storage_web_user_t saved = make_web_user("user", true);
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(id, &saved));
   }
 
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear_all());
@@ -324,17 +369,17 @@ void test_sdf_storage_web_user_count(void) {
   // exists. Save-then-clear first to exercise that starting-from-zero case
   // for real, rather than asserting on the very first open of a totally
   // virgin partition.
-  sdf_storage_web_user_t saved1 = make_web_user("dave", 1);
-  sdf_storage_web_user_t saved2 = make_web_user("erin", 3);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved1));
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved2));
+  sdf_storage_web_user_t saved1 = make_web_user("dave", true);
+  sdf_storage_web_user_t saved2 = make_web_user("erin", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &saved2));
 
   size_t count = (size_t)-1;
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
   TEST_ASSERT_EQUAL(2, count);
 
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear(0));
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear(1));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_clear(2));
 
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
   TEST_ASSERT_EQUAL(0, count);
@@ -342,14 +387,66 @@ void test_sdf_storage_web_user_count(void) {
   nvs_teardown();
 }
 
-void test_sdf_storage_web_user_save_index_at_max_rejected(void) {
+/* Task 1.7: count() counts accounts (records holding a credential); a
+ * name-only record is not counted. */
+void test_sdf_storage_web_user_counts_only_credentials(void) {
   nvs_setup();
 
-  // Index must be < SDF_STORAGE_WEB_USER_MAX - there's no auto-allocated
-  // slot, so the max index itself is out of range.
-  sdf_storage_web_user_t saved = make_web_user("overflow", 1);
-  esp_err_t err = sdf_storage_web_user_save(SDF_STORAGE_WEB_USER_MAX, &saved);
-  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, err);
+  sdf_storage_web_user_t account = make_web_user("withcred", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &account));
+  sdf_storage_web_user_t name_only = make_web_user("nameonly", false);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(2, &name_only));
+
+  size_t count = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
+  TEST_ASSERT_EQUAL(1, count);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_web_user_id_out_of_range_rejected(void) {
+  nvs_setup();
+
+  // Ids are fingerprint user ids 1-10 inclusive: 0 and 11 are both outside
+  // the range - there is no auto-allocated slot and no zero-based index
+  // space anymore.
+  sdf_storage_web_user_t saved = make_web_user("overflow", true);
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_web_user_save(0, &saved));
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                    sdf_storage_web_user_save(SDF_STORAGE_FP_USER_ID_MAX + 1u, &saved));
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_web_user_load(0, &saved));
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG,
+                    sdf_storage_web_user_load(SDF_STORAGE_FP_USER_ID_MAX + 1u, &saved));
+
+  nvs_teardown();
+}
+
+/* Task 1.2: account capacity matches user capacity - all ten ids hold a
+ * record simultaneously, so no admin can be refused an account by a limit
+ * unrelated to their permission. */
+void test_sdf_storage_web_user_capacity_at_all_ten_ids(void) {
+  nvs_setup();
+
+  for (uint16_t id = SDF_STORAGE_FP_USER_ID_MIN; id <= SDF_STORAGE_FP_USER_ID_MAX; id++) {
+    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
+    snprintf(name, sizeof(name), "user%u", (unsigned)id);
+    sdf_storage_web_user_t saved = make_web_user(name, true);
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(id, &saved));
+  }
+
+  size_t count = 0;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_count(&count));
+  TEST_ASSERT_EQUAL(SDF_STORAGE_FP_USER_ID_MAX, count);
+
+  /* Every one of the ten resolves back by name. */
+  for (uint16_t id = SDF_STORAGE_FP_USER_ID_MIN; id <= SDF_STORAGE_FP_USER_ID_MAX; id++) {
+    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
+    snprintf(name, sizeof(name), "user%u", (unsigned)id);
+    sdf_storage_web_user_t found = {0};
+    uint16_t id_out = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_find_by_name(name, &found, &id_out));
+    TEST_ASSERT_EQUAL(id, id_out);
+  }
 
   nvs_teardown();
 }
@@ -397,8 +494,11 @@ void test_sdf_storage_web_pseudo_salt_key_null_arg_rejected(void) {
 void test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key(void) {
   nvs_setup();
 
-  sdf_storage_web_user_t saved = make_web_user("frank", 1);
-  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(0, &saved));
+  /* Task 1.8: erase_all() wipes the whole flash namespace, which is what
+   * clears the unified records - no separate web-user/name clear step
+   * exists or is needed. */
+  sdf_storage_web_user_t saved = make_web_user("frank", true);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_user_save(1, &saved));
 
   uint8_t key_before[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN] = {0};
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_web_pseudo_salt_key_load_or_generate(key_before));
@@ -406,7 +506,7 @@ void test_sdf_storage_erase_all_clears_web_users_and_pseudo_salt_key(void) {
   TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
 
   sdf_storage_web_user_t loaded = {0};
-  TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, sdf_storage_web_user_load(0, &loaded));
+  TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, sdf_storage_web_user_load(1, &loaded));
 
   // The pseudo-salt key must be gone too - erase_all wipes the whole
   // namespace, so load_or_generate() regenerates a fresh (different) key

@@ -115,6 +115,27 @@ esp_err_t sdf_services_query_users(uint16_t *user_ids, uint8_t *permissions,
 esp_err_t sdf_services_change_user_permission(uint16_t user_id,
                                               uint8_t permission);
 
+/* True when `user_id` is currently enrolled AND its cached permission is
+ * admin (3). Reads only the in-memory enrolled-user cache - this is the
+ * live authority lookup behind the companion session gate
+ * (companion-identity "Session Authority Is Derived Live From The Bound
+ * User"): a demotion or deletion of the bound user takes effect on open
+ * sessions at their next decision, with no cascade. */
+bool sdf_services_user_is_enrolled_admin(uint16_t user_id);
+
+/* Resolves which enrolled user currently holds `name`, scanning every
+ * unified per-user record regardless of whether it holds a credential -
+ * names are unique across all enrolled users, not just account holders.
+ * Returns ESP_OK and the holder's id when found, ESP_ERR_NOT_FOUND
+ * otherwise. */
+esp_err_t sdf_services_find_name_holder(const char *name, uint16_t *holder_id_out);
+
+/* Sets (renames) an enrolled user's name inside their unified record,
+ * preserving any stored credential. Refuses an unenrolled id with
+ * ESP_ERR_NOT_FOUND and a name already held by a different enrolled user
+ * with ESP_ERR_INVALID_STATE, leaving every record unchanged. */
+esp_err_t sdf_services_set_user_name(uint16_t user_id, const char *name);
+
 esp_err_t sdf_services_request_admin_action(sdf_services_admin_action_t action);
 
 void sdf_services_trigger_low_battery_warning(void);
@@ -179,7 +200,7 @@ esp_err_t sdf_services_set_web_reg_auth(const char *username,
                                          const uint8_t *password_hash,
                                          size_t hash_len);
 esp_err_t sdf_services_get_web_reg_auth(char *username, size_t username_max,
-                                         uint8_t *permission);
+                                         uint16_t *authorizing_user_id);
 esp_err_t sdf_services_get_web_reg_password_hash(uint8_t *password_hash,
                                                   size_t hash_len);
 void sdf_services_clear_web_reg_auth(void);
@@ -252,21 +273,29 @@ sdf_services_web_auth_challenge_t sdf_services_web_auth_make_pseudo_challenge(
     const uint8_t nonce[SDF_SERVICES_WEB_AUTH_NONCE_LEN]);
 
 /* Registration outcome. Mirrors sdf_app_on_web_reg_auth_result's logic minus
- * the actual sdf_storage_web_user_save() call and slot selection (still
- * sdf_app's job). Salt is caller-generated (see comment above); this
- * function runs the PBKDF2 stretch (via
- * sdf_services_web_auth_stretch_credential) and persists only the salt and
- * stretched credential, never the raw received hash. */
+ * the actual sdf_storage_web_user_save() call (still sdf_app's job). Salt is
+ * caller-generated (see comment above); this function runs the PBKDF2 stretch
+ * (via sdf_services_web_auth_stretch_credential) and persists only the salt
+ * and stretched credential, never the raw received hash.
+ *
+ * The credential binds to `authorizing_user_id`, the fingerprint user whose
+ * scan authorized the registration (companion-identity): a user that already
+ * holds an account gets its credential replaced in place, and a registration
+ * with no captured authorizer - or one whose submitted name is already held
+ * by a different enrolled user (`name_available` false) - is refused with
+ * nothing persisted. */
 typedef struct {
-  bool should_persist;              /* false on denial/timeout */
+  bool should_persist;              /* false on denial/refusal/timeout */
+  uint16_t user_id;                 /* bound fingerprint user id, iff should_persist */
   sdf_storage_web_user_t user;      /* populated only if should_persist */
   bool reply_authorized;            /* value to pass to sdf_ble_companion_reply_auth() */
 } sdf_services_web_auth_registration_decision_t;
 
 sdf_services_web_auth_registration_decision_t sdf_services_web_auth_decide_registration(
-    const char *username, const uint8_t *password_hash, size_t hash_len,
+    const char *name, const uint8_t *password_hash, size_t hash_len,
     const uint8_t salt[SDF_STORAGE_WEB_USER_SALT_LEN],
-    uint8_t permission, bool admin_authorized);
+    uint16_t authorizing_user_id, bool admin_authorized,
+    bool name_available);
 
 /* Timeout/reject unlatch guard. Trivial today (action == WEB_REG_AUTH &&
  * result != ESP_OK), but made explicit and tested so a future admin-action

@@ -64,7 +64,10 @@ typedef struct {
   bool web_reg_auth_pending;
   char request_web_username[SDF_STORAGE_WEB_USER_NAME_MAX];
   uint8_t request_web_password_hash[SDF_STORAGE_WEB_USER_HASH_LEN];
-  uint8_t request_web_permission;
+  /* Fingerprint user id of the admin whose scan authorized this pending
+   * registration (companion-identity). Owned state like the name/hash
+   * above: never carried in an event payload. 0 = not captured yet. */
+  uint16_t request_web_authorizing_user_id;
   int64_t web_reg_auth_start_us;
 } sdf_services_state_t;
 

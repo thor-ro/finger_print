@@ -365,18 +365,22 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 esp_fill_random(nonce, sizeof(nonce));
 
                 sdf_storage_web_user_t user = {0};
-                uint8_t index = 0;
+                uint16_t found_id = 0;
                 esp_err_t find_err =
-                    sdf_storage_web_user_find_by_name(conn->username, &user, &index);
+                    sdf_storage_web_user_find_by_name(conn->username, &user, &found_id);
 
                 sdf_services_web_auth_challenge_t challenge;
                 if (find_err == ESP_OK) {
                     challenge = sdf_services_web_auth_make_login_challenge(&user, nonce);
                 } else {
-                    /* Unknown username: deterministic pseudo-salt challenge,
+                    /* Unknown name: deterministic pseudo-salt challenge,
                      * same shape as a real account's - see design.md
                      * "Username-enumeration mitigation". No LOGIN_VERIFY can
-                     * ever match this. */
+                     * ever match this. A record with a name but NO credential
+                     * (an enrolled non-admin) also lands here - find_by_name()
+                     * reports it as a miss - so the reply does not reveal
+                     * which users are admins (companion-identity design.md
+                     * "Non-admin names answer LOGIN_INIT as unknown"). */
                     uint8_t pseudo_key[SDF_STORAGE_WEB_PSEUDO_SALT_KEY_LEN];
                     sdf_storage_web_pseudo_salt_key_load_or_generate(pseudo_key);
                     challenge = sdf_services_web_auth_make_pseudo_challenge(
@@ -418,10 +422,17 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 memset(&conn->pending_login_challenge, 0, sizeof(conn->pending_login_challenge));
 
                 sdf_storage_web_user_t user = {0};
-                uint8_t index = 0;
+                uint16_t found_id = 0;
                 esp_err_t find_err =
-                    sdf_storage_web_user_find_by_name(username_copy, &user, &index);
+                    sdf_storage_web_user_find_by_name(username_copy, &user, &found_id);
+                /* Admin authority is resolved live from the bound user at
+                 * login time too (companion-identity): an account whose user
+                 * was demoted or deleted cannot authenticate - and since a
+                 * non-admin account should not exist at all, this also keeps
+                 * the "only admins hold accounts" invariant enforced at the
+                 * gate even if a stale record ever said otherwise. */
                 bool ok = find_err == ESP_OK &&
+                          sdf_services_user_is_enrolled_admin(found_id) &&
                           sdf_services_web_auth_verify_response(
                               user.stretched_credential, nonce_copy, sizeof(nonce_copy),
                               response, sizeof(response));
@@ -501,6 +512,10 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                     memcpy(identity.val, desc.peer_id_addr.val, sizeof(identity.val));
                     sdf_ble_companion_bond_note_login_success(&s_bond_state, &identity);
                 }
+                /* Bind the session to the account's fingerprint user id
+                 * (companion-identity): every later authority decision
+                 * re-reads this user's live enrolment + permission. */
+                conn->bound_user_id = found_id;
                 xSemaphoreGive(s_lock);
                 if (sdf_ble_companion_set_authenticated(conn_handle, true) !=
                     ESP_OK) {
@@ -550,6 +565,7 @@ static int sdf_ble_companion_auth_access(uint16_t conn_handle, uint16_t attr_han
                 }
                 conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
                 conn->auth_pending = false;
+                conn->bound_user_id = 0;
                 memset(conn->username, 0, sizeof(conn->username));
                 memset(&conn->pending_login_challenge, 0, sizeof(conn->pending_login_challenge));
                 conn->auth_value_len = 1;
@@ -731,6 +747,21 @@ static int sdf_ble_companion_dispatch_ota_write(
     return 0;
 }
 
+/* Live authority check (companion-identity): the connection must be
+ * authenticated AND its bound user must still be enrolled with admin
+ * permission, re-read from the enrolled-user cache at every decision. A
+ * demotion or deletion of the bound user therefore strips a session's
+ * authority on its next restricted access without any cascade over stored
+ * records. Called with s_lock held; resolves through sdf_services' own
+ * lock (no path takes them in the opposite order). */
+static bool sdf_ble_companion_conn_has_admin_authority(
+    const sdf_ble_companion_connection_t *conn) {
+    return conn != NULL &&
+           conn->auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED &&
+           conn->bound_user_id != 0 &&
+           sdf_services_user_is_enrolled_admin(conn->bound_user_id);
+}
+
 static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_handle,
                                             struct ble_gatt_access_ctxt *ctxt, void *arg) {
     (void)attr_handle;
@@ -751,7 +782,7 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
     }
 
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
-    if (!conn || conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+    if (!sdf_ble_companion_conn_has_admin_authority(conn)) {
         xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
@@ -831,7 +862,7 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
     }
 
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
-    if (!conn || conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+    if (!sdf_ble_companion_conn_has_admin_authority(conn)) {
         xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
@@ -879,7 +910,7 @@ static int sdf_ble_companion_ota_access(uint16_t conn_handle, uint16_t attr_hand
     }
 
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
-    if (!conn || conn->auth_state != SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+    if (!sdf_ble_companion_conn_has_admin_authority(conn)) {
         xSemaphoreGive(s_lock);
         return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
     }
@@ -1768,6 +1799,23 @@ bool sdf_ble_companion_is_authenticated(uint16_t conn_handle) {
     return result;
 }
 
+/* Sets (or clears, with id 0) the fingerprint user a session is bound to.
+ * Called after set_authenticated() on the REGISTER confirmation path; the
+ * LOGIN_VERIFY path binds inline under s_lock. */
+static esp_err_t sdf_ble_companion_bind_user(uint16_t conn_handle, uint16_t user_id) {
+    if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
+        return ESP_ERR_TIMEOUT;
+    }
+    sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
+    if (!conn) {
+        xSemaphoreGive(s_lock);
+        return ESP_ERR_NOT_FOUND;
+    }
+    conn->bound_user_id = user_id;
+    xSemaphoreGive(s_lock);
+    return ESP_OK;
+}
+
 esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authenticated) {
     if (xSemaphoreTake(s_lock, portMAX_DELAY) != pdTRUE) {
         return ESP_ERR_TIMEOUT;
@@ -1785,8 +1833,11 @@ esp_err_t sdf_ble_companion_set_authenticated(uint16_t conn_handle, bool authent
         conn->auth_value_len = 1;
         conn->auth_value[0] = 0x01;
     } else {
+        /* Leaving the authenticated state drops the session's binding with
+         * it (LOGOUT path; the disconnect memset covers the other exit). */
         conn->auth_state = SDF_BLE_COMPANION_AUTH_STATE_UNAUTHENTICATED;
         conn->auth_pending = false;
+        conn->bound_user_id = 0;
         conn->auth_value_len = 1;
         conn->auth_value[0] = 0x00;
     }
@@ -1832,8 +1883,32 @@ esp_err_t sdf_ble_companion_reply_auth(const char *username, bool authorized) {
     if (!found) {
         return ESP_ERR_NOT_FOUND;
     }
+
+    /* Bind the session to the account's fingerprint user id before marking
+     * it authenticated (companion-identity): the REGISTER reply may only
+     * authenticate the connection after the credentials were saved, and
+     * that persisted record is what names the owning user. A missing record
+     * binds nothing, so the authority gate below refuses every restricted
+     * access despite the authenticated flag - a credential that was never
+     * persisted grants no session. */
+    uint16_t bound_id = 0;
+    if (authorized) {
+        sdf_storage_web_user_t account = {0};
+        if (sdf_storage_web_user_find_by_name(username, &account, &bound_id) != ESP_OK) {
+            bound_id = 0;
+            ESP_LOGW(TAG,
+                     "REGISTER confirmed but no stored account found for '%s' - "
+                     "session will carry no admin authority",
+                     username);
+        }
+    }
+
     /* set_authenticated acquires the lock internally */
-    return sdf_ble_companion_set_authenticated(found_handle, authorized);
+    esp_err_t err = sdf_ble_companion_set_authenticated(found_handle, authorized);
+    if (err == ESP_OK && authorized) {
+        err = sdf_ble_companion_bind_user(found_handle, bound_id);
+    }
+    return err;
 }
 
 esp_err_t sdf_ble_companion_reply_admin_action(uint16_t conn_handle,

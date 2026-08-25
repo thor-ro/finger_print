@@ -26,6 +26,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "nvs.h"
+
 // Forward declarations or includes to the actual subsystems would go here
 // For now, we will just print mocks or call generic hooks.
 // Assuming sdf_services.h or similar has what we need later or we decouple it.
@@ -115,9 +117,12 @@ static int cmd_user_list(int argc, char **argv) {
   printf("User ID  Permission  Name\n");
   printf("-------  ----------  ----\n");
   for (size_t i = 0; i < count; i++) {
-    char name[SDF_STORAGE_FP_USER_NAME_MAX];
-    err = sdf_storage_load_user_name(user_ids[i], name, sizeof(name));
-    if (err != ESP_OK) {
+    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
+    sdf_storage_web_user_t rec;
+    if (sdf_storage_web_user_load(user_ids[i], &rec) == ESP_OK) {
+      strncpy(name, rec.name, sizeof(name) - 1);
+      name[sizeof(name) - 1] = '\0';
+    } else {
       name[0] = '\0';
     }
     printf("%-7u  %u (%s)  %s\n", (unsigned)user_ids[i], (unsigned)permissions[i],
@@ -145,22 +150,17 @@ static int cmd_user_set_name(int argc, char **argv) {
   }
 
   const char *name = argv[3];
-  if (strlen(name) >= SDF_STORAGE_FP_USER_NAME_MAX) {
-    printf("Name too long. Max %d characters.\n", SDF_STORAGE_FP_USER_NAME_MAX - 1);
+  if (strlen(name) >= SDF_STORAGE_WEB_USER_NAME_MAX) {
+    printf("Name too long. Max %d characters.\n", SDF_STORAGE_WEB_USER_NAME_MAX - 1);
     return 0;
   }
 
-  // Check if user exists
-  uint8_t permission = 0;
-  sdf_fingerprint_op_result_t res = fp_query_user_permission(user_id, &permission);
-  if (res != SDF_FINGERPRINT_OP_OK) {
-    printf("User %u not enrolled.\n", (unsigned)user_id);
-    return 0;
-  }
-
-  esp_err_t err = sdf_storage_save_user_name(user_id, name);
+  esp_err_t err = sdf_services_set_user_name(user_id, name);
   if (err == ESP_OK) {
     printf("Name '%s' set for user %u.\n", name, (unsigned)user_id);
+  } else if (err == ESP_ERR_INVALID_STATE) {
+    printf("Cannot set name '%s': another enrolled user already holds it.\n",
+           name);
   } else {
     printf("Failed to save name: %s\n", esp_err_to_name(err));
   }
@@ -185,7 +185,26 @@ static int cmd_user_clear_name(int argc, char **argv) {
     return 0;
   }
 
-  esp_err_t err = sdf_storage_delete_user_name(user_id);
+  /* The name lives inside the unified per-user record now: blank it in
+   * place so any stored credential survives a name clear. */
+  sdf_storage_web_user_t rec = {0};
+  esp_err_t err = sdf_storage_web_user_load(user_id, &rec);
+  if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+    printf("Failed to clear name: %s\n", esp_err_to_name(err));
+    return 0;
+  }
+  memset(rec.name, 0, sizeof(rec.name));
+  rec.valid = rec.has_credential;
+  if (!rec.valid) {
+    /* Nothing left in the record once the name is gone, so erase the key
+     * outright rather than writing back an empty blob. Erasing is what
+     * actually releases the name for reuse - returning here without
+     * touching storage would report success while leaving the old name in
+     * NVS, still blocking another user from taking it. */
+    err = sdf_storage_web_user_clear(user_id);
+  } else {
+    err = sdf_storage_web_user_save(user_id, &rec);
+  }
   if (err == ESP_OK) {
     printf("Name cleared for user %u.\n", (unsigned)user_id);
   } else {
@@ -215,9 +234,12 @@ static int cmd_user_get(int argc, char **argv) {
   uint8_t permission = 0;
   sdf_fingerprint_op_result_t res = fp_query_user_permission(user_id, &permission);
   if (res == SDF_FINGERPRINT_OP_OK) {
-    char name[SDF_STORAGE_FP_USER_NAME_MAX];
-    esp_err_t err = sdf_storage_load_user_name(user_id, name, sizeof(name));
-    if (err != ESP_OK) {
+    char name[SDF_STORAGE_WEB_USER_NAME_MAX];
+    sdf_storage_web_user_t rec;
+    if (sdf_storage_web_user_load(user_id, &rec) == ESP_OK) {
+      strncpy(name, rec.name, sizeof(name) - 1);
+      name[sizeof(name) - 1] = '\0';
+    } else {
       name[0] = '\0';
     }
     printf("User ID: %u, Permission: %u (%s), Name: %s\n", (unsigned)user_id,
@@ -254,7 +276,12 @@ static int cmd_user_del(int argc, char **argv) {
   } else if (err == ESP_ERR_NOT_FOUND) {
     printf("User %u not found.\n", (unsigned)user_id);
   } else if (err == ESP_ERR_INVALID_STATE) {
-    printf("Cannot delete user %u: invalid state (may be last admin).\n",
+    /* sdf_services_delete_user() returns INVALID_STATE for two causes: an
+     * uninitialized services module and the last-admin guard. check_auth()
+     * above has already required a CLI login, which cannot succeed before
+     * services are up, so only the guard is reachable here - state it
+     * plainly rather than repeating the raw code. */
+    printf("Cannot delete user %u: this is the last remaining admin.\n",
            (unsigned)user_id);
   } else {
     printf("Failed to delete user %u: %s\n", (unsigned)user_id,
