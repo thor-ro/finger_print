@@ -45,10 +45,17 @@ The token contract SHALL be documented in the repository and SHALL cover, at min
 
 Every shipped theme SHALL declare every token in the contract. A theme missing a token SHALL fail the build rather than silently inheriting another theme's value.
 
+The contract SHALL be exact in both directions: a theme declaring a token that is not in the contract SHALL fail the build, so that the contract cannot accumulate tokens no component consumes.
+
 #### Scenario: Incomplete theme fails
 
 - **WHEN** a shipped theme omits a token named in the contract
 - **THEN** the build fails and names the missing token
+
+#### Scenario: Token outside the contract fails
+
+- **WHEN** a shipped theme declares a token the contract does not name
+- **THEN** the build fails and names the surplus token
 
 #### Scenario: Adding a token obliges every theme
 
@@ -84,6 +91,8 @@ Continuous integration SHALL verify, for every shipped theme, that each text tok
 
 Where a surface is translucent, the check SHALL measure the composited result over the background beneath it. Where a background or accent is a gradient, the check SHALL measure against its least favourable stop rather than an average.
 
+A token value the check cannot read SHALL fail the build. An unmeasured pair SHALL NOT be reported as passing, and each theme SHALL be reported on its own so that one theme's failure does not label another as failing.
+
 #### Scenario: Low-contrast theme fails
 
 - **WHEN** a theme declares a text token that falls below the threshold against its surface
@@ -99,6 +108,12 @@ Where a surface is translucent, the check SHALL measure the composited result ov
 
 - **WHEN** a theme declares a gradient background or a gradient accent
 - **THEN** the check measures against the stop that yields the lowest contrast
+
+#### Scenario: Unreadable value fails rather than being skipped
+
+- **WHEN** a theme declares a token in a colour syntax the check cannot read
+- **THEN** the build fails and names the token and its value
+- **AND** the theme is not reported as passing contrast
 
 ### Requirement: The User Chooses A Theme And The Choice Persists
 

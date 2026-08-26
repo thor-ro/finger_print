@@ -73,7 +73,9 @@
 	}
 	.register-note {
 		background: var(--info-tint);
-		border: 1px solid var(--border);
+		/* Informational callout: --info edges it the way --warn edges
+		   .alert.warning and --danger edges .refusal. */
+		border: 1px solid var(--info);
 		border-radius: var(--radius);
 		padding: 0.6rem 0.8rem;
 	}

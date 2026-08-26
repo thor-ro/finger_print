@@ -49,3 +49,17 @@
 - [x] 7.2 Confirm a long device-reported user name and a refusal message render correctly in both themes
 - [x] 7.3 Update `web-companion/README.md` with the theme picker, the token contract, and how to add a theme
 - [x] 7.4 Deploy and confirm both themes on the live Pages site
+
+## 8. Review Fixes
+
+- [x] 8.1 Measure gradient-valued tokens at every stop instead of skipping them: `--text-on-accent` on `--accent-gradient` was never measured, so a 1.00:1 primary button passed the gate
+- [x] 8.2 Make a token value the contrast check cannot read a failure rather than a skipped pair, and read `hsl()`/`hsla()` (an `hsl()` panel behind near-white text also passed)
+- [x] 8.3 Report contrast per theme: a global failure flag labelled every theme printed after the first failure as failing, including untouched ones
+- [x] 8.4 Measure the text that lands on `--info-tint`, and measure every status tint over both panel surfaces rather than the dashboard surface alone
+- [x] 8.5 Give the contract's unconsumed tokens a consumer or drop them: `--accent-strong` becomes the `:focus-visible` ring (gated at 3:1 as a UI edge), `--info` edges the informational callout, `--ok-tint` leaves the contract; make the contract exact by failing a theme that declares anything outside it
+- [x] 8.6 Extend the no-colour-literal rule to named CSS colours (`color: red` passed lint), matched only as the value of a colour-bearing property so prose stays safe
+- [x] 8.7 Cover theme selection in tests, not only in a one-off walkthrough: persistence, the pre-paint starting point, storage being unavailable, and that a theme change writes nothing to the device; pin the four places a theme is declared (`themes/<id>.css`, `THEMES`, the pre-paint script, the picker) against drift
+- [x] 8.8 Record the budget raise (46,080 → 49,255 / 55,296 → 56,641) as a deliberate, separately justified decision, and reconcile `scripts/budget.mjs`'s "never rises" comment with it
+- [x] 8.9 Record the removal of the Enroll-Admin dashboard section: it arrived inside this change with no task of its own, and its rationale lived only in a code comment
+- [x] 8.10 Re-prove every changed and added gate red before green, and record the evidence
+- [x] 8.11 Record that this change landed before `web-companion-tooling` 6.1-6.9, contrary to its own risk row

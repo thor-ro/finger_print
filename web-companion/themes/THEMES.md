@@ -20,27 +20,43 @@ theme:
 - **Purity** — the file contains exactly one rule,
   `:root[data-theme='<theme-id>']` matching its own file name, holding
   custom-property declarations only.
-- **Completeness** — every contract token is declared.
+- **Completeness** — every contract token is declared, and no token beyond
+  the contract is.
 - **Contrast** — WCAG ratios measured with translucent surfaces composited
-  over the background beneath and gradients at their least favourable stop:
-  4.5:1 for body/status text pairs, 3:1 for borders.
+  over the background beneath and gradients at *every* stop: 4.5:1 for
+  body/status text pairs, 3:1 for borders and the focus ring. A token value
+  the check cannot read fails the build; it is never a skipped pair.
 
-The no-colour-literal rule for `src/` lives in `scripts/lint.mjs`.
+Each theme is reported on its own — one theme's failure never labels
+another as failing.
+
+The no-colour-literal rule for `src/` lives in `scripts/lint.mjs` and covers
+hex, `rgb()`/`hsl()` and named CSS colours.
+
+Selection, persistence and the four places a theme is declared
+(`themes/<id>.css`, `THEMES`, the pre-paint script, the picker) are covered
+by `src/lib/state/theme.test.ts`, including the rule that a theme change
+never writes to the device.
 
 ## Bundle budget (task 5.6)
 
 Measured with both themes shipped (gzip -9, `scripts/budget.mjs`):
 
-- initial load: 48,231 B (was 45,860 B before this change)
-- total load: 55,617 B
+- initial load: 48,225 B (was 45,860 B before this change)
+- total load: 55,483 B
 
-The declared budget was re-set to measured + 1 KB headroom
-(`49,255` / `56,641`). The growth is: both token sets in the entry CSS
-(+~0.7 KB), the pre-paint theme script and its pinned hash in
-`index.html` (+~0.4 KB), and the header theme picker (+~1.0 KB). The
-picker is deliberately plain buttons — a bound `<select>` or an `{#each}`
-block would drag Svelte's selection/each runtime into the initial bundle
-for ~2.5 KB more.
+The declared budget is `49,255` / `56,641` — measured + 1 KB headroom. That
+is a **raise** of the previous 46,080 / 55,296, not a re-measurement, and a
+measurement alone may never raise a budget (`scripts/budget.mjs`). The
+decision, what the bytes bought and what was weighed against them is
+recorded in
+`openspec/changes/web-companion-theming/design.md`, "Decision: the budget
+rises once, deliberately". In short, the growth is: both token sets in the
+entry CSS (+~0.7 KB), the pre-paint theme script and its pinned hash in
+`index.html` (+~0.4 KB), and the header theme picker (+~1.0 KB). The picker
+is deliberately plain buttons — a bound `<select>` or an `{#each}` block
+would drag Svelte's selection/each runtime into the initial bundle for
+~2.5 KB more.
 
 ## Where the old literals went (task 1.4)
 
@@ -71,6 +87,7 @@ through colour, gradient and radius, not typeface.
 |---|---|---|
 | `--border: rgba(255,255,255,0.8)` | `rgba(51,65,85,0.45)` (translucent slate) | White-on-white borders fail the 3:1 UI-edge contrast requirement against the glass panels and pastel background. |
 | Status hues from Tailwind's 500s (`#22c55e`, `#f59e0b`, `#ef4444` family intent) | 700-range equivalents (`#15803d`, `#b45309`, `#b91c1c`) | Status colours render as body-size text on light panels; the 500s measure below 4.5:1 on the composited glass surface. |
+| `--accent-strong: #0ea5e9` (sky-500, same as `--accent`) | `#0284c7` (sky-600) | It is the focus ring. Measured as a UI edge it reached only 2.04:1 against the pastel background (3:1 required); one step darker clears it while staying the accent's own emphasis. The dark theme's value already passed and is unchanged. |
 | `'Poppins', 'Nunito'` | System stack | See above. |
 | Hover lifts (`translateY`) and the gradient-hover button variant | Not ported | Component styling does not belong in themes; motion is kept minimal rather than added per-theme. |
 | `.axo-nav`, `.axo-hero`, `.axo-glass-card`, `.axo-btn-primary`, the `@media (max-width: 900px)` block | Deleted | They style markup the companion does not have; a theme selects nothing. What the app wanted (glass surfaces, gradient accent, pill radii) survives as token values consumed by the app's own components. |

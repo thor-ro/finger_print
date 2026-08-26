@@ -15,11 +15,15 @@
  *
  *   contrast       WCAG contrast ratios for the pairs the app actually
  *                  renders: 4.5:1 for body/status/vocabulary/on-accent
- *                  text, 3:1 for borders. Translucent surfaces are
- *                  COMPOSITED over the background beneath them (chained:
- *                  tint -> panel -> page background), and gradients are
- *                  measured at their least favourable stop - never an
- *                  average.
+ *                  text, 3:1 for borders and the focus ring. Translucent
+ *                  surfaces are COMPOSITED over the background beneath
+ *                  them (chained: tint -> panel -> page background), and
+ *                  gradients are measured at EVERY stop - never an average
+ *                  and never skipped for not being a single colour.
+ *
+ *                  A token value this check cannot read is a FAILURE, not
+ *                  a skipped pair: an unmeasured pair once reported
+ *                  "contrast OK" for a 1:1 gradient button.
  *
  * Also verifies themes/CONTRACT.md still names every contract token, so
  * the documented contract cannot drift from the enforced one.
@@ -57,7 +61,6 @@ const CONTRACT = [
 	'--warn',
 	'--danger',
 	'--info',
-	'--ok-tint',
 	'--warn-tint',
 	'--danger-tint',
 	'--info-tint',
@@ -78,9 +81,9 @@ const CONTRACT = [
 const BODY_RATIO = 4.5;
 const EDGE_RATIO = 3;
 
-let failed = false;
+let failures = 0;
 function fail(message) {
-	failed = true;
+	failures++;
 	console.error(`theme error  ${message}`);
 }
 
@@ -106,11 +109,60 @@ function parseColor(text) {
 	}
 	m = t.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)(?:[\s,/]+([\d.%]+))?\s*\)$/i);
 	if (m) {
-		let a = 1;
-		if (m[4] !== undefined) {
-			a = m[4].endsWith('%') ? parseFloat(m[4]) / 100 : parseFloat(m[4]);
-		}
-		return { r: +m[1], g: +m[2], b: +m[3], a };
+		return { r: +m[1], g: +m[2], b: +m[3], a: alphaOf(m[4]) };
+	}
+	m = t.match(
+		/^hsla?\(\s*([\d.-]+)(?:deg)?[\s,]+([\d.]+)%[\s,]+([\d.]+)%(?:[\s,/]+([\d.%]+))?\s*\)$/i
+	);
+	if (m) {
+		return { ...hslToRgb(+m[1], +m[2] / 100, +m[3] / 100), a: alphaOf(m[4]) };
+	}
+	return null;
+}
+
+function alphaOf(text) {
+	if (text === undefined) return 1;
+	return text.endsWith('%') ? parseFloat(text) / 100 : parseFloat(text);
+}
+
+function hslToRgb(hDeg, s, l) {
+	const h = (((hDeg % 360) + 360) % 360) / 60;
+	const c = (1 - Math.abs(2 * l - 1)) * s;
+	const x = c * (1 - Math.abs((h % 2) - 1));
+	const [r, g, b] =
+		h < 1 ? [c, x, 0]
+		: h < 2 ? [x, c, 0]
+		: h < 3 ? [0, c, x]
+		: h < 4 ? [0, x, c]
+		: h < 5 ? [x, 0, c]
+		: [c, 0, x];
+	const m = l - c / 2;
+	return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
+}
+
+/**
+ * Value syntax this check can read in full. Anything else - color-mix(),
+ * oklch(), var(), light-dark() - is rejected rather than partially read:
+ * color-mix(in srgb, #0b1522 80%, white) contains a hex, so a plain
+ * "find the colours" scan would happily measure the wrong colour and pass.
+ */
+const READABLE_FUNCS = new Set([
+	'rgb',
+	'rgba',
+	'hsl',
+	'hsla',
+	'linear-gradient',
+	'radial-gradient',
+	'conic-gradient',
+	'repeating-linear-gradient',
+	'repeating-radial-gradient',
+	'repeating-conic-gradient'
+]);
+
+/** The first function in a value this check cannot read, if any. */
+function unreadableFunc(value) {
+	for (const [, name] of value.matchAll(/([a-z][a-z0-9-]*)\s*\(/gi)) {
+		if (!READABLE_FUNCS.has(name.toLowerCase())) return name;
 	}
 	return null;
 }
@@ -118,7 +170,7 @@ function parseColor(text) {
 /** All colours appearing in a value, in order (gradient stops included). */
 function colorsIn(value) {
 	const out = [];
-	const re = /(#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\))/g;
+	const re = /(#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)|hsla?\([^)]*\))/g;
 	for (const [, c] of value.matchAll(re)) {
 		const parsed = parseColor(c);
 		if (parsed) out.push(parsed);
@@ -214,49 +266,110 @@ for (const name of themeFiles) {
 		fail(`${label}: selector id '${theme.id}' does not match its file name`);
 	}
 
-	// Completeness: every contract token declared.
+	// Completeness: every contract token declared, and nothing beyond it -
+	// a token no component consumes is dead weight every theme must carry.
 	const missing = CONTRACT.filter((t) => !(t in theme.tokens));
 	if (missing.length > 0) {
 		fail(`${label}: missing contract token(s): ${missing.join(', ')}`);
 	}
+	const extra = Object.keys(theme.tokens).filter((t) => !CONTRACT.includes(t));
+	if (extra.length > 0) {
+		fail(
+			`${label}: token(s) outside the contract: ${extra.join(', ')} -` +
+				` add them to CONTRACT.md (and to every theme) or drop them`
+		);
+	}
 
 	// Contrast: resolve the surfaces the app actually renders, then measure.
+	// Counted from here so a completeness failure is never reported as a
+	// contrast failure.
+	const failuresBeforeContrast = failures;
 	const declared = theme.tokens;
-	const has = (t) => t in declared && parseColor(declared[t]);
-	if (!has('--bg')) continue; // completeness already reported
 
-	function resolveStops(spec, fallbackSolid) {
-		// Returns opaque candidate colours for a token value: each gradient
-		// stop, else the colour itself. Translucency is resolved by the
-		// caller, which knows what lies beneath.
-		const colors = colorsIn(spec);
-		if (colors.length > 0) return colors;
-		return [fallbackSolid];
+	// Per theme, not global: another theme's failure must not label this one,
+	// and each check is reported under its own name.
+	const report = () =>
+		console.log(
+			`theme: ${label} purity OK` +
+				`, completeness ${CONTRACT.length - missing.length}/${CONTRACT.length}` +
+				(extra.length > 0 ? ` +${extra.length} outside the contract` : '') +
+				`, contrast ${failures > failuresBeforeContrast ? 'FAILED' : 'OK'}`
+		);
+
+	/**
+	 * Every colour in a token's value, in order - each gradient stop, or the
+	 * single colour. A value this check cannot read is a FAILURE, never a
+	 * silently skipped pair: a skipped pair reports "contrast OK", which is
+	 * how a 1:1 gradient button and an hsl() panel both passed once.
+	 * Memoised so an unreadable token is reported once, not per pair.
+	 */
+	const colorCache = new Map();
+	function colorsOf(token) {
+		if (colorCache.has(token)) return colorCache.get(token);
+		const spec = declared[token];
+		let colors = null;
+		if (spec === undefined) {
+			colors = null; // completeness already reported this one
+		} else {
+			const bad = unreadableFunc(spec);
+			const found = bad ? [] : colorsIn(spec);
+			if (bad) {
+				fail(
+					`${label}: ${token}: "${spec.slice(0, 48)}" uses ${bad}(), which this check cannot` +
+						` read - use hex, rgb()/rgba(), hsl()/hsla() or a gradient of them` +
+						` (a partially read value would be measured as the wrong colour)`
+				);
+			} else if (found.length === 0) {
+				fail(
+					`${label}: ${token}: "${spec.slice(0, 48)}" holds no colour this check can read -` +
+						` use hex, rgb()/rgba() or hsl()/hsla() (an unreadable value cannot be measured)`
+				);
+			} else {
+				colors = found;
+			}
+		}
+		colorCache.set(token, colors);
+		return colors;
 	}
 
 	// Page background: --bg-image layered over the opaque --bg.
-	const bgBase = parseColor(declared['--bg']);
+	const bgColors = colorsOf('--bg');
+	if (!bgColors) {
+		report();
+		continue;
+	}
+	const bgBase = bgColors[0];
+	if (bgBase.a < 1) {
+		fail(`${label}: --bg must be opaque - it is the surface everything else composites over`);
+		report();
+		continue;
+	}
+	const bgImage = declared['--bg-image']?.trim();
 	const pageBg =
-		declared['--bg-image'] && declared['--bg-image'] !== 'none'
-			? resolveStops(declared['--bg-image'], bgBase).map((c) => (c.a < 1 ? over(c, bgBase) : c))
+		bgImage && bgImage !== 'none'
+			? (colorsOf('--bg-image') ?? [bgBase]).map((c) => (c.a < 1 ? over(c, bgBase) : c))
 			: [bgBase];
 
-	// A translucent surface composited over every page-background candidate.
+	// A surface token resolved to opaque candidates: every gradient stop,
+	// each composited over every page-background candidate when translucent.
 	function surfaces(token) {
-		if (!has(token)) return [];
-		return resolveStops(declared[token], null).map((c) =>
-			c.a < 1 ? pageBg.map((p) => over(c, p)) : [c]
-		).flat();
+		const colors = colorsOf(token);
+		if (!colors) return [];
+		return colors.flatMap((c) => (c.a < 1 ? pageBg.map((p) => over(c, p)) : [c]));
 	}
 
 	const panel = surfaces('--panel');
 	const panel2 = surfaces('--panel-2');
+	// Callouts appear in the main panel and in dashboard sections alike, so
+	// a tint is measured over both and judged by the worse of them.
+	const panels = [...panel, ...panel2];
 
 	// Foreground over a set of backgrounds: least favourable combination.
 	function minRatio(fgToken, bgs) {
-		if (!has(fgToken)) return null;
+		const fgs = colorsOf(fgToken);
+		if (!fgs) return null;
 		let worst = Infinity;
-		for (const fgc of resolveStops(declared[fgToken], null)) {
+		for (const fgc of fgs) {
 			for (const bg of bgs) {
 				const fg = fgc.a < 1 ? over(fgc, bg) : fgc;
 				worst = Math.min(worst, contrast(fg, bg));
@@ -265,13 +378,12 @@ for (const name of themeFiles) {
 		return worst;
 	}
 
-	// Refusal/warning callouts: status text on its tint over the section
+	// Refusal/warning/info callouts: text on a status tint over the section
 	// surface (the nested-translucency case).
-	function tintedText(textToken, tintToken, under) {
-		if (!has(tintToken)) return [];
-		return colorsIn(declared[tintToken]).flatMap((t) =>
-			under.map((u) => over(t, u))
-		);
+	function tintOver(tintToken, under) {
+		const tints = colorsOf(tintToken);
+		if (!tints) return [];
+		return tints.flatMap((t) => under.map((u) => (t.a < 1 ? over(t, u) : t)));
 	}
 
 	const pairs = [
@@ -288,17 +400,22 @@ for (const name of themeFiles) {
 		['--not-applicable', 'on --panel', panel, BODY_RATIO],
 		['--assumed', 'on --panel', panel, BODY_RATIO],
 		['--text-on-accent', 'on --accent', surfaces('--accent'), BODY_RATIO],
-		['--text-on-accent', 'on --accent-strong', surfaces('--accent-strong'), BODY_RATIO],
-		['--text-on-accent', 'on --accent-gradient', surfaces('--accent-gradient'), BODY_RATIO],
-		['--text', 'on warn tint callout', tintedText(null, '--warn-tint', panel2), BODY_RATIO],
-		['--danger', 'on danger tint callout', tintedText(null, '--danger-tint', panel2), BODY_RATIO],
+		['--text-on-accent', 'on --accent-gradient (worst stop)', surfaces('--accent-gradient'), BODY_RATIO],
+		['--text', 'on warn tint callout', tintOver('--warn-tint', panels), BODY_RATIO],
+		['--danger', 'on danger tint callout', tintOver('--danger-tint', panels), BODY_RATIO],
+		['--text', 'on info tint callout', tintOver('--info-tint', panels), BODY_RATIO],
 		['--border', 'on --panel', panel, EDGE_RATIO],
 		['--border', 'on --panel-2', panel2, EDGE_RATIO],
-		['--border', 'on page background', pageBg, EDGE_RATIO]
+		['--border', 'on page background', pageBg, EDGE_RATIO],
+		// --accent-strong is the focus ring (CONTRACT.md): a non-text edge,
+		// so it takes the 3:1 UI-component threshold against what it sits on.
+		['--accent-strong', 'as a focus ring on --panel', panel, EDGE_RATIO],
+		['--accent-strong', 'as a focus ring on --panel-2', panel2, EDGE_RATIO],
+		['--accent-strong', 'as a focus ring on page background', pageBg, EDGE_RATIO]
 	];
 
 	for (const [fgToken, where, bgs, min] of pairs) {
-		if (!bgs || bgs.length === 0) continue;
+		if (!bgs || bgs.length === 0) continue; // its token already failed above
 		const ratio = minRatio(fgToken, bgs);
 		if (ratio === null) continue; // completeness already reported
 		if (ratio < min) {
@@ -309,10 +426,7 @@ for (const name of themeFiles) {
 		}
 	}
 
-	console.log(
-		`theme: ${label} purity OK, completeness ${CONTRACT.length - missing.length}/${CONTRACT.length}` +
-			`, contrast ${failed ? 'FAILED' : 'OK'}`
-	);
+	report();
 }
 
 // The documented contract cannot drift from the enforced one.
@@ -322,7 +436,7 @@ if (undocumented.length > 0) {
 	fail(`themes/CONTRACT.md does not document: ${undocumented.join(', ')}`);
 }
 
-if (failed) {
+if (failures > 0) {
 	console.error('\ntheme check FAILED');
 	process.exit(1);
 }

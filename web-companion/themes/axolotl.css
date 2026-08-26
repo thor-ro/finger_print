@@ -22,7 +22,7 @@
 
 	/* Accent */
 	--accent: #0ea5e9;
-	--accent-strong: #0ea5e9;
+	--accent-strong: #0284c7;
 	--accent-gradient: linear-gradient(90deg, #f9a8d4 0%, #93c5fd 100%);
 
 	/* Status (darkened from the palette's tailwind-500 hues for contrast) */
@@ -30,7 +30,6 @@
 	--warn: #b45309;
 	--danger: #b91c1c;
 	--info: #0369a1;
-	--ok-tint: rgba(21, 128, 61, 0.12);
 	--warn-tint: rgba(180, 83, 9, 0.12);
 	--danger-tint: rgba(185, 28, 28, 0.1);
 	--info-tint: rgba(3, 105, 161, 0.1);

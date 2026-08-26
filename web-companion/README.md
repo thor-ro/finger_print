@@ -72,12 +72,15 @@ radius outside a theme file (`scripts/lint.mjs` enforces this).
 Two themes ship: `dark` (the original palette) and `axolotl` (the provided
 iridescent/glass palette). A theme file declares tokens and nothing else —
 no selectors beyond its own `:root[data-theme='…']` scope, no layout — and
-must declare every contract token with WCAG-clean contrast
-(`scripts/check-themes.mjs`, part of `npm run gate`).
+must declare every contract token — and nothing beyond it — with WCAG-clean
+contrast (`scripts/check-themes.mjs`, part of `npm run gate`). Contrast is
+measured over composited translucency and at every gradient stop; a value
+the checker cannot read fails rather than going unmeasured.
 
 The picker sits in the page header so it works before authentication. The
 choice lives in `localStorage['sdf-theme']` only — it never touches any BLE
-characteristic. With no stored choice, the system colour-scheme preference
+characteristic, which `src/lib/state/theme.test.ts` asserts against a fake
+transport rather than leaving to review. With no stored choice, the system colour-scheme preference
 decides: dark → `dark`, light → `axolotl`. An inline script in
 `src/app.html` applies the theme before first paint (no flash of the wrong
 theme); its hash is pinned into the CSP by `scripts/csp.mjs` like every
@@ -87,8 +90,9 @@ To add a theme: create `themes/<id>.css` declaring every token from
 `CONTRACT.md` inside `:root[data-theme='<id>'] { … }`, add it to
 `THEMES` in `src/lib/state/theme.svelte.ts` plus the pre-paint script's
 allowed values, add a button in `ThemePicker.svelte`, and record any
-palette compromises in `themes/THEMES.md`. The gates will fail until the
-theme passes purity, completeness and contrast.
+palette compromises in `themes/THEMES.md`. Those four places are kept in
+step by `theme.test.ts`, and the gates will fail until the theme passes
+purity, completeness and contrast — so a half-added theme cannot ship.
 
 ## Deployment to GitHub Pages
 

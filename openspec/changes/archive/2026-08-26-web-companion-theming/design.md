@@ -110,6 +110,91 @@ Axolotl asks for `'Poppins', 'Nunito'`. Fetching either from a font CDN would re
 
 `--font-body` therefore holds a stack, and a theme may only name families that are either self-hosted in `static/` or present on the system. Self-hosting a weight-subset of one family is allowed but counts against the bundle budget — a decision to take with the measured number in hand, not up front. Until then axolotl falls back to the system stack, which changes its feel and should be said out loud rather than discovered.
 
+## Decision: an unmeasured pair is a failure, not a pass
+
+The contrast gate's first implementation skipped any pair it could not parse and printed `contrast OK` for the theme. Two real values fell through that hole and shipped: `--text-on-accent` on axolotl's `--accent-gradient` (a gradient, so it was skipped — measured, it is **1.00:1**, white text on a near-white stop of the primary button) and an `hsl()` panel behind near-white text (`hsl()` was unparseable, so it too was skipped).
+
+```
+  value the gate cannot read
+            │
+    ┌───────┴────────┐
+    │                │
+  skip  ───────▶  "contrast OK"        ← what shipped: silence reads as success
+    │
+  fail  ───────▶  "cannot read --panel: hsl(…)"   ← chosen
+```
+
+A gate whose failure mode is silence is worse than no gate, because it is *believed*. So: every colour token is resolved eagerly, an unreadable value is a failure naming the token and its value, gradients are measured at **every** stop rather than at a guessed worst one, and each theme reports its own result — the previous global failure flag labelled every theme printed after the first failure as failing, untouched ones included.
+
+The corollary is a syntax restriction, recorded in `themes/CONTRACT.md`: colour tokens are hex, `rgb()`/`rgba()` or `hsl()`/`hsla()`. `color-mix()` and `oklch()` are not banned because they are bad, but because measuring them means implementing their colour spaces; until someone needs one, failing is honest and cheap.
+
+## Decision: the contract is exact in both directions
+
+Completeness ran one way — every contract token must be declared. Nothing stopped the contract from carrying tokens no component consumed, and it did: `--accent-strong`, `--info` and `--ok-tint` were declared by both themes, gated for contrast, documented, and read by nothing. Unused tokens are the mechanism by which a token contract becomes decoration: they cost every theme a line and every author a decision, and no gate can tell a wrong value from a right one when nothing renders it.
+
+Two of the three were mandated by this change's own spec ("the accent and its emphasis", "the status colours for success, warning, danger and information"), so they get consumers rather than deletion:
+
+| Token | Now consumed by | Gated at |
+|---|---|---|
+| `--accent-strong` | the `:focus-visible` ring in `app.css` | 3:1 as a non-text UI edge, against panel, dashboard section and page background |
+| `--info` | the informational callout's border (`.register-note`), matching how `.alert.warning` and `.refusal` already read | 3:1 as a UI edge |
+| `--ok-tint` | nothing — no success callout exists | removed from the contract |
+
+Giving `--accent-strong` a consumer immediately earned its keep: axolotl's value (`#0ea5e9`, identical to `--accent`) measures **2.04:1** against the pastel background, below the 3:1 an outline needs. It is now `#0284c7`. That failure existed before this change; it was simply unmeasurable while the token was decorative.
+
+And the check now runs the other way too: a theme declaring a token outside the contract fails. Otherwise this exact drift regrows.
+
+## Decision: the budget rises once, deliberately
+
+`scripts/budget.mjs` says a measurement may never raise a limit — re-measuring may only re-declare `min(measured + headroom, previous limit)` — precisely so that "the number went up, so the budget goes up" cannot happen quietly. This change breaks the previous limit and therefore owes an argument rather than a re-measurement:
+
+```
+                    before        measured now      declared now
+  initial load      46,080         48,225            49,255   ← raise
+  total load        55,296         55,483            56,641   ← raise
+```
+
+What the 2,365 B (initial, gzip) bought:
+
+| Cost | Bytes (approx, gzip) | What it is |
+|---|---|---|
+| Both token sets in the entry CSS | +0.7 KB | the second theme's values; unavoidable once two themes ship |
+| Pre-paint script + its pinned CSP hash in `index.html` | +0.4 KB | the alternative is a visible flash of the wrong theme on every load |
+| Header theme picker | +1.0 KB | the spec requires the theme to be selectable, and before authentication |
+
+What was weighed against it:
+
+- **Ship one theme.** Cheapest, and refuses the change outright — the palette was supplied to be used.
+- **Media-query-only theming, no picker.** Saves the picker and the pre-paint script (~1.4 KB) but cannot honour a choice that differs from the system preference, which the spec requires.
+- **A `<select>` or an `{#each}` picker.** Nicer source, ~2.5 KB *worse*: it drags Svelte's selection and each-block runtime into the initial bundle. The picker is deliberately plain buttons for this reason.
+- **Self-hosted Poppins/Nunito.** ~1.5 KB more for typeface identity; declined (see the fonts decision above) — that is the kind of spend the budget exists to refuse, and refusing it is what makes this raise credible.
+
+Headroom stays at the usual 1 KB, so the raise is bounded by the measurement rather than rounded up to a comfortable number. The next change to touch this budget faces the same rule from the new floor: measurement alone still cannot move it.
+
+## Decision: the Enroll-Admin dashboard section goes away
+
+The dashboard's "Enroll Admin" section was removed inside this change (`AdminActionsSection.svelte`), which is not theming. It is recorded here because it shipped: the reasoning lived only in a code comment where the section used to be, and no task or spec delta covered it.
+
+What it did and what replaces it:
+
+```
+  removed:  "Request Enroll Admin" button
+            → Config characteristic {"action":"enroll_admin"}
+            → sdf_services_request_admin_action(ENROLL_ADMIN)
+            → admin scans on the device; the DEVICE picks the user id
+
+  remains:  Enroll Fingerprint panel, Permission = Admin
+            → UM characteristic, ENROLL verb (sdf_app.c:1236-1260)
+            → sdf_services_request_remote_enrollment(user_id, permission)
+            → terminal reply withheld until the authorizing admin scan
+              (s_um_pending_gate); the connection must already hold admin
+              authority (sdf_ble_companion.c:797)
+```
+
+Verified rather than assumed: the surviving path accepts permission 3 (admin) and is gated by the same authorizing-scan requirement, so removing the button removes no capability and weakens no authorization. The security property the old section's prose stated — "an existing Admin must scan their fingerprint; a BLE request alone is never enough" — is enforced by the firmware, not by the removed UI.
+
+One difference is real and was unrecorded: `enroll_admin` let the device choose the user id, while the Enroll panel makes the operator pick a slot (1-10). Picking an occupied slot is refused specifically (`SDF_SERVICES_UM_ID_OCCUPIED`) and that refusal is already rendered as its own message, so the difference costs a retry, not a failure — but it is a change in who chooses, and it belonged in a task.
+
 ## Risks
 
 | Risk | Mitigation |
@@ -118,4 +203,4 @@ Axolotl asks for `'Poppins', 'Nunito'`. Fetching either from a font CDN would re
 | Translucent surfaces measured against the wrong background | composite over the worst gradient stop, not the token |
 | Theme files drift into stylesheets | purity check rejects any selector or layout property in a theme file |
 | Bundle budget consumed by themes | budget gate unchanged; themes measured as part of the initial load |
-| Appearance change confuses hardware parity results | run `web-companion-tooling` 6.1-6.9 before this lands |
+| Appearance change confuses hardware parity results | run `web-companion-tooling` 6.1-6.9 before this lands — **not honoured**: this change landed with those tasks still open (and `web-companion-tooling` 1.6 with them), so the first hardware parity run will exercise a re-themed app and will have to separate appearance regressions from behavioural ones itself. Neither change can be archived until they run. |

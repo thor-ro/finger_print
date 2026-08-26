@@ -57,8 +57,12 @@ rendered as a danger-tinted ghost (see `--danger-tint`).
 | Token | Meaning |
 |---|---|
 | `--accent` | Accent colour for fills that carry no text (progress bar), links if any appear |
-| `--accent-strong` | Emphasis variant of the accent (hover, focus) |
+| `--accent-strong` | Emphasis variant of the accent: the keyboard focus ring (`:focus-visible` in `app.css`) and hover edges |
 | `--accent-gradient` | Fill of primary actions; may be a gradient or a flat value |
+
+`--accent-strong` never carries text, so the gate holds it to the 3:1
+UI-component threshold against every surface a focused control can sit on —
+panel, dashboard section and page background — rather than to 4.5:1.
 
 ### Status
 
@@ -68,14 +72,19 @@ rendered as a danger-tinted ghost (see `--danger-tint`).
 | `--warn` | Warning state text/accents |
 | `--danger` | Danger/failure/refusal text, destructive button fill |
 | `--info` | Informational state text/accents |
-| `--ok-tint` | Translucent surface tint behind success alerts |
-| `--warn-tint` | Translucent surface tint behind warning alerts |
-| `--danger-tint` | Translucent surface tint behind refusal/error callouts |
-| `--info-tint` | Translucent surface tint behind informational callouts |
+| `--warn-tint` | Translucent surface tint behind warning alerts (`.alert.warning`) |
+| `--danger-tint` | Translucent surface tint behind refusal/error callouts (`.refusal`, `.danger-btn`) |
+| `--info-tint` | Translucent surface tint behind informational callouts (`.register-note`) |
 
 Status colours are used as *text* at body size in status lines and refusals,
 so each must clear 4.5:1 against `--panel` — they are decorative accents
-nowhere.
+nowhere. Each tint is measured with the text that lands on it, composited
+over both panel surfaces.
+
+There is deliberately no `--ok-tint`: no component renders a success
+callout, and the contract is exact (see below), so carrying an unconsumed
+token in every theme buys nothing. Add it back in the change that adds the
+callout.
 
 ### Device vocabulary
 
@@ -129,8 +138,21 @@ Components that need a solid colour derived from a gradient accent consume
 consistent with its `--accent` family, and filled controls consume the
 gradient token via `background` only.
 
+## Writing colour values
+
+Colour-valued tokens must be written as hex, `rgb()`/`rgba()` or
+`hsl()`/`hsla()`. That is not stylistic: `scripts/check-themes.mjs` measures
+contrast from these values, and a syntax it cannot read (`color-mix()`,
+`oklch()`, a named colour) **fails the build** rather than being skipped — a
+skipped pair used to report "contrast OK", which is exactly the outcome the
+gate exists to prevent.
+
 ## Adding or changing a token
 
-Adding a token here obliges every shipped theme to declare it: the
-completeness check fails until they do. Removing or renaming one is a diff
-to this file plus both theme files and the consuming components.
+The contract is exact in both directions: every shipped theme must declare
+every token listed here, and a theme declaring anything *else* fails too —
+an unconsumed token is weight every theme has to carry.
+
+Adding a token here therefore obliges every shipped theme to declare it and
+some component to consume it. Removing or renaming one is a diff to this
+file plus both theme files and the consuming components.

@@ -13,8 +13,14 @@
  *                   deferred import is still measured, not hidden.
  *
  * Limits are declared in budget.json. Prints measured-vs-budget either way
- * and fails on overrun. The budget NEVER rises: a new measurement can only
- * re-declare min(measured + headroom, previous limit) - see design.md.
+ * and fails on overrun.
+ *
+ * A MEASUREMENT never raises a limit: re-measuring may only re-declare
+ * min(measured + headroom, previous limit). A limit rises only as a
+ * deliberate change that says what the bytes bought and what was weighed
+ * against them, recorded in that change's design.md - see
+ * openspec/changes/web-companion-theming/design.md, "Decision: the budget
+ * rises once, deliberately", for the shape such a justification takes.
  */
 import { gzipSync } from 'node:zlib';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';

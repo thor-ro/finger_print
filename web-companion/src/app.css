@@ -116,6 +116,13 @@ button:disabled {
 	opacity: 0.55;
 	cursor: not-allowed;
 }
+/* Keyboard focus is a visible ring in every theme. --accent-strong is the
+ * contract's emphasis value (CONTRACT.md) and the theme gate holds it to
+ * 3:1 against every surface it can land on. */
+:focus-visible {
+	outline: 2px solid var(--accent-strong);
+	outline-offset: 2px;
+}
 .primary-btn {
 	/* Gradient-valued token consumed by a property that accepts an image
 	 * (see CONTRACT.md); text takes the dedicated on-accent colour. */
