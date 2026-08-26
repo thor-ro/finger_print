@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SDF Companion — Theme Walkthrough (task 7.1)</title>
+<style>
+  /* ---- playground chrome (not the app) ---- */
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: #0b0f14; color: #dbe4ee;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  .topbar {
+    padding: 0.6rem 1rem; border-bottom: 1px solid #1e2836;
+    display: flex; gap: 1rem; align-items: center; flex-wrap: wrap;
+    background: #101720;
+  }
+  .topbar strong { font-size: 0.95rem; }
+  .wrap { display: flex; flex: 1; min-height: 0; }
+  aside {
+    width: 300px; min-width: 260px; overflow-y: auto;
+    border-right: 1px solid #1e2836; padding: 1rem; background: #0e141c;
+    font-size: 0.88rem;
+  }
+  aside h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: #7d8fa6; margin: 1.1rem 0 0.45rem; }
+  aside h2:first-child { margin-top: 0; }
+  aside label { display: block; margin: 0.25rem 0; cursor: pointer; }
+  aside .row { display: flex; align-items: center; gap: 0.45rem; margin: 0.3rem 0; }
+  aside select, aside button.mode {
+    background: #16202d; color: #dbe4ee; border: 1px solid #2a3949;
+    border-radius: 6px; padding: 0.3rem 0.5rem; width: 100%;
+  }
+  aside .toggles button {
+    background: #16202d; color: #dbe4ee; border: 1px solid #2a3949;
+    border-radius: 999px; padding: 0.25rem 0.8rem; cursor: pointer; font-size: 0.82rem;
+  }
+  aside .toggles button.on { background: #2563eb; border-color: #2563eb; color: #fff; }
+  .checklist { max-height: 40vh; overflow-y: auto; }
+  .checklist label { display: flex; gap: 0.45rem; align-items: baseline; }
+  .checklist input { accent-color: #2563eb; }
+  main.stage { flex: 1; overflow: auto; padding: 1.5rem; display: flex; gap: 1.5rem; justify-content: center; align-items: flex-start; }
+  .framecol { display: flex; flex-direction: column; align-items: center; gap: 0.4rem; }
+  .frametag { font-size: 0.75rem; color: #7d8fa6; letter-spacing: 0.06em; }
+  .outbar {
+    border-top: 1px solid #1e2836; background: #101720; padding: 0.75rem 1rem;
+    display: flex; gap: 1rem; align-items: stretch;
+  }
+  #prompt {
+    flex: 1; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem; white-space: pre-wrap; color: #b7c4d4;
+    max-height: 5.5rem; overflow-y: auto;
+  }
+  #copy {
+    background: #2563eb; color: #fff; border: none; border-radius: 6px;
+    padding: 0.4rem 1rem; cursor: pointer; align-self: center;
+  }
+  #issues {
+    width: 100%; background: #16202d; color: #dbe4ee; border: 1px solid #2a3949;
+    border-radius: 6px; padding: 0.35rem 0.5rem; font: inherit; font-size: 0.85rem;
+  }
+
+  /* =====================================================================
+     THE COMPANION, FAITHFULLY REPLICATED
+     Tokens are copied VERBATIM from web-companion/themes/{dark,axolotl}.css
+     (only :root → .frame so they can live inside a preview pane).
+     Element rules are copied from src/app.css and component <style> blocks,
+     scoped under .frame. If those files change, refresh this replica.
+     ===================================================================== */
+
+  .frame {
+    /* body rules (app.css) */
+    width: 46rem; max-width: 100%;
+    background-color: var(--bg);
+    background-image: var(--bg-image);
+    background-attachment: fixed;
+    color: var(--text);
+    font-family: var(--font-body);
+    line-height: 1.5;
+    color-scheme: var(--color-scheme);
+    padding: 1.5rem 1rem 3rem;
+    min-height: 30rem;
+  }
+  .frame *, .frame *::before, .frame *::after { box-sizing: border-box; }
+
+  /* tokens: dark.css (verbatim values) */
+  .frame[data-theme='dark'] {
+    --bg: #0f172a;
+    --bg-image: none;
+    --panel: #1e293b;
+    --panel-2: #273449;
+    --surface-blur: none;
+    --border: #7a8ba3;
+    --shadow: none;
+    --text: #e2e8f0;
+    --muted: #94a3b8;
+    --text-on-accent: #04121f;
+    --accent: #38bdf8;
+    --accent-strong: #0ea5e9;
+    --accent-gradient: linear-gradient(90deg, #38bdf8 0%, #0ea5e9 100%);
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --danger: #f98080;
+    --info: #38bdf8;
+    --ok-tint: rgba(34, 197, 94, 0.12);
+    --warn-tint: rgba(245, 158, 11, 0.12);
+    --danger-tint: rgba(249, 128, 128, 0.05);
+    --info-tint: rgba(56, 189, 248, 0.1);
+    --unknown: #94a3b8;
+    --not-applicable: #8494ab;
+    --assumed: #f59e0b;
+    --radius: 6px;
+    --radius-lg: 10px;
+    --radius-pill: 999px;
+    --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    --color-scheme: dark;
+  }
+  /* tokens: axolotl.css (verbatim values) */
+  .frame[data-theme='axolotl'] {
+    --bg: #eef4fb;
+    --bg-image: linear-gradient(135deg, #e0f2fe 0%, #fce7f3 50%, #e9d5ff 100%);
+    --panel: rgba(255, 255, 255, 0.72);
+    --panel-2: rgba(255, 255, 255, 0.55);
+    --surface-blur: blur(12px);
+    --border: rgba(30, 41, 59, 0.6);
+    --shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
+    --text: #1e293b;
+    --muted: #475569;
+    --text-on-accent: #16202f;
+    --accent: #0ea5e9;
+    --accent-strong: #0ea5e9;
+    --accent-gradient: linear-gradient(90deg, #f9a8d4 0%, #93c5fd 100%);
+    --ok: #15803d;
+    --warn: #b45309;
+    --danger: #b91c1c;
+    --info: #0369a1;
+    --ok-tint: rgba(21, 128, 61, 0.12);
+    --warn-tint: rgba(180, 83, 9, 0.12);
+    --danger-tint: rgba(185, 28, 28, 0.1);
+    --info-tint: rgba(3, 105, 161, 0.1);
+    --unknown: #526180;
+    --not-applicable: #414d63;
+    --assumed: #92400e;
+    --radius: 12px;
+    --radius-lg: 24px;
+    --radius-pill: 999px;
+    --font-body: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+    --color-scheme: light;
+  }
+
+  .frame h1, .frame h2, .frame h3 { line-height: 1.2; }
+  .frame header { text-align: center; margin-bottom: 1.5rem; }
+  .frame header h1 { margin: 0; font-size: 1.8rem; }
+  .frame header p { margin: 0; color: var(--muted); }
+  .frame main {
+    background: var(--panel);
+    backdrop-filter: var(--surface-blur);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 1.25rem 1.5rem;
+    box-shadow: var(--shadow);
+  }
+  .frame h2 { margin-top: 0; }
+  .frame .dashboard-section {
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.9rem;
+    box-shadow: var(--shadow);
+  }
+  .frame .dashboard-section h3 { margin-top: 0; }
+  .frame .input-group { display: flex; flex-direction: column; gap: 0.2rem; margin-bottom: 0.7rem; }
+  .frame label { font-size: 0.85rem; color: var(--muted); }
+  .frame input, .frame select {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 0.45rem 0.6rem; font: inherit;
+  }
+  .frame input[type='checkbox'] { width: 1.1rem; height: 1.1rem; }
+  .frame button {
+    font: inherit; cursor: pointer; border-radius: var(--radius);
+    padding: 0.5rem 1rem; border: 1px solid transparent;
+  }
+  .frame button:disabled { opacity: 0.55; cursor: not-allowed; }
+  .frame .primary-btn {
+    background: var(--accent-gradient); color: var(--text-on-accent); font-weight: 600;
+  }
+  .frame .secondary-btn { background: transparent; border-color: var(--border); color: var(--text); }
+  .frame .danger-btn {
+    background: var(--danger-tint); border: 1px solid var(--danger);
+    color: var(--danger); font-weight: 600;
+  }
+  .frame .config-table { border-collapse: collapse; width: 100%; }
+  .frame .config-table td { padding: 0.3rem 0.5rem; border-bottom: 1px solid var(--border); }
+  .frame .status-msg { color: var(--muted); min-height: 1em; }
+  .frame .alert {
+    padding: 0.75rem 1rem; border-radius: var(--radius);
+    margin-bottom: 0.75rem; font-size: 0.925rem;
+  }
+  .frame .alert.warning { background: var(--warn-tint); border: 1px solid var(--warn); }
+  .frame .vocab-unknown { color: var(--unknown); }
+  .frame .vocab-not-applicable { color: var(--not-applicable); }
+  .frame .vocab-assumed { color: var(--assumed); }
+  .frame .refusal {
+    background: var(--danger-tint); border: 1px solid var(--danger);
+    border-radius: var(--radius); padding: 0.45rem 0.7rem; color: var(--danger);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .frame *, .frame *::before, .frame *::after {
+      transition-duration: 0.01ms !important; animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important; transform: none !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* component styles, per <style> block */
+  .frame .theme-picker { display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.5rem; }
+  .frame .theme-picker-label { font-size: 0.85rem; color: var(--muted); }
+  .frame .theme-btn {
+    padding: 0.15rem 0.7rem; font-size: 0.8rem; border-radius: var(--radius-pill);
+    background: transparent; border-color: var(--border); color: var(--muted);
+  }
+  .frame .theme-btn.active {
+    background: var(--accent-gradient); border-color: var(--accent);
+    color: var(--text-on-accent); font-weight: 600;
+  }
+  .frame form.auth-form { max-width: 24rem; }
+  .frame .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  .frame .tab-btn {
+    flex: 0 0 auto; padding: 0.4rem 1.25rem; border-radius: var(--radius-pill);
+    border: 1px solid var(--border); background: transparent; color: var(--muted); cursor: pointer;
+  }
+  .frame .tab-btn.active {
+    background: var(--accent-gradient); border-color: var(--accent);
+    color: var(--text-on-accent); font-weight: 600;
+  }
+  .frame .register-note {
+    background: var(--info-tint); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 0.6rem 0.8rem;
+  }
+  .frame .status-cards { display: flex; gap: 1rem; margin-bottom: 1rem; }
+  .frame .status-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 0.75rem 1.25rem;
+    display: flex; flex-direction: column; min-width: 9rem;
+  }
+  .frame .status-label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+  .frame .status-value { font-size: 1.25rem; font-weight: 600; }
+  .frame .hint { font-size: 0.85rem; color: var(--muted); }
+  .frame .row-label { font-size: 0.85rem; color: var(--muted); }
+  .frame .config-display { margin-top: 0.75rem; max-width: 28rem; }
+  .frame .config-display .apply { margin-top: 1rem; }
+  .frame .enrollment-panel { max-width: 24rem; }
+  .frame .enrollment-panel .result { margin-top: 0.5rem; }
+  .frame .users { margin-top: 0.75rem; overflow-x: auto; }
+  .frame .users table { border-collapse: collapse; width: 100%; }
+  .frame .users th, .frame .users td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--border); }
+  .frame .users .actions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .frame .enroll-progress { margin: 0.75rem 0; }
+  .frame .step-indicator { display: flex; align-items: center; gap: 0.75rem; }
+  .frame .progress-bar { flex: 1; height: 8px; background: var(--panel-2); border-radius: var(--radius); overflow: hidden; }
+  .frame .progress-fill { height: 100%; background: var(--accent); transition: width 0.2s ease; }
+  .frame section > form { max-width: 24rem; }
+  .frame form.wizform { max-width: 24rem; }
+  .frame form.otaform { max-width: 24rem; }
+  .frame progress { width: 100%; margin-top: 0.5rem; }
+  .frame button.connect { margin-bottom: 0.5rem; }
+  .frame .dash-actions button:last-child { margin-top: 1rem; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <strong>Smart Door Companion — task 7.1 theme walkthrough</strong>
+    <span style="color:#7d8fa6;font-size:0.8rem">faithful replica · tokens verbatim from themes/*.css</span>
+  </div>
+
+  <div class="wrap">
+    <aside>
+      <h2>View</h2>
+      <select id="view">
+        <option value="connection">Connection</option>
+        <option value="wizard1">Wizard · Step 1 Enrol Admin</option>
+        <option value="wizard2">Wizard · Step 2 Register</option>
+        <option value="wizard3">Wizard · Step 3 Nuki Pairing</option>
+        <option value="wizard4">Wizard · Step 4 Finish</option>
+        <option value="auth">Authentication</option>
+        <option value="dashboard">Dashboard (all sections)</option>
+      </select>
+
+      <h2>Themes</h2>
+      <div class="row">
+        <select id="mode">
+          <option value="single">Single pane</option>
+          <option value="split">Split — dark | axolotl</option>
+        </select>
+      </div>
+      <div class="row" id="singleThemeRow">
+        <select id="singleTheme">
+          <option value="dark">Dark</option>
+          <option value="axolotl">Axolotl</option>
+        </select>
+      </div>
+
+      <h2>Legibility stress</h2>
+      <div class="toggles row">
+        <button id="tglGrey" type="button">Greyscale</button>
+        <button id="tglBlur" type="button">Blur off</button>
+      </div>
+      <p style="color:#7d8fa6;font-size:0.78rem;margin:0.4rem 0 0">
+        Greyscale = task 6.3's “colour rendered identically” pass.
+        Blur off = task 6.2's no-backdrop-filter check.
+      </p>
+
+      <h2>Walkthrough checklist <span id="progress" style="color:#9db2ca"></span></h2>
+      <div class="checklist" id="checklist"></div>
+      <div class="row" style="margin-top:0.5rem">
+        <button class="mode" id="resetChecks" type="button">Reset checklist</button>
+      </div>
+    </aside>
+
+    <main class="stage" id="stage"></main>
+  </div>
+
+  <div class="outbar">
+    <textarea id="issues" rows="3" placeholder="Issues found (unreadable / invisible / wrong contrast)…"></textarea>
+    <div id="prompt"></div>
+    <button id="copy" type="button">Copy</button>
+  </div>
+
+<script>
+/* ---------------- state ---------------- */
+const VIEWS = [
+  ['connection',   'Connection'],
+  ['wizard1',      'Wizard 1'],
+  ['wizard2',      'Wizard 2'],
+  ['wizard3',      'Wizard 3'],
+  ['wizard4',      'Wizard 4'],
+  ['auth',         'Auth'],
+  ['dashboard',    'Dashboard'],
+];
+const THEMES = ['dark', 'axolotl'];
+const state = {
+  view: 'dashboard',
+  mode: 'split',
+  singleTheme: 'axolotl',
+  grey: false,
+  blurOff: false,
+};
+
+/* ---------------- checklist persistence ---------------- */
+const CK_KEY = 'sdf-71-checks';
+let checks = {};
+try { checks = JSON.parse(localStorage.getItem(CK_KEY) || '{}'); } catch {}
+function saveChecks() { try { localStorage.setItem(CK_KEY, JSON.stringify(checks)); } catch {} }
+
+/* ---------------- realistic session content ---------------- */
+const HEALTH_ROWS = [
+  ['Lock state', 'locked (awaiting confirmation)', 'assumed'],
+  ['Battery', '47%', undefined],
+  ['Alarms', 'mask 0', undefined],
+  ['Fingerprint sensor', 'Unknown', 'unknown'],
+  ['Nuki link', 'N/A', 'not_applicable'],
+  ['Zigbee network', 'joined', undefined],
+  ['Firmware', '2.1.0-14-g3f9c2ab', undefined],
+  ['OTA state', 'confirmed', undefined],
+  ['Setup state', 'complete', undefined],
+];
+const CONFIG_ROWS = [
+  ['battery_report_interval_s', '60', true],
+  ['idle_before_sleep_s', '5', true],
+  ['nuki_target_addr_type', '1', false],
+  ['nuki_target_addr', '4780265', false],
+];
+const USERS = [
+  [1, 'ThorsAdmin', 3],
+  [2, 'Bartholomew-XV', 1],           // 15 chars — near the device's 16-char cap
+  [3, '', 1],
+];
+
+function tdCell(value, kind) {
+  return `<td${kind ? ` class="vocab-${kind}"` : ''}>${value}</td>`;
+}
+
+function healthTable() {
+  const rows = HEALTH_ROWS.map(([l, v, k]) =>
+    `<tr><td><span class="row-label">${l}</span></td>${tdCell(v, k)}</tr>`).join('');
+  return `<table class="config-table"><tbody>${rows}</tbody></table>`;
+}
+function configTable() {
+  const rows = CONFIG_ROWS.map(([k, v, editable]) => `<tr>
+    <td><label>${k}</label></td>
+    <td><input type="number" value="${v}" ${editable ? '' : 'disabled'} /></tr>`).join('');
+  return `<table class="config-table"><tbody>${rows}</tbody></table>`;
+}
+function scanProgress(stepText, percent, msg) {
+  return `<div class="enroll-progress"><div class="step-indicator">
+    <span>${stepText}</span>
+    <div class="progress-bar"><div class="progress-fill" style="width:${percent}%"></div></div>
+  </div><p class="status-msg">${msg}</p></div>`;
+}
+function userRows() {
+  return USERS.map(([id, name, perm]) => `<tr>
+    <td>${id}</td>
+    <td>${name ? name : '<em>—</em>'}</td>
+    <td>${perm === 3 ? 'Admin' : 'Standard'}</td>
+    <td class="actions">
+      <button class="secondary-btn">Rename</button>
+      <button class="secondary-btn">Permission</button>
+      <button class="danger-btn">Delete</button>
+    </td></tr>`).join('');
+}
+
+function viewHtml(id) {
+  switch (id) {
+    case 'connection': return `
+      <h2>Connect to Bridge</h2>
+      <p>Ensure your device has Bluetooth enabled.</p>
+      <button class="primary-btn connect">Connect via WebBLE</button>
+      <p class="status-msg">Error: User cancelled the requestDevice() chooser.</p>`;
+    case 'wizard1': return `
+      <h2>First-Time Setup</h2>
+      <div class="alert warning"><strong>Time limit:</strong> Setup must be completed within the
+        device's setup window (about 15 minutes from when the device was armed or the button was
+        pressed). If the window lapses, all progress is erased — including enrolled fingerprints,
+        accounts, and pairing data — and the device must be re-armed with its button.</div>
+      <p class="status-msg">Place the admin finger on the sensor for each of the 3 scans...</p>
+      <section class="dashboard-section">
+        <h3>Step 1 of 4 · Enrol the Admin Fingerprint</h3>
+        <p>The first Admin fingerprint unlocks every later step. Place the admin's finger on the
+          sensor when prompted by the device.</p>
+        <button class="primary-btn">Enrol Admin Finger</button>
+        ${scanProgress('Step 2 of 3', 66, 'Place finger for step 2...')}
+        <p class="status-msg">Starting Admin enrolment...</p>
+      </section>`;
+    case 'wizard2': return `
+      <h2>First-Time Setup</h2>
+      <div class="alert warning"><strong>Time limit:</strong> Setup must be completed within the
+        device's setup window (about 15 minutes).</div>
+      <p class="status-msg">Account registered - pair your Nuki lock.</p>
+      <section class="dashboard-section">
+        <h3>Step 2 of 4 · Register Your Account</h3>
+        <p>The name below is <strong>your name on the device</strong> — it is not a separate account
+          username, and it must be unique. Confirming registration requires a scan of the Admin
+          finger just enrolled, and the account will belong to that admin.</p>
+        <form class="wizform">
+          <div class="input-group"><label>Your Name (on the device)</label>
+            <input type="text" placeholder="e.g. Alice" /></div>
+          <div class="input-group"><label>Password</label>
+            <input type="password" placeholder="••••••••" /></div>
+          <button class="primary-btn">Register Account</button>
+        </form>
+        <p class="status-msg">Please scan the Admin Finger on the device to confirm.</p>
+      </section>`;
+    case 'wizard3': return `
+      <h2>First-Time Setup</h2>
+      <div class="alert warning"><strong>Time limit:</strong> Setup must be completed within the
+        device's setup window (about 15 minutes).</div>
+      <p class="status-msg">Nuki paired - finish below.</p>
+      <section class="dashboard-section">
+        <h3>Step 3 of 4 · Pair Your Nuki Lock</h3>
+        <p>Put your Nuki Smart Lock into pairing mode first: press and hold the lock's button
+          (on the inside of the door) for about 5 seconds until its LED lights up.</p>
+        <button class="primary-btn">Start Nuki Pairing</button>
+        <p class="status-msg">Nuki pairing did not succeed. Make sure the lock is in pairing mode and try again.</p>
+      </section>`;
+    case 'wizard4': return `
+      <h2>First-Time Setup</h2>
+      <div class="alert warning"><strong>Time limit:</strong> Setup must be completed within the
+        device's setup window (about 15 minutes).</div>
+      <p class="status-msg"></p>
+      <section class="dashboard-section">
+        <h3>Step 4 of 4 · Finish Setup</h3>
+        <p>Finishing locks this device to this browser: it will switch to filtered advertising and
+          only reconnect to the companion that completed setup.</p>
+        <button class="primary-btn">Finish Setup</button>
+        <p class="status-msg">The device could not finish setup because of an internal error.
+          No progress was lost - press Finish to try again.</p>
+      </section>`;
+    case 'auth': return `
+      <h2>Authentication</h2>
+      <div class="tabs">
+        <button class="tab-btn active">Login</button>
+        <button class="tab-btn">Register</button>
+      </div>
+      <form class="auth-form">
+        <p class="status-msg register-note">Registering again does not create a second account: the
+          account belongs to the admin whose fingerprint confirms it, and their existing password
+          will be <strong>replaced</strong>. This is the supported way to reset a forgotten password.</p>
+        <div class="input-group"><label>Your Name (on the device)</label>
+          <input type="text" placeholder="e.g. Alice" /></div>
+        <div class="input-group"><label>Password</label>
+          <input type="password" placeholder="••••••••" /></div>
+        <button class="primary-btn">Register</button>
+      </form>
+      <p class="status-msg">Incorrect username or password.</p>`;
+    case 'dashboard': return `
+      <h2>Device Dashboard</h2>
+      <p>Manage your Smart Door Bridge.</p>
+      <div class="status-cards">
+        <div class="status-card"><span class="status-label">Lock</span>
+          <span class="status-value vocab-assumed">locked (awaiting confirmation)</span></div>
+        <div class="status-card"><span class="status-label">Battery</span>
+          <span class="status-value">47%</span></div>
+      </div>
+      <section class="dashboard-section">
+        <h3>Device Health</h3>
+        <p class="hint">Every value comes from the device's own health report. Unknown means the
+          device holds no reading; N/A means the subsystem is absent by build or configuration.</p>
+        ${healthTable()}
+        <button class="secondary-btn" style="margin-top:0.5rem">Refresh</button>
+      </section>
+      <section class="dashboard-section">
+        <h3>Configuration</h3>
+        <button class="secondary-btn">Read Config</button>
+        <div class="config-display">${configTable()}
+          <button class="primary-btn apply">Apply Changes</button></div>
+        <p class="status-msg">Config read successfully</p>
+      </section>
+      <section class="dashboard-section">
+        <h3>Enroll Fingerprint</h3>
+        <p>Four scans are required: an Admin first scans their fingerprint on the device to authorize
+          the enrolment, then the new user scans three times.</p>
+        <div class="enrollment-panel">
+          <div class="input-group"><label>User ID (1-10)</label><input type="number" value="4" /></div>
+          <div class="input-group"><label>Permission</label>
+            <select><option>Standard</option><option>Admin</option></select></div>
+          <button class="primary-btn">Enroll Fingerprint</button>
+          ${scanProgress('Step 1 of 3', 33, 'Waiting for the authorizing Admin scan on the device...')}
+          <p class="status-msg result" style="color:var(--danger)">Denied: the fingerprint scanned was not an admin finger.</p>
+        </div>
+      </section>
+      <section class="dashboard-section">
+        <h3>User Management</h3>
+        <p>List every enrolled user, and enrol, rename, re-permission or delete them. Every change
+          requires an Admin fingerprint scan on the device to authorize it — a BLE request alone is
+          never enough.</p>
+        <button class="secondary-btn">Refresh Users</button>
+        <div class="users"><table>
+          <thead><tr><th>ID</th><th>Name</th><th>Permission</th><th>Actions</th></tr></thead>
+          <tbody>${userRows()}</tbody>
+        </table></div>
+        <p class="status-msg refusal">Denied: the fingerprint scanned was not an admin finger.</p>
+      </section>
+      <section class="dashboard-section">
+        <h3>Nuki Pairing</h3>
+        <p>If the door lock needs to be re-paired with Nuki (e.g. after replacing the lock), request
+          a re-pair below. An Admin must scan their fingerprint on the device to approve it.</p>
+        <button class="secondary-btn">Request Nuki Re-pair</button>
+        <p class="status-msg">Requesting Nuki re-pair... scan the Admin fingerprint on the device.</p>
+      </section>
+      <section class="dashboard-section">
+        <h3>Zigbee Join</h3>
+        <p>Open a window for a new Zigbee device to join the network. An Admin must scan their
+          fingerprint on the device to approve it.</p>
+        <button class="secondary-btn">Request Zigbee Join</button>
+        <p class="status-msg"></p>
+      </section>
+      <section class="dashboard-section">
+        <h3>Firmware Update (OTA)</h3>
+        <div class="alert warning"><strong>Warning:</strong> Ensure your battery is above 20%. OTA
+          transfer over Bluetooth draws significant power and firmware is large — keep the app open
+          and the device nearby until it completes.</div>
+        <form class="otaform">
+          <div class="input-group"><label>Firmware Image (.bin)</label><input type="file" /></div>
+          <button class="primary-btn danger-btn">Start OTA Update</button>
+        </form>
+        <p class="status-msg">Uploading firmware... 62%</p>
+        <progress max="100" value="62"></progress>
+      </section>
+      <button class="secondary-btn">Disconnect</button>`;
+  }
+  return '';
+}
+
+function frameInner() {
+  return `
+    <header>
+      <h1>Smart Door</h1>
+      <p>Web Companion</p>
+      <div class="theme-picker" role="group" aria-label="Colour theme">
+        <span class="theme-picker-label">Theme</span>
+        <button type="button" class="theme-btn active">Dark</button>
+        <button type="button" class="theme-btn">Axolotl</button>
+      </div>
+    </header>
+    <main>${viewHtml(state.view)}</main>`;
+}
+
+/* ---------------- render ---------------- */
+const stage = document.getElementById('stage');
+function render() {
+  const themes = state.mode === 'split' ? THEMES : [state.singleTheme];
+  stage.innerHTML = '';
+  for (const t of themes) {
+    const col = document.createElement('div');
+    col.className = 'framecol';
+    col.innerHTML = `<div class="frametag">${t}${state.grey ? ' · greyscale' : ''}${state.blurOff ? ' · blur off' : ''}</div>`;
+    const f = document.createElement('div');
+    f.className = 'frame';
+    f.dataset.theme = t;
+    f.innerHTML = frameInner();
+    // picker buttons reflect their own frame's theme
+    f.querySelectorAll('.theme-btn').forEach((b) => {
+      b.classList.toggle('active', b.textContent.trim().toLowerCase() === t);
+    });
+    if (state.grey) f.style.filter = 'grayscale(1)';
+    else f.style.filter = '';
+    if (state.blurOff) f.style.setProperty('--surface-blur', 'none');
+    col.appendChild(f);
+    stage.appendChild(col);
+  }
+  document.getElementById('singleThemeRow').style.display =
+    state.mode === 'single' ? '' : 'none';
+}
+
+/* ---------------- checklist ---------------- */
+const cl = document.getElementById('checklist');
+function renderChecklist() {
+  cl.innerHTML = '';
+  for (const [vid, vname] of VIEWS) {
+    for (const t of THEMES) {
+      const key = vid + ':' + t;
+      const label = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = !!checks[key];
+      cb.onchange = () => { checks[key] = cb.checked; saveChecks(); renderChecklist(); updatePrompt(); };
+      label.append(cb, document.createTextNode(`${vname} · ${t}`));
+      cl.appendChild(label);
+    }
+  }
+  const done = Object.values(checks).filter(Boolean).length;
+  document.getElementById('progress').textContent = `${done}/${VIEWS.length * THEMES.length}`;
+}
+
+/* ---------------- prompt output ---------------- */
+function updatePrompt() {
+  const done = Object.values(checks).filter(Boolean).length;
+  const total = VIEWS.length * THEMES.length;
+  const unchecked = [];
+  for (const [vid, vname] of VIEWS) for (const t of THEMES)
+    if (!checks[vid + ':' + t]) unchecked.push(`${vname}·${t}`);
+  const extras = [];
+  if (state.grey) extras.push('with colour removed (greyscale)');
+  if (state.blurOff) extras.push('without backdrop blur');
+  const issues = document.getElementById('issues').value.trim();
+  const lines = [
+    `Task 7.1 theme walkthrough (${total === done ? 'COMPLETE' : done + '/' + total} checked)` +
+      `${extras.length ? ' — performed ' + extras.join(' and ') : ''}:`,
+    `- Confirmed readable and complete: ${unchecked.length ? 'pending: ' + unchecked.join(', ') : 'every view in both themes (connection, wizard steps 1–4, auth, dashboard with health/config/enrolment/user-management/admin-actions/OTA)'}`,
+  ];
+  if (issues) lines.push(`- Issues found: ${issues}`);
+  else if (total === done) lines.push('- No unreadable or invisible element found.');
+  document.getElementById('prompt').textContent = lines.join('\n');
+}
+
+/* ---------------- wiring ---------------- */
+document.getElementById('view').onchange = (e) => { state.view = e.target.value; render(); };
+document.getElementById('mode').onchange = (e) => { state.mode = e.target.value; render(); };
+document.getElementById('singleTheme').onchange = (e) => { state.singleTheme = e.target.value; render(); };
+for (const [id, key] of [['tglGrey', 'grey'], ['tglBlur', 'blurOff']]) {
+  const b = document.getElementById(id);
+  b.onclick = () => { state[key] = !state[key]; b.classList.toggle('on', state[key]); render(); };
+}
+document.getElementById('issues').addEventListener('input', updatePrompt);
+document.getElementById('resetChecks').onclick = () => { checks = {}; saveChecks(); renderChecklist(); updatePrompt(); };
+document.getElementById('copy').onclick = async () => {
+  await navigator.clipboard.writeText(document.getElementById('prompt').textContent);
+  const b = document.getElementById('copy');
+  b.textContent = 'Copied!';
+  setTimeout(() => (b.textContent = 'Copy'), 1200);
+};
+
+renderChecklist();
+/* sync the controls to the initial state (selects would otherwise show
+ * their first option while the state starts elsewhere) */
+document.getElementById('view').value = state.view;
+document.getElementById('mode').value = state.mode;
+document.getElementById('singleTheme').value = state.singleTheme;
+render();
+updatePrompt();
+</script>
+</body>
+</html>
