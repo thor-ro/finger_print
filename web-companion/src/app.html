@@ -3,9 +3,8 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<!-- Strict CSP; scripts/csp.mjs pins the SvelteKit bootstrap's hash
-		     into script-src post-build. Styles keep 'unsafe-inline' (the
-		     shell has a style attribute; styles cannot execute script). -->
+		<!-- scripts/csp.mjs pins the SvelteKit bootstrap hash into script-src;
+		     styles keep 'unsafe-inline' (style attr; no script exec). -->
 		<meta
 			http-equiv="Content-Security-Policy"
 			content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'"
