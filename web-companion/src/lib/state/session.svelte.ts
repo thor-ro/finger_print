@@ -922,10 +922,10 @@ class SessionStore {
 					timeoutRetries++;
 					if (timeoutRetries > OTA_TIMEOUT_RETRIES) {
 						throw new Error(
-							`No response from the device after ${OTA_TIMEOUT_RETRIES} retries at offset ${offset}. Check the connection and start the transfer again - it will resume from the reported offset.`
+							`No response after ${OTA_TIMEOUT_RETRIES} retries at offset ${offset}. Reconnect and start again - the transfer resumes from the reported offset.`
 						);
 					}
-					this.otaStatus = `No response from the device - retrying from offset ${offset} (attempt ${timeoutRetries} of ${OTA_TIMEOUT_RETRIES})...`;
+					this.otaStatus = `No response - retrying from offset ${offset} (${timeoutRetries}/${OTA_TIMEOUT_RETRIES})...`;
 					continue;
 				}
 				if (this.transport?.isConnected() && this.otaChunkSize > ota.MIN_CHUNK_SIZE) {

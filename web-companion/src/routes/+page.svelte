@@ -41,8 +41,8 @@
 					<section class="dashboard-section">
 						<h3>Dashboard unavailable</h3>
 						<p class="status-msg">
-							The dashboard view could not be loaded (the connection may have
-							dropped mid-download). Your session is unaffected.
+							The dashboard could not be loaded. Your session is
+							unaffected.
 						</p>
 						<button class="primary-btn" onclick={() => dashboardAttempt++}>Retry</button>
 					</section>
