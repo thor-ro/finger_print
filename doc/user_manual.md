@@ -94,12 +94,14 @@ Enrollment of additional fingerprints is available through the Web Companion App
 5. **Completion:** After the third scan, the template is saved with the chosen User ID and permission. The LED breathes solid **green** for a few seconds.
 
 ### Admin User Enrollment (Companion App)
-To enroll an additional Admin (e.g., a partner or co-owner), use the [web-companion app](../web-companion/README.md) rather than the physical button — there is no button gesture for this:
-1. **Initiate:** A logged-in companion-app user taps **Request Enroll Admin** on the dashboard.
+To enroll an additional Admin (e.g., a partner or co-owner), use the [web-companion app](../web-companion/README.md) — there is no button gesture for this:
+1. **Initiate:** A logged-in companion-app user uses the **Enroll Fingerprint** panel on the dashboard and chooses Permission **Admin**.
 2. **Pending Authorization:** The LED begins to pulse **blue**.
 3. **Authorize:** An existing Admin touches the fingerprint sensor within 10 seconds.
 4. **Biometric Capture:** The new user places their finger three times.
 5. **Completion:** The template is saved with Admin permission (3). The companion app is notified that enrollment has started.
+
+There is no separate "Enroll Admin" request: enrolling with Permission = Admin through the Enroll Fingerprint panel is the supported path (the remote enrolment request accepts permission 3 directly).
 
 > [!IMPORTANT]
 > Adding an Admin gives that person full control over the device, including the ability to enroll/remove other users, pair to Nuki, join Zigbee networks, and factory reset the device. Only grant Admin to trusted individuals.
@@ -123,7 +125,7 @@ Admin requests via app     ──► LED pulses Blue ──► Admin scans finge
 | Enrollment Method | Trigger | Permission Assigned | Admin Auth Required |
 | --- | --- | --- | --- |
 | Standard User | Companion-app request | 1 (Standard) | Yes — Admin fingerprint |
-| Admin User | Companion-app request ("Request Enroll Admin") | 3 (Admin) | Yes — Admin fingerprint |
+| Admin User | Companion-app request (Enroll Fingerprint, Permission = Admin) | 3 (Admin) | Yes — Admin fingerprint |
 | First-time setup (initial Admin) | Setup wizard, step 1 | 3 (Admin) | No — setup phase is the gate |
 | Remote (Zigbee) | n/a | Specified by coordinator | No (trusted network) |
 
