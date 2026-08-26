@@ -48,4 +48,4 @@
 - [x] 7.1 Walk every view in both themes — connection, wizard (all four steps), auth, dashboard with health, config, enrolment, user management and OTA — and confirm nothing is unreadable or invisible
 - [x] 7.2 Confirm a long device-reported user name and a refusal message render correctly in both themes
 - [x] 7.3 Update `web-companion/README.md` with the theme picker, the token contract, and how to add a theme
-- [ ] 7.4 Deploy and confirm both themes on the live Pages site
+- [x] 7.4 Deploy and confirm both themes on the live Pages site
