@@ -54,7 +54,9 @@
 			</table>
 		{/if}
 	</div>
-	<p class="status-msg">{session.umStatus}</p>
+	<!-- A device refusal is presented with the danger treatment in every
+	     theme; the sentence itself still names the outcome. -->
+	<p class="status-msg" class:refusal={session.umStatusRefusal}>{session.umStatus}</p>
 </section>
 
 <style>

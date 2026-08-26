@@ -1,0 +1,52 @@
+/* Dark theme - the companion's original palette, expressed in the token
+ * contract (themes/CONTRACT.md). Declared in its own root scope only. */
+
+:root[data-theme='dark'] {
+	/* Surfaces */
+	--bg: #0f172a;
+	--bg-image: none;
+	--panel: #1e293b;
+	--panel-2: #273449;
+	--surface-blur: none;
+
+	/* Lines */
+	--border: #7a8ba3;
+	--shadow: none;
+
+	/* Text */
+	--text: #e2e8f0;
+	--muted: #94a3b8;
+	--text-on-accent: #04121f;
+
+	/* Accent */
+	--accent: #38bdf8;
+	--accent-strong: #0ea5e9;
+	--accent-gradient: linear-gradient(90deg, #38bdf8 0%, #0ea5e9 100%);
+
+	/* Status */
+	--ok: #22c55e;
+	--warn: #f59e0b;
+	--danger: #f98080;
+	--info: #38bdf8;
+	--ok-tint: rgba(34, 197, 94, 0.12);
+	--warn-tint: rgba(245, 158, 11, 0.12);
+	--danger-tint: rgba(249, 128, 128, 0.05);
+	--info-tint: rgba(56, 189, 248, 0.1);
+
+	/* Device vocabulary */
+	--unknown: #94a3b8;
+	--not-applicable: #8494ab;
+	--assumed: #f59e0b;
+
+	/* Shape */
+	--radius: 6px;
+	--radius-lg: 10px;
+	--radius-pill: 999px;
+
+	/* Type */
+	--font-body:
+		system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+
+	/* Rendering intent */
+	--color-scheme: dark;
+}

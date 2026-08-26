@@ -11,6 +11,28 @@
 		/>
 		<meta name="description" content="Smart Door Web Companion" />
 		<title>Smart Door Web Companion</title>
+		<script>
+			// Pre-paint theme application: stored choice, else the system
+			// colour scheme (dark -> dark, light -> axolotl). Must stay in
+			// sync with src/lib/state/theme.svelte.ts. scripts/csp.mjs pins
+			// this inline script's SHA-256 into script-src at build time.
+			(function () {
+				var t = null;
+				try {
+					t = localStorage.getItem('sdf-theme');
+				} catch (e) {}
+				if (t !== 'dark' && t !== 'axolotl') {
+					try {
+						t = window.matchMedia('(prefers-color-scheme: light)').matches
+							? 'axolotl'
+							: 'dark';
+					} catch (e) {
+						t = 'dark';
+					}
+				}
+				document.documentElement.setAttribute('data-theme', t);
+			})();
+		</script>
 		%sveltekit.head%
 	</head>
 	<body data-sveltekit-preload-data="hover">

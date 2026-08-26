@@ -3,6 +3,7 @@
 	import ConnectionView from '$lib/components/ConnectionView.svelte';
 	import WizardView from '$lib/components/WizardView.svelte';
 	import AuthView from '$lib/components/AuthView.svelte';
+	import ThemePicker from '$lib/components/ThemePicker.svelte';
 
 	// The dashboard is only reachable after a connection and a successful
 	// login, so it is loaded on demand instead of weighing down the initial
@@ -18,6 +19,9 @@
 	<header>
 		<h1>Smart Door</h1>
 		<p>Web Companion</p>
+		<!-- Outside <main> and every view switch: selectable before
+		     authentication, on every view. -->
+		<ThemePicker />
 	</header>
 
 	<main>

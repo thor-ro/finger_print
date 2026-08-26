@@ -2,7 +2,6 @@
 	import { session } from '$lib/state/session.svelte';
 
 	let nukiStatus = $state('');
-	let enrollAdminStatus = $state('');
 	let zbJoinStatus = $state('');
 
 	function nukiRepair(): void {
@@ -11,14 +10,6 @@
 			'Requesting Nuki re-pair... scan the Admin fingerprint on the device.',
 			'Nuki pairing started on the device.',
 			(msg) => (nukiStatus = msg)
-		);
-	}
-	function enrollAdmin(): void {
-		void session.requestAdminAction(
-			'enroll_admin',
-			'Requesting Enroll-Admin... scan the Admin fingerprint on the device.',
-			'Admin enrollment started on the device - follow the fingerprint prompts.',
-			(msg) => (enrollAdminStatus = msg)
 		);
 	}
 	function zbJoin(): void {
@@ -42,17 +33,10 @@
 	<p class="status-msg">{nukiStatus}</p>
 </section>
 
-<section class="dashboard-section">
-	<h3>Enroll Admin</h3>
-	<p>
-		Enroll a new Admin-permission fingerprint. An existing Admin must scan
-		their fingerprint on the device to approve it — a BLE request alone is
-		never enough.
-	</p>
-	<button class="secondary-btn" onclick={enrollAdmin}>Request Enroll Admin</button>
-	<p class="status-msg">{enrollAdminStatus}</p>
-</section>
-
+<!-- No dedicated "Enroll Admin" action here: enrolling a new admin is
+     the Enroll Fingerprint panel with Permission = Admin - the remote
+     enrolment path accepts permission 3 and picks its own user ID,
+     so a separate request would be redundant. -->
 <section class="dashboard-section">
 	<h3>Zigbee Join</h3>
 	<p>

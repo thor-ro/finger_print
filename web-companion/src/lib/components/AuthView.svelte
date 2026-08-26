@@ -56,25 +56,25 @@
 	.tab-btn {
 		flex: 0 0 auto;
 		padding: 0.4rem 1.25rem;
-		border-radius: 999px;
+		border-radius: var(--radius-pill);
 		border: 1px solid var(--border);
 		background: transparent;
 		color: var(--muted);
 		cursor: pointer;
 	}
 	.tab-btn.active {
-		background: var(--accent-strong);
-		border-color: var(--accent-strong);
-		color: #04121f;
+		background: var(--accent-gradient);
+		border-color: var(--accent);
+		color: var(--text-on-accent);
 		font-weight: 600;
 	}
 	.auth-form {
 		max-width: 24rem;
 	}
 	.register-note {
-		background: rgba(56, 189, 248, 0.08);
+		background: var(--info-tint);
 		border: 1px solid var(--border);
-		border-radius: 6px;
+		border-radius: var(--radius);
 		padding: 0.6rem 0.8rem;
 	}
 </style>

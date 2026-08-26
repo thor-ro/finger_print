@@ -18,7 +18,10 @@
 				{#each rows as row (row.label)}
 					<tr>
 						<td><span class="row-label">{row.label}</span></td>
-						<td>{row.value}</td>
+						<!-- Colour reinforces the vocabulary the text already
+						     states (Unknown / N/A / awaiting confirmation);
+						     it never replaces it. -->
+						<td class={row.kind ? `vocab-${row.kind}` : ''}>{row.value}</td>
 					</tr>
 				{/each}
 			</tbody>

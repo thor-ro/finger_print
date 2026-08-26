@@ -88,32 +88,70 @@ export function describeBattery(report: HealthReport): string {
 export interface HealthRow {
 	label: string;
 	value: string;
+	/**
+	 * Which vocabulary condition the value is in. The rendered TEXT carries
+	 * the distinction; `kind` only lets the view apply the reinforcing
+	 * theme token (--unknown / --not-applicable / --assumed). Never used
+	 * instead of the text.
+	 */
+	kind?: 'unknown' | 'not_applicable' | 'assumed';
+}
+
+/** Vocabulary kind of a generic health entry (pure - no rendering). */
+export function healthEntryKind(entry: HealthEntry | undefined): 'unknown' | 'not_applicable' | 'measured' {
+	if (!entry || entry.state === 'unknown') return 'unknown';
+	if (entry.state === 'not_applicable') return 'not_applicable';
+	return 'measured';
+}
+
+/** Vocabulary kind of the lock reading, including the assumed case. */
+export function lockKind(report: HealthReport): 'unknown' | 'assumed' | 'measured' {
+	const lock = report.lock;
+	if (!lock || !lock.state || lock.state === 'unknown') return 'unknown';
+	return lock.source === 'assumed' ? 'assumed' : 'measured';
 }
 
 /** The full health table as plain label/value rows. */
 export function healthRows(report: HealthReport): HealthRow[] {
+	const vocab = (k: 'unknown' | 'not_applicable' | 'assumed' | 'measured') =>
+		k === 'measured' ? undefined : k;
+	const lockK = lockKind(report);
 	return [
-		{ label: 'Lock state', value: describeLockState(report) },
-		{ label: 'Battery', value: describeBattery(report) },
-		{ label: 'Alarms', value: report.alarms ? `mask ${report.alarms.mask}` : 'Unknown' },
+		{ label: 'Lock state', value: describeLockState(report), kind: vocab(lockK) },
+		{
+			label: 'Battery',
+			value: describeBattery(report),
+			kind:
+				report.battery && typeof report.battery.percent === 'number'
+					? undefined
+					: 'unknown'
+		},
+		{
+			label: 'Alarms',
+			value: report.alarms ? `mask ${report.alarms.mask}` : 'Unknown',
+			kind: report.alarms ? undefined : 'unknown'
+		},
 		{
 			label: 'Fingerprint sensor',
-			value: healthValue(report.fingerprint, (e) => (e.ready ? 'Ready' : 'Not responding'))
+			value: healthValue(report.fingerprint, (e) => (e.ready ? 'Ready' : 'Not responding')),
+			kind: vocab(healthEntryKind(report.fingerprint))
 		},
 		{
 			label: 'Nuki link',
 			value: healthValue(
 				report.nuki,
 				(e) => `${e.paired ? 'paired' : 'not paired'}, ${e.connected ? 'connected' : 'disconnected'}`
-			)
+			),
+			kind: vocab(healthEntryKind(report.nuki))
 		},
 		{
 			label: 'Zigbee network',
-			value: healthValue(report.zigbee, (e) => (e.joined ? 'joined' : 'not joined'))
+			value: healthValue(report.zigbee, (e) => (e.joined ? 'joined' : 'not joined')),
+			kind: vocab(healthEntryKind(report.zigbee))
 		},
-		{ label: 'Firmware', value: report.firmware || 'Unknown' },
-		{ label: 'OTA state', value: report.ota || 'Unknown' },
-		{ label: 'Setup state', value: report.setup || 'Unknown' }
+		{ label: 'Firmware', value: report.firmware || 'Unknown', kind: report.firmware ? undefined : 'unknown' },
+		{ label: 'OTA state', value: report.ota || 'Unknown', kind: report.ota ? undefined : 'unknown' },
+		{ label: 'Setup state', value: report.setup || 'Unknown', kind: report.setup ? undefined : 'unknown' }
 	];
 }
 

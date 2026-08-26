@@ -10,10 +10,11 @@
 		"preview": "vite preview",
 		"check": "svelte-check --tsconfig ./tsconfig.json",
 		"lint": "node scripts/lint.mjs",
+		"themes": "node scripts/check-themes.mjs",
 		"test": "vitest run",
 		"budget": "node scripts/budget.mjs",
 		"hw": "node hardware-tests/run.mjs",
-		"gate": "npm run check && npm run lint && npm run test && npm run budget"
+		"gate": "npm run check && npm run lint && npm run themes && npm run test && npm run budget"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^3.0.8",

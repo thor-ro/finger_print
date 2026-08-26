@@ -10,6 +10,9 @@
  *    `window`, or SvelteKit internals.
  * 3. Confines Web Bluetooth to the single production transport:
  *    `navigator.bluetooth` may only appear in src/lib/transport/ble.ts.
+ * 4. Bans colour literals anywhere under src/. All colours come from theme
+ *    tokens declared in themes/*.css (see themes/CONTRACT.md); a literal
+ *    here is how a theme stops being able to restyle the app.
  *
  * Exits non-zero on any violation.
  */
@@ -26,7 +29,7 @@ function walk(dir) {
 		if (name === 'node_modules' || name === '.svelte-kit') continue;
 		const full = join(dir, name);
 		if (statSync(full).isDirectory()) entries.push(...walk(full));
-		else if (/\.(svelte|ts|js)$/.test(name)) entries.push(full);
+		else if (/\.(svelte|ts|js|css)$/.test(name)) entries.push(full);
 	}
 	return entries;
 }
@@ -74,6 +77,22 @@ for (const file of files.filter((f) => !f.endsWith('.test.ts'))) {
 	lines.forEach((line, i) => {
 		if (/navigator\.bluetooth|requestDevice/.test(line)) {
 			fail(file, i + 1, 'Web Bluetooth may only be used in src/lib/transport/ble.ts');
+		}
+	});
+}
+
+// 4. No colour literals under src/ - themes own every colour value.
+const COLOUR_LITERAL = [
+	{ re: /#[0-9a-fA-F]{3,8}\b/, why: 'hex colour literal' },
+	{ re: /\b(?:rgba?|hsla?)\s*\(/i, why: 'rgb()/hsl() colour literal' }
+];
+for (const file of files) {
+	const lines = readFileSync(file, 'utf8').split('\n');
+	lines.forEach((line, i) => {
+		for (const { re, why } of COLOUR_LITERAL) {
+			if (re.test(line)) {
+				fail(file, i + 1, `colour literal banned under src/ (${why}) - use a theme token (themes/CONTRACT.md)`);
+			}
 		}
 	});
 }

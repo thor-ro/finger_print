@@ -1,0 +1,54 @@
+/* Axolotl theme - the provided palette (the former axolotl-theme.css token
+ * block) expressed in the token contract (themes/CONTRACT.md). Values that
+ * deviate from the original palette to pass the gates are recorded in
+ * themes/THEMES.md. Declared in its own root scope only. */
+
+:root[data-theme='axolotl'] {
+	/* Surfaces: iridescent gradient + glass panels */
+	--bg: #eef4fb;
+	--bg-image: linear-gradient(135deg, #e0f2fe 0%, #fce7f3 50%, #e9d5ff 100%);
+	--panel: rgba(255, 255, 255, 0.72);
+	--panel-2: rgba(255, 255, 255, 0.55);
+	--surface-blur: blur(12px);
+
+	/* Lines */
+	--border: rgba(30, 41, 59, 0.6);
+	--shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.1);
+
+	/* Text */
+	--text: #1e293b;
+	--muted: #475569;
+	--text-on-accent: #16202f;
+
+	/* Accent */
+	--accent: #0ea5e9;
+	--accent-strong: #0ea5e9;
+	--accent-gradient: linear-gradient(90deg, #f9a8d4 0%, #93c5fd 100%);
+
+	/* Status (darkened from the palette's tailwind-500 hues for contrast) */
+	--ok: #15803d;
+	--warn: #b45309;
+	--danger: #b91c1c;
+	--info: #0369a1;
+	--ok-tint: rgba(21, 128, 61, 0.12);
+	--warn-tint: rgba(180, 83, 9, 0.12);
+	--danger-tint: rgba(185, 28, 28, 0.1);
+	--info-tint: rgba(3, 105, 161, 0.1);
+
+	/* Device vocabulary */
+	--unknown: #526180;
+	--not-applicable: #414d63;
+	--assumed: #92400e;
+
+	/* Shape: pill radii from the palette */
+	--radius: 12px;
+	--radius-lg: 24px;
+	--radius-pill: 999px;
+
+	/* Type: system stack (see THEMES.md for the Poppins/Nunito decision) */
+	--font-body:
+		system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+
+	/* Rendering intent */
+	--color-scheme: light;
+}

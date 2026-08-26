@@ -30,7 +30,7 @@
 		flex: 1;
 		height: 8px;
 		background: var(--panel-2);
-		border-radius: 4px;
+		border-radius: var(--radius);
 		overflow: hidden;
 	}
 	.progress-fill {

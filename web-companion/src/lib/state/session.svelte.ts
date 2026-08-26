@@ -95,6 +95,10 @@ class SessionStore {
 	// --- Dashboard: user management ---
 	umUsers = $state<UmUser[]>([]);
 	umStatus = $state('');
+	// True while umStatus carries a device refusal (a named non-ok outcome).
+	// The refusal sentence itself still carries the meaning; the flag only
+	// applies the reinforcing --danger/--danger-tint presentation.
+	umStatusRefusal = $state(false);
 
 	// --- OTA ---
 	otaStatus = $state('');
@@ -501,7 +505,7 @@ class SessionStore {
 		}
 	}
 
-	// --- BLE-triggered admin actions (Nuki re-pair, Enroll-Admin, Zigbee Join) ---
+	// --- BLE-triggered admin actions (Nuki re-pair, Zigbee Join) ---
 
 	/**
 	 * Writes {"action":key} and waits for the matching {key:true|false} reply
@@ -599,6 +603,7 @@ class SessionStore {
 	listUsers(): Promise<'ok' | 'no-response'> {
 		return (async () => {
 			this.umStatus = 'Requesting user list...';
+			this.umStatusRefusal = false;
 			const result = await this.sendUmRequest({ verb: 'list' });
 			// The terminal signal is the final list part's end marker; the
 			// resolved value is null only on a client-side timeout.
@@ -630,6 +635,22 @@ class SessionStore {
 		return true;
 	}
 
+	/**
+	 * Renders a user-management terminal outcome: the ok message on
+	 * success, otherwise the outcome's own named refusal sentence, marked
+	 * as a refusal so every theme presents it differently from ordinary
+	 * status text.
+	 */
+	private setUmOutcome(result: string, okMessage: string): void {
+		if (result === 'ok') {
+			this.umStatus = okMessage;
+			this.umStatusRefusal = false;
+		} else {
+			this.umStatus = um.umResultMessage(result);
+			this.umStatusRefusal = true;
+		}
+	}
+
 	async deleteUser(userId: number): Promise<void> {
 		if (!this.warnIfSelf(userId, 'delete')) {
 			this.umStatus = 'Cancelled.';
@@ -642,12 +663,10 @@ class SessionStore {
 			const result = await this.sendUmRequest({ verb: 'delete', user_id: userId });
 			if (result === null) {
 				this.umStatus = 'No response received - check the device.';
+				this.umStatusRefusal = false;
 				return;
 			}
-			this.umStatus =
-				result.result === 'ok'
-					? `User ${userId} deleted.`
-					: um.umResultMessage(String(result.result));
+			this.setUmOutcome(String(result.result), `User ${userId} deleted.`);
 			await this.refreshUmUsersSilently();
 		} catch (err) {
 			console.error(err);
@@ -665,12 +684,10 @@ class SessionStore {
 			const result = await this.sendUmRequest({ verb: 'rename', user_id: userId, name });
 			if (result === null) {
 				this.umStatus = 'No response received - check the device.';
+				this.umStatusRefusal = false;
 				return;
 			}
-			this.umStatus =
-				result.result === 'ok'
-					? `User ${userId} renamed to "${name}".`
-					: um.umResultMessage(String(result.result));
+			this.setUmOutcome(String(result.result), `User ${userId} renamed to "${name}".`);
 			await this.refreshUmUsersSilently();
 		} catch (err) {
 			console.error(err);
@@ -701,12 +718,10 @@ class SessionStore {
 			});
 			if (result === null) {
 				this.umStatus = 'No response received - check the device.';
+				this.umStatusRefusal = false;
 				return;
 			}
-			this.umStatus =
-				result.result === 'ok'
-					? `Permission updated for user ${userId}.`
-					: um.umResultMessage(String(result.result));
+			this.setUmOutcome(String(result.result), `Permission updated for user ${userId}.`);
 			await this.refreshUmUsersSilently();
 		} catch (err) {
 			console.error(err);

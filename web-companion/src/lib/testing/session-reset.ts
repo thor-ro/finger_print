@@ -42,6 +42,7 @@ export function resetSessionForTests(): void {
 	s.enrollResultColor = '';
 	s.umUsers = [];
 	s.umStatus = '';
+	s.umStatusRefusal = false;
 	s.otaStatus = '';
 	s.otaProgressVisible = false;
 	s.otaProgressPercent = 0;

@@ -47,7 +47,7 @@
 	.status-card {
 		background: var(--panel);
 		border: 1px solid var(--border);
-		border-radius: 8px;
+		border-radius: var(--radius-lg);
 		padding: 0.75rem 1.25rem;
 		display: flex;
 		flex-direction: column;

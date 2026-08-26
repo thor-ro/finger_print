@@ -1,19 +1,18 @@
 /* Global stylesheet: base reset plus the shared visual language ported from
  * the legacy style.css (app shell, sections, inputs, buttons, tables,
- * status lines). Component-specific layout stays in its components. */
+ * status lines). Component-specific layout stays in its components.
+ *
+ * This file holds element defaults that reference THEME TOKENS only - no
+ * colour literals, no font families, no radii of its own. All token values
+ * live in the shipped themes (../themes/, see themes/CONTRACT.md); the
+ * active one is chosen by <html data-theme='…'>, applied before first
+ * paint from src/app.html. */
+
+@import '../themes/dark.css';
+@import '../themes/axolotl.css';
 
 :root {
-	--bg: #0f172a;
-	--panel: #1e293b;
-	--panel-2: #273449;
-	--border: #334155;
-	--text: #e2e8f0;
-	--muted: #94a3b8;
-	--accent: #38bdf8;
-	--accent-strong: #0ea5e9;
-	--ok: #22c55e;
-	--warn: #f59e0b;
-	--danger: #ef4444;
+	color-scheme: var(--color-scheme);
 }
 
 * {
@@ -22,15 +21,13 @@
 
 body {
 	margin: 0;
-	background: var(--bg);
+	background-color: var(--bg);
+	/* Gradient-capable themes layer their background here; flat themes
+	 * declare --bg-image: none. Never read as a solid colour. */
+	background-image: var(--bg-image);
+	background-attachment: fixed;
 	color: var(--text);
-	font-family:
-		system-ui,
-		-apple-system,
-		'Segoe UI',
-		Roboto,
-		'Helvetica Neue',
-		sans-serif;
+	font-family: var(--font-body);
 	line-height: 1.5;
 }
 
@@ -61,9 +58,11 @@ header p {
 
 main {
 	background: var(--panel);
+	backdrop-filter: var(--surface-blur);
 	border: 1px solid var(--border);
-	border-radius: 10px;
+	border-radius: var(--radius-lg);
 	padding: 1.25rem 1.5rem;
+	box-shadow: var(--shadow);
 }
 
 h2 {
@@ -73,9 +72,10 @@ h2 {
 .dashboard-section {
 	background: var(--panel-2);
 	border: 1px solid var(--border);
-	border-radius: 8px;
+	border-radius: var(--radius-lg);
 	padding: 0.9rem 1.1rem;
 	margin-bottom: 0.9rem;
+	box-shadow: var(--shadow);
 }
 .dashboard-section h3 {
 	margin-top: 0;
@@ -96,7 +96,7 @@ select {
 	background: var(--bg);
 	color: var(--text);
 	border: 1px solid var(--border);
-	border-radius: 6px;
+	border-radius: var(--radius);
 	padding: 0.45rem 0.6rem;
 	font: inherit;
 }
@@ -108,7 +108,7 @@ input[type='checkbox'] {
 button {
 	font: inherit;
 	cursor: pointer;
-	border-radius: 6px;
+	border-radius: var(--radius);
 	padding: 0.5rem 1rem;
 	border: 1px solid transparent;
 }
@@ -117,8 +117,10 @@ button:disabled {
 	cursor: not-allowed;
 }
 .primary-btn {
-	background: var(--accent-strong);
-	color: #04121f;
+	/* Gradient-valued token consumed by a property that accepts an image
+	 * (see CONTRACT.md); text takes the dedicated on-accent colour. */
+	background: var(--accent-gradient);
+	color: var(--text-on-accent);
 	font-weight: 600;
 }
 .secondary-btn {
@@ -127,8 +129,12 @@ button:disabled {
 	color: var(--text);
 }
 .danger-btn {
-	background: var(--danger);
-	color: #fff;
+	/* Destructive action as a danger-tinted ghost: a solid --danger fill
+	 * cannot carry one shared --text-on-accent at 4.5:1 in both a dark and
+	 * a light theme, and the tint keeps the refusal vocabulary consistent. */
+	background: var(--danger-tint);
+	border: 1px solid var(--danger);
+	color: var(--danger);
 	font-weight: 600;
 }
 
@@ -148,11 +154,48 @@ button:disabled {
 
 .alert {
 	padding: 0.75rem 1rem;
-	border-radius: 6px;
+	border-radius: var(--radius);
 	margin-bottom: 0.75rem;
 	font-size: 0.925rem;
 }
 .alert.warning {
-	background: rgba(245, 158, 11, 0.12);
+	background: var(--warn-tint);
 	border: 1px solid var(--warn);
 }
+
+/* Device-vocabulary reinforcement: colour only ever accompanies the text
+ * that carries the distinction ("Unknown", "N/A", "(awaiting confirmation)")
+ * - it never replaces it (CONTRACT.md). */
+.vocab-unknown {
+	color: var(--unknown);
+}
+.vocab-not-applicable {
+	color: var(--not-applicable);
+}
+.vocab-assumed {
+	color: var(--assumed);
+}
+
+/* A refusal is a distinct kind of status line in every theme: danger tint
+ * plus danger border behind the device's own refusal sentence. */
+.refusal {
+	background: var(--danger-tint);
+	border: 1px solid var(--danger);
+	border-radius: var(--radius);
+	padding: 0.45rem 0.7rem;
+	color: var(--danger);
+}
+
+/* Honour prefers-reduced-motion: no transitions, animations or transforms. */
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		transition-duration: 0.01ms !important;
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transform: none !important;
+		scroll-behavior: auto !important;
+	}
+}
+
