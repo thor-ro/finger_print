@@ -12,6 +12,7 @@
 		"lint": "node scripts/lint.mjs",
 		"test": "vitest run",
 		"budget": "node scripts/budget.mjs",
+		"hw": "node hardware-tests/run.mjs",
 		"gate": "npm run check && npm run lint && npm run test && npm run budget"
 	},
 	"devDependencies": {
