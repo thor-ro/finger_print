@@ -145,3 +145,62 @@ deployed (adapter-static; Kit's intermediate server build under
 - 1.6: dev-server device picker from `localhost` (localhost is a secure
   context, but needs an interactive browser with a real picker gesture).
 - Section 6 parity checklist on hardware before legacy deletion.
+
+## Review round 2 (tasks 9.1-9.6, 2026-08-26)
+
+Every new assertion was proven RED against the previous behaviour before
+being relied on. Local runs, `web-companion/`.
+
+- **9.1 OTA resync.** With the timeout branch restored to the blind re-send,
+  `a response timeout resyncs from the device offset instead of re-sending
+  the chunk` fails with the old wire sequence:
+  `expected [1, 2, 2, 2, 3] to deeply equal [1, 2, 1, 2, 3]` — opcode 2
+  (CHUNK) sent again where the fix sends opcode 1 (BEGIN). The companion
+  test `a stale chunk acknowledgement is not mistaken for the resync
+  response` failed alongside it with **6** chunk writes instead of 1: the
+  old code ran a chunk behind its own responses for the rest of the
+  transfer.
+- **9.2 Stale-reply filter.** With the `accept` predicate removed from the
+  resync BEGIN, the stale `chunk_ack` resolves the BEGIN and the transfer
+  stops after three writes: `expected [1, 2, 1] to deeply equal
+  [1, 2, 1, 2, 3]`.
+- **9.3 Dashboard reload.** With `location.reload()` removed from
+  `+page.svelte`, the 8.5 assertion fails to match `/location\.reload\(\)/`.
+- **9.4 Firmware-derived outcomes.** A twelfth outcome added temporarily to
+  `sdf_services_um_outcome_name()` (`SDF_SERVICES_UM_PROBE` ->
+  `"sensor_offline"`) turned three assertions red, including
+  `expected 'Request failed (sensor_offline).' not to match /\(\w+\)\.$/`.
+  The firmware source was restored afterwards (`git status` clean).
+- **9.5 Reset coverage.** Deleting `s.configStatus` from
+  `session-reset.ts` fails the new assertion with
+  `expected [ 'configStatus' ] to deeply equal []`.
+
+GREEN after the fixes: `svelte-check` 374 files / 0 errors, `lint OK (32
+files scanned)`, **67 tests passed**.
+
+### Why the dashboard retry became a reload
+
+A failed dynamic import is cached in the browser's module map, so retrying
+the same specifier fails without a network request. Measured in headless
+Chrome against a server that fails the first request and succeeds after:
+
+```
+a1=fail:TypeError | a2=fail:TypeError | a3=ok
+mod.js requests seen by server: 2
+```
+
+Three attempts, two requests: attempt 2 (same specifier) never reached the
+network; attempt 3 (cache-busted URL) succeeded. Cache-busting the chunk URL
+was rejected as a fix because it does not help when the poisoned entry is one
+of the chunk's dependencies — the built import is
+`__vitePreload(() => import("./<chunk>.js"), [deps])`. A reload always works;
+the copy now says a reconnect is needed.
+
+### Budget after round 2
+
+CI-equivalent build (`BASE_PATH=/finger_print`), gzip -9:
+**initial 45 889 / 46 080 bytes**, **total 53 663 / 55 296 bytes**. Removing
+the dead retry (`{#key}` plus its attempt counter) paid for the OTA resync
+code, so the app got slightly smaller and no budget was touched. Headroom on
+the initial load is 191 bytes: still thin enough that the next change should
+re-derive the cap deliberately rather than shave prose again.

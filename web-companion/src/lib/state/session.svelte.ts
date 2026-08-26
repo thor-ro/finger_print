@@ -111,6 +111,8 @@ class SessionStore {
 	private otaPendingNotification: {
 		resolve: (data: ota.DeviceStatus) => void;
 		reject: (err: Error) => void;
+		/** Drops replies that belong to an earlier, already-timed-out write. */
+		accept?: (data: ota.DeviceStatus) => boolean;
 	} | null = null;
 	private otaChunkSize = ota.INITIAL_CHUNK_SIZE;
 	private otaResumeState: { file: Blob; imageSize: number } | null = null;
@@ -895,7 +897,10 @@ class SessionStore {
 	private async beginOtaTransfer(imageSize: number): Promise<number> {
 		const data = await this.writeOtaOpcodeAndAwaitNotification(
 			ota.beginPayload(imageSize),
-			OTA_RESPONSE_TIMEOUT_MS
+			OTA_RESPONSE_TIMEOUT_MS,
+			// A chunk acknowledgement arriving now is the late reply to a write
+			// that already timed out - never this BEGIN's answer.
+			(d) => d.status !== 'chunk_ack'
 		);
 		return ota.resumeOffsetFromReady(data);
 	}
@@ -916,16 +921,21 @@ class SessionStore {
 				);
 			} catch (err) {
 				if (err instanceof OtaResponseTimeoutError) {
-					// No response in time: NOT an over-MTU rejection. Halving the
-					// chunk would not help and would silently corrupt the
-					// transfer strategy - retry the same (unconfirmed) offset.
+					// No response in time: NOT an over-MTU rejection, so halving the
+					// chunk would not help. Nor can the chunk simply be re-sent: it
+					// may have been written and only its acknowledgement lost, and a
+					// CHUNK carries no offset, so re-sending would append the same
+					// bytes twice. Only the device knows how much it holds - re-issue
+					// BEGIN, which a size-matching device answers as a resume with its
+					// confirmed offset, and continue from there.
 					timeoutRetries++;
 					if (timeoutRetries > OTA_TIMEOUT_RETRIES) {
 						throw new Error(
 							`No response after ${OTA_TIMEOUT_RETRIES} retries at offset ${offset}. Reconnect and start again - the transfer resumes from the reported offset.`
 						);
 					}
-					this.otaStatus = `No response - retrying from offset ${offset} (${timeoutRetries}/${OTA_TIMEOUT_RETRIES})...`;
+					this.otaStatus = `No response - resyncing with the device (${timeoutRetries}/${OTA_TIMEOUT_RETRIES})...`;
+					offset = await this.beginOtaTransfer(imageSize);
 					continue;
 				}
 				if (this.transport?.isConnected() && this.otaChunkSize > ota.MIN_CHUNK_SIZE) {
@@ -1018,7 +1028,8 @@ class SessionStore {
 
 	private async writeOtaOpcodeAndAwaitNotification(
 		payload: Uint8Array,
-		timeoutMs: number
+		timeoutMs: number,
+		accept?: (data: ota.DeviceStatus) => boolean
 	): Promise<ota.DeviceStatus> {
 		const notificationPromise = new Promise<ota.DeviceStatus>((resolve, reject) => {
 			const timer = setTimeout(() => {
@@ -1036,7 +1047,8 @@ class SessionStore {
 					clearTimeout(timer);
 					this.otaPendingNotification = null;
 					reject(err);
-				}
+				},
+				accept
 			};
 		});
 		// The write's catch below can reject this promise before the caller's
@@ -1062,6 +1074,13 @@ class SessionStore {
 			return;
 		}
 		if (this.otaPendingNotification) {
+			if (this.otaPendingNotification.accept?.(parsed) === false) {
+				// Stale reply to an earlier write: dropping it keeps the pending
+				// wait paired with its own response instead of running a chunk
+				// behind for the rest of the transfer.
+				console.warn('Discarding stale OTA notification:', parsed);
+				return;
+			}
 			this.otaPendingNotification.resolve(parsed);
 		} else {
 			console.warn('Unsolicited OTA notification:', parsed);

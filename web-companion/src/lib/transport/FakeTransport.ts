@@ -8,7 +8,10 @@ import type { BleTransport, SdfCharacteristic } from './ble';
 export class FakeTransport implements BleTransport {
 	private connected = false;
 	private readQueue = new Map<SdfCharacteristic, Uint8Array[]>();
-	private writeQueue = new Map<SdfCharacteristic, Array<{ respond?: Uint8Array; fail?: Error }>>();
+	private writeQueue = new Map<
+		SdfCharacteristic,
+		Array<{ respond?: Uint8Array | Uint8Array[]; fail?: Error }>
+	>();
 	private subscribers = new Map<SdfCharacteristic, Array<(data: Uint8Array) => void>>();
 	private disconnectCallbacks: Array<() => void> = [];
 	written: Array<{ characteristic: SdfCharacteristic; data: Uint8Array }> = [];
@@ -24,7 +27,7 @@ export class FakeTransport implements BleTransport {
 	/** Script what the next write to `characteristic` triggers or fails with. */
 	scriptWrite(
 		characteristic: SdfCharacteristic,
-		response: { respond?: Uint8Array; fail?: Error }
+		response: { respond?: Uint8Array | Uint8Array[]; fail?: Error }
 	): this {
 		const list = this.writeQueue.get(characteristic) ?? [];
 		list.push(response);
@@ -67,7 +70,11 @@ export class FakeTransport implements BleTransport {
 		if (!scripted) return;
 		if (scripted.fail) throw scripted.fail;
 		if (scripted.respond) {
-			for (const cb of this.subscribers.get(characteristic) ?? []) cb(scripted.respond);
+			// An array delivers several notifications in order, so a test can
+			// replay a stale reply arriving ahead of the real one.
+			for (const data of [scripted.respond].flat()) {
+				for (const cb of this.subscribers.get(characteristic) ?? []) cb(data);
+			}
 		}
 	}
 

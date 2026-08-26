@@ -216,7 +216,7 @@ export const cases = [
 			'After END: "Verifying and installing" then the expected disconnect is treated as success (presumed-success), not an error.',
 			'After resume: BEGIN returns the device-held offset and the transfer continues from there, not from zero.',
 			'The device boots the new firmware after completion.',
-			'Behaviour fix vs the legacy app (review task 8.6): a chunk write that draws no response is reported as a timeout and retried from the same offset - the chunk size is NOT halved on a timeout, only on a genuine over-MTU write rejection.'
+			'Behaviour fix vs the legacy app (review tasks 8.6/9.1): a chunk write that draws no response is NOT re-sent and does NOT halve the chunk size - the app re-sends BEGIN and continues from the offset the device reports. Halving still happens on a genuine over-MTU write rejection.'
 		]
 	}
 ];

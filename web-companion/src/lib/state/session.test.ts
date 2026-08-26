@@ -65,39 +65,71 @@ describe('config status separation (8.3)', () => {
 });
 
 describe('OTA chunk timeout vs over-MTU rejection (8.6)', () => {
-	it('a response timeout retries the same offset without halving the chunk size', async () => {
+	it('a response timeout resyncs from the device offset instead of re-sending the chunk', async () => {
 		vi.useFakeTimers();
 		vi.stubGlobal('confirm', () => true);
 
 		const t = new FakeTransport();
 		await session.connect(() => t);
 
-		// BEGIN -> ready at offset 0; first CHUNK gets NO response (timeout);
-		// the retry is acknowledged having consumed the whole 200-byte image;
-		// END -> success.
+		// BEGIN -> ready at 0; the first CHUNK draws no response (its ack is
+		// lost, though the device DID write the bytes); the resync BEGIN is
+		// answered by the late ack first and then by ready at 180.
 		t.scriptWrite('ota', { respond: jsonBytes({ status: 'ready', offset: 0 }) });
-		t.scriptWrite('ota', {}); // timeout
+		t.scriptWrite('ota', {}); // no response -> timeout
+		t.scriptWrite('ota', {
+			respond: [
+				jsonBytes({ status: 'chunk_ack', offset: 180 }), // stale, must be dropped
+				jsonBytes({ status: 'ready', offset: 180 })
+			]
+		});
 		t.scriptWrite('ota', { respond: jsonBytes({ status: 'chunk_ack', offset: 200 }) });
 		t.scriptWrite('ota', { respond: jsonBytes({ status: 'success' }) });
 
 		const image = new Uint8Array(200).fill(0xab);
-		const transfer = session.startOta(new File([image], 'firmware.bin', { type: 'application/octet-stream' }));
-
-		// The 10 s response timeout fires, the same chunk is retried, the
-		// retry is acknowledged, and END completes - all within this advance.
+		const transfer = session.startOta(
+			new File([image], 'firmware.bin', { type: 'application/octet-stream' })
+		);
 		await vi.advanceTimersByTimeAsync(10_000);
 		await transfer;
 
-		// Chunk payloads: BEGIN(5) + CHUNK(1+180) twice + END(1). The retried
-		// chunk is the SAME SIZE at the SAME offset - the timeout neither
-		// halved the chunk size nor advanced past the unconfirmed data.
-		const chunkWrites = t.written.filter((w) => w.characteristic === 'ota');
-		expect(chunkWrites).toHaveLength(4);
-		expect(chunkWrites[1].data.length).toBe(181);
-		expect(chunkWrites[2].data.length).toBe(181);
-		expect([...chunkWrites[1].data]).toEqual([...chunkWrites[2].data]);
-		expect(chunkWrites[3].data.length).toBe(1);
+		const writes = t.written.filter((w) => w.characteristic === 'ota');
+		// BEGIN(5), CHUNK(1+180), BEGIN(5) again, CHUNK(1+20), END(1).
+		expect(writes.map((w) => w.data[0])).toEqual([1, 2, 1, 2, 3]);
+		// The recovery is a BEGIN, not the same chunk sent twice: a CHUNK
+		// carries no offset, so re-sending would append 180 duplicate bytes.
+		expect(writes[2].data.length).toBe(5);
+		// The device said it holds 180 of 200 bytes, so only 20 remain - and
+		// the chunk size was NOT halved on the way (that is the over-MTU path).
+		expect(writes[3].data.length).toBe(21);
 		expect(session.otaStatus).toContain('OTA transfer complete');
+	});
+
+	it('a stale chunk acknowledgement is not mistaken for the resync response', async () => {
+		vi.useFakeTimers();
+		vi.stubGlobal('confirm', () => true);
+
+		const t = new FakeTransport();
+		await session.connect(() => t);
+
+		t.scriptWrite('ota', { respond: jsonBytes({ status: 'ready', offset: 0 }) });
+		t.scriptWrite('ota', {}); // timeout
+		// Only the stale ack comes back: the resync must keep waiting for a
+		// `ready` rather than resuming from a chunk acknowledgement, so this
+		// BEGIN times out too and the transfer reports the failure.
+		t.scriptWrite('ota', { respond: jsonBytes({ status: 'chunk_ack', offset: 180 }) });
+
+		const image = new Uint8Array(200).fill(0xab);
+		const transfer = session.startOta(
+			new File([image], 'firmware.bin', { type: 'application/octet-stream' })
+		);
+		await vi.advanceTimersByTimeAsync(60_000);
+		await transfer;
+
+		const writes = t.written.filter((w) => w.characteristic === 'ota');
+		// No further CHUNK was written after the unanswered resync.
+		expect(writes.filter((w) => w.data[0] === 2)).toHaveLength(1);
+		expect(session.otaStatus).toMatch(/Error/);
 	});
 
 	it('a rejected (non-timeout) chunk write still halves the chunk size', async () => {
@@ -113,25 +145,50 @@ describe('OTA chunk timeout vs over-MTU rejection (8.6)', () => {
 		t.scriptWrite('ota', { respond: jsonBytes({ status: 'success' }) });
 
 		const image = new Uint8Array(200).fill(0xab);
-		const transfer = session.startOta(new File([image], 'firmware.bin', { type: 'application/octet-stream' }));
+		const transfer = session.startOta(
+			new File([image], 'firmware.bin', { type: 'application/octet-stream' })
+		);
 		await vi.advanceTimersByTimeAsync(100);
 		await transfer;
 
 		const chunkWrites = t.written.filter((w) => w.characteristic === 'ota');
 		expect(chunkWrites).toHaveLength(4);
-		// First chunk 1+180, retry after halving is 1+90.
+		// First chunk 1+180, retry after halving is 1+90 - no BEGIN in between.
 		expect(chunkWrites[1].data.length).toBe(181);
 		expect(chunkWrites[2].data.length).toBe(91);
 	});
 });
 
 describe('dashboard import failure (8.5)', () => {
-	it('the deferred dashboard import has a {:catch} handler with a retry', () => {
-		// A rejected dynamic import must not render an empty pane. The route
-		// file cannot be mounted standalone here (full Kit context), so pin
-		// the handler's presence at source level - lint-style.
-		const page = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../routes/+page.svelte'), 'utf8');
+	it('a failed deferred import offers a reload, not a dead in-place retry', () => {
+		// A browser caches a failed module fetch, so re-importing the same
+		// specifier fails without a network request - the recovery has to be a
+		// reload. The route file cannot be mounted standalone here (it needs
+		// full Kit context), so pin the handler at source level.
+		const page = readFileSync(
+			resolve(dirname(fileURLToPath(import.meta.url)), '../../routes/+page.svelte'),
+			'utf8'
+		);
 		expect(page).toMatch(/\{:catch\}/);
-		expect(page).toMatch(/dashboardAttempt\+\+/);
+		expect(page).toMatch(/location\.reload\(\)/);
+	});
+});
+
+describe('test isolation covers the whole store', () => {
+	it('resetSessionForTests resets every field the store declares', () => {
+		const here = dirname(fileURLToPath(import.meta.url));
+		const store = readFileSync(resolve(here, './session.svelte.ts'), 'utf8');
+		const reset = readFileSync(resolve(here, '../testing/session-reset.ts'), 'utf8');
+
+		const classBody = store.slice(
+			store.indexOf('class SessionStore {'),
+			store.indexOf('export const session =')
+		);
+		const declared = [...classBody.matchAll(/^\t(?:private\s+)?(\w+)\s*[:=]/gm)].map((m) => m[1]);
+		const cleared = new Set([...reset.matchAll(/^\ts\.(\w+)/gm)].map((m) => m[1]));
+
+		// A field added to the store without a line here would leak between
+		// tests, which is exactly what the reset exists to prevent.
+		expect(declared.filter((name) => !cleared.has(name))).toEqual([]);
 	});
 });

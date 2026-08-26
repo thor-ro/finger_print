@@ -91,3 +91,15 @@ Findings from the post-application review of the implemented change
 - [x] 8.6 Separate an OTA chunk response timeout from an over-MTU rejection: a timeout should be reported as a timeout and resumed, not answered by halving the chunk size (carried over faithfully from the legacy app, so a behaviour fix rather than a regression — record it in the parity notes)
 - [x] 8.7 Isolate component tests from the shared session singleton: reset it between tests so ordering cannot mask a failure
 - [x] 8.8 Re-run the full gate after 8.1-8.7 and update `gate-evidence.md` with the corrected budget figures
+
+## 9. Review Fixes, Round 2
+
+Findings from the review of section 8 (2026-08-26). 9.1 is a correctness bug
+in the code written for 8.6; 9.2 is the recovery it depends on.
+
+- [x] 9.1 Stop re-sending an unacknowledged OTA chunk: a CHUNK carries no offset, so a device that wrote the chunk and lost only its acknowledgement would append the same bytes twice and, since the client trusts `ack.offset`, skip an equal stretch of the image. Re-issue BEGIN instead - the firmware answers a size-matching BEGIN as a resume with its confirmed offset (`sdf_ble_companion_ota.c:126-137`) - and continue from there
+- [x] 9.2 Discard a late chunk acknowledgement that arrives while the resync BEGIN is pending, so the transfer cannot run a chunk behind its own responses for the rest of the upload
+- [x] 9.3 Replace the dashboard's in-place Retry, which cannot work because a browser caches a failed module fetch, with a reload, and say in the copy that reconnecting is needed
+- [x] 9.4 Derive the user-management outcome list in the tests from `sdf_services_um_outcome_name()` in the firmware source, so a new firmware outcome fails the companion's tests instead of reaching users as a raw token
+- [x] 9.5 Assert that `resetSessionForTests()` covers every field the store declares, so the hand-maintained reset cannot drift
+- [x] 9.6 Prove each new assertion red before green and record it in `gate-evidence.md`; re-measure both budgets

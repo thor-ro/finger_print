@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
 	UM_RESULT_MESSAGES,
@@ -46,20 +49,27 @@ describe('reply decoding and classification', () => {
 	});
 });
 
+/**
+ * The outcome names sdf_services_um_outcome_name() can put on the wire, read
+ * from the firmware source so the companion's table cannot silently fall
+ * behind it.
+ */
+function firmwareOutcomeNames(): string[] {
+	const source = resolve(
+		dirname(fileURLToPath(import.meta.url)),
+		'../../../../firmware/components/sdf_services/src/sdf_services.c'
+	);
+	const text = readFileSync(source, 'utf8');
+	const start = text.indexOf('const char *sdf_services_um_outcome_name');
+	if (start < 0) throw new Error('sdf_services_um_outcome_name() not found in the firmware source');
+	const body = text.slice(start, text.indexOf('\n}', start));
+	return [...new Set([...body.matchAll(/return "(\w+)";/g)].map((match) => match[1]))];
+}
+
 describe('refusal reasons map to distinct messages', () => {
-	// Every outcome sdf_services_um_outcome_name() can emit on the wire.
-	const reasons = [
-		'not_found',
-		'id_occupied',
-		'last_admin',
-		'name_taken',
-		'busy',
-		'denied',
-		'timeout',
-		'invalid',
-		'failed',
-		'unavailable'
-	];
+	// Read from the firmware source rather than copied by hand: a new outcome
+	// there must fail this test instead of reaching users as a raw token.
+	const reasons = firmwareOutcomeNames().filter((name) => name !== 'ok');
 
 	it('every named refusal has its own message', () => {
 		for (const reason of reasons) {
