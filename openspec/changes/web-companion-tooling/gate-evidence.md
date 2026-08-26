@@ -25,25 +25,56 @@ Three rules, each proven RED:
 
 GREEN: `lint OK (30 files scanned)`.
 
-## Unit tests (task 4.3)
+## Unit tests (task 4.3, extended by 8.3-8.7)
 
 - RED: temporary `src/failing.test.ts` asserting `1 === 2`
-  → `× deliberate failure`. Removed; GREEN: `58 passed (58)`.
+  → `× deliberate failure`. Removed; GREEN: `65 passed (65)`.
+- 8.3: config read/apply report in `configStatus` and leave `otaStatus`
+  untouched (store-level and rendered-level assertions).
+- 8.4: every firmware outcome (`sdf_services_um_outcome_name()`'s eleven
+  values incl. `failed` and `unavailable`) maps to its own message; a test
+  asserts no device outcome reaches the user as a raw token.
+- 8.5: source-level pin that the dashboard's deferred import has a
+  `{:catch}` with a retry.
+- 8.6: a chunk response timeout retries the SAME chunk at the SAME size
+  (payload bytes compared), while a rejected write still halves the chunk
+  size — both proven against the session store with a scripted transport
+  and fake timers. The timeout-vs-over-MTU split is a deliberate behaviour
+  fix vs the legacy app, recorded in the HW-6.8 parity case.
+- 8.7: the session singleton is reset between tests via the test-only
+  `resetSessionForTests()` helper (`src/lib/testing/session-reset.ts`),
+  which lives outside the store class so it never ships in the bundle.
 
-## Bundle budget (tasks 4.4)
+## Bundle budget (tasks 4.4, 8.1, 8.2)
 
-Declared in `web-companion/budget.json`: **45 KB gzip** initial load
-(`initialLoadGzipBytes: 46080`), per design.md's initial landing budget.
+Declared in `web-companion/budget.json`, with the never-raise rule recorded
+in `design.md`: a re-measurement re-declares
+`min(measured + headroom, previous limit)` — a budget change that loosens
+the limit is a defect.
 
 - RED: budget temporarily set to 1000 bytes →
-  `budget: 1.0 KB   measured: 44.4 KB (45458 bytes)` /
   `budget EXCEEDED by 44458 bytes`, exit 1.
-- GREEN measured from the built output (`build/index.html` + every
-  script/stylesheet it references, gzip -9): **44.4 KB** locally — passes with
-  the dashboard view split into a lazily-loaded chunk.
-- First real CI build (run 32862110964, `BASE_PATH=/finger_print`) measured
-  **45 608 bytes**; per task 5.4 the declared budget was tightened to
-  **54 729 bytes (measured + 20 %)**.
+- **8.1 correction:** the original ratchet wrongly RAISED the initial budget
+  from 46 080 to 54 729 bytes. Re-declared at
+  `min(45 608 × 1.1, 46 080) = 46 080 bytes`.
+- **8.2:** the lazily loaded dashboard weight is measured separately now:
+  `totalLoadGzipBytes` covers the initial load plus every deferred immutable
+  asset (the dashboard chunk and its dependencies). RED proof for the new
+  limit: `totalLoadGzipBytes` temporarily set to 1000 →
+  `total-load budget EXCEEDED by 52795 bytes`, exit 1.
+- GREEN after the review fixes (local build, gzip -9):
+  **initial 46 019 / 46 080 bytes**, **total 53 815 / 55 296 bytes**.
+  Getting back under the capped initial budget required trimming: the test
+  reset helper was moved out of the store class into a test-only module
+  (`src/lib/testing/session-reset.ts`) so it never ships, and the CSP
+  comment in `app.html` was shortened.
+
+  > **Correction (2026-08-26):** that step *raised* the budget — 46 080 ->
+  > 54 729 — leaving ~9 KB of unguarded growth room, the opposite of the
+  > ratchet design.md describes. Task 5.4 has been reworded (measured
+  > + 10 %, capped at the previous declared value) and task 8.1 re-declares
+  > the number. The measured figure also covers the shell only: the
+  > dashboard is a deferred chunk, so task 8.2 adds a budget for it.
 
 ## Red-deploy proof (task 5.2)
 

@@ -73,6 +73,10 @@ A maximum transferred size for the app's initial load — its HTML, CSS and Java
 
 Exceeding the declared budget SHALL fail the build rather than emit a warning.
 
+Code that the app defers to a lazily loaded chunk SHALL also be covered by a declared budget, so that moving weight behind a deferred import reduces the measured initial load without escaping measurement.
+
+Recording a measurement SHALL NOT raise a declared budget. A budget may be tightened at any time; raising one SHALL be a deliberate, separately justified change rather than a by-product of measuring what the build currently produces.
+
 #### Scenario: Budget is reviewable
 
 - **WHEN** the budget is changed
@@ -88,6 +92,18 @@ Exceeding the declared budget SHALL fail the build rather than emit a warning.
 
 - **WHEN** the budget check runs
 - **THEN** it measures the compressed size of the assets the browser actually downloads on first load, not the size of the source files
+
+#### Scenario: Deferred code is measured too
+
+- **WHEN** part of the interface is moved behind a lazily loaded import
+- **THEN** that chunk is measured against a declared budget of its own
+- **AND** the total the app loads to reach its main view remains bounded by a declared figure
+
+#### Scenario: Measuring does not loosen the gate
+
+- **WHEN** a measured size is recorded after a build
+- **THEN** the declared budget is left unchanged or tightened
+- **AND** it is not raised to sit above the size just measured
 
 ### Requirement: Device-Supplied Values Are Escaped By The Rendering Layer
 
@@ -163,20 +179,39 @@ The toolchain SHALL provide a local development server that serves the app over 
 
 The rebuilt app SHALL satisfy every requirement of the `web-companion-app` capability. The rebuild SHALL NOT change user-facing behaviour beyond what those requirements state, and SHALL NOT change the BLE protocol or any device-side contract.
 
-The legacy hand-written assets SHALL be removed only after the rebuilt app has been verified against a physical device across the flows that cannot be covered automatically: the first-time setup wizard including resume after reconnect, login, each user-management verb with real fingerprint scans, and an OTA transfer including a mid-transfer disconnect and resume.
+The rebuilt app SHALL be verified against a physical device across the flows that cannot be covered automatically: the first-time setup wizard including resume after reconnect, login, each user-management verb with real fingerprint scans, and an OTA transfer including a mid-transfer disconnect and resume. The results of that verification SHALL be recorded in the repository, per flow, stating what was exercised and what was observed.
 
-#### Scenario: Parity verified before the switch
+Where the deployment is switched to the built output, or the legacy hand-written assets are removed, before that verification is complete, the change SHALL record which flows remain unverified and that the residual risk was accepted. The verification SHALL be completed before the change is archived, so that no unverified claim of parity is written into the project's specifications.
 
-- **WHEN** the deployment is switched to publish the built output
-- **THEN** the hardware verification of the wizard, login, user-management verbs and OTA transfer has been completed and recorded
+#### Scenario: Parity results are recorded per flow
+
+- **WHEN** the hardware verification is performed
+- **THEN** the outcome of each named flow is recorded in the repository
+- **AND** a flow that failed is fixed and re-verified rather than recorded as passed
+
+#### Scenario: Switching ahead of verification is recorded as a deviation
+
+- **WHEN** the deployment is switched to the built output or the legacy assets are removed while hardware verification is still outstanding
+- **THEN** the change records which flows remain unverified and that the residual risk was accepted
+- **AND** the change is not archived until those flows have been verified and recorded
 
 #### Scenario: Protocol unchanged
 
 - **WHEN** the rebuilt app connects to a device running firmware that the legacy app supported
 - **THEN** the session, authentication, user management and OTA transfer succeed without any firmware change
 
-#### Scenario: Legacy assets removed after the switch
+#### Scenario: Legacy assets are not left as a second copy
 
-- **WHEN** the rebuild has been verified and deployment publishes the built output
+- **WHEN** deployment publishes the built output
 - **THEN** the hand-written legacy script and page are removed from the repository
 - **AND** they are not left as a second, unbuilt copy of the app
+
+### Requirement: Deferred Code Loading Fails Visibly
+
+Where the app defers part of its interface to a lazily loaded chunk, a failure to load that chunk SHALL be reported to the user as a failure, with a way to retry. The app SHALL NOT render an empty or partial view when a deferred chunk fails to load.
+
+#### Scenario: A chunk that fails to load is reported
+
+- **WHEN** a lazily loaded part of the interface cannot be fetched
+- **THEN** the app states that the view could not be loaded
+- **AND** it offers the user a way to retry rather than showing an empty pane

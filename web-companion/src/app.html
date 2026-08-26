@@ -3,14 +3,9 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<!--
-			Strict CSP: GitHub Pages serves no custom headers, so the policy
-			travels with the document. Scripts: 'self' plus the SHA-256 of
-			SvelteKit's inline bootstrap, pinned post-build by scripts/csp.mjs
-			- no 'unsafe-inline', no 'unsafe-eval'. Styles keep 'unsafe-inline'
-			because the app shell carries a style attribute and styles cannot
-			execute script.
-		-->
+		<!-- Strict CSP; scripts/csp.mjs pins the SvelteKit bootstrap's hash
+		     into script-src post-build. Styles keep 'unsafe-inline' (the
+		     shell has a style attribute; styles cannot execute script). -->
 		<meta
 			http-equiv="Content-Security-Policy"
 			content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'"

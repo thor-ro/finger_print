@@ -38,6 +38,17 @@ export interface UmUser {
 
 export type OtaOutcome = { outcome: 'success' | 'presumed-success' } | { outcome: 'failed'; error?: string } | { outcome: 'ambiguous' };
 
+/** A chunk write was accepted but no device response arrived in time. */
+class OtaResponseTimeoutError extends Error {
+	constructor() {
+		super('Timed out waiting for device response.');
+		this.name = 'OtaResponseTimeoutError';
+	}
+}
+
+// Consecutive no-response retries allowed before the transfer gives up.
+const OTA_TIMEOUT_RETRIES = 3;
+
 class SessionStore {
 	transport: BleTransport | null = $state(null);
 
@@ -71,6 +82,7 @@ class SessionStore {
 	// --- Dashboard: config ---
 	configEntries = $state<Array<{ key: string; value: boolean | number; isEditable: boolean }>>([]);
 	configVisible = $state(false);
+	configStatus = $state('');
 
 	// --- Dashboard: enrollment panel ---
 	enrollProgressVisible = $state(false);
@@ -459,7 +471,7 @@ class SessionStore {
 
 	async readConfig(): Promise<void> {
 		try {
-			this.otaStatus = 'Reading config...';
+			this.configStatus = 'Reading config...';
 			const value = await this.transport!.read('config');
 			const config = JSON.parse(new TextDecoder().decode(value)) as Record<string, unknown>;
 			this.configEntries = Object.entries(config).map(([key, value]) => ({
@@ -468,10 +480,10 @@ class SessionStore {
 				isEditable: !['nuki_target_addr_type', 'nuki_target_addr'].includes(key)
 			}));
 			this.configVisible = true;
-			this.otaStatus = 'Config read successfully';
+			this.configStatus = 'Config read successfully';
 		} catch (err) {
 			console.error(err);
-			this.otaStatus = `Error reading config: ${(err as Error).message}`;
+			this.configStatus = `Error reading config: ${(err as Error).message}`;
 		}
 	}
 
@@ -480,10 +492,10 @@ class SessionStore {
 			const delta: Record<string, boolean | number> = {};
 			for (const entry of this.configEntries) delta[entry.key] = entry.value;
 			await this.transport!.write('config', new TextEncoder().encode(JSON.stringify(delta)));
-			this.otaStatus = 'Config applied successfully';
+			this.configStatus = 'Config applied successfully';
 		} catch (err) {
 			console.error(err);
-			this.otaStatus = `Error applying config: ${(err as Error).message}`;
+			this.configStatus = `Error applying config: ${(err as Error).message}`;
 		}
 	}
 
@@ -890,6 +902,7 @@ class SessionStore {
 
 	private async sendOtaChunks(file: Blob, imageSize: number, startOffset: number): Promise<void> {
 		let offset = startOffset;
+		let timeoutRetries = 0;
 
 		while (offset < imageSize) {
 			const range = ota.nextChunkRange(offset, imageSize, this.otaChunkSize);
@@ -902,6 +915,19 @@ class SessionStore {
 					OTA_RESPONSE_TIMEOUT_MS
 				);
 			} catch (err) {
+				if (err instanceof OtaResponseTimeoutError) {
+					// No response in time: NOT an over-MTU rejection. Halving the
+					// chunk would not help and would silently corrupt the
+					// transfer strategy - retry the same (unconfirmed) offset.
+					timeoutRetries++;
+					if (timeoutRetries > OTA_TIMEOUT_RETRIES) {
+						throw new Error(
+							`No response from the device after ${OTA_TIMEOUT_RETRIES} retries at offset ${offset}. Check the connection and start the transfer again - it will resume from the reported offset.`
+						);
+					}
+					this.otaStatus = `No response from the device - retrying from offset ${offset} (attempt ${timeoutRetries} of ${OTA_TIMEOUT_RETRIES})...`;
+					continue;
+				}
 				if (this.transport?.isConnected() && this.otaChunkSize > ota.MIN_CHUNK_SIZE) {
 					// Rejected as over-MTU: halve the chunk size and retry from
 					// the same (last confirmed) offset - do not advance offset.
@@ -912,6 +938,7 @@ class SessionStore {
 				throw err;
 			}
 
+			timeoutRetries = 0;
 			if (ack.status === 'failed') {
 				throw new Error(ack.error || 'Device reported an OTA chunk write failure.');
 			}
@@ -996,7 +1023,7 @@ class SessionStore {
 		const notificationPromise = new Promise<ota.DeviceStatus>((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.otaPendingNotification = null;
-				reject(new Error('Timed out waiting for device response.'));
+				reject(new OtaResponseTimeoutError());
 			}, timeoutMs);
 
 			this.otaPendingNotification = {
@@ -1012,6 +1039,10 @@ class SessionStore {
 				}
 			};
 		});
+		// The write's catch below can reject this promise before the caller's
+		// await attaches a handler; a no-op catch here keeps that rejection
+		// from being reported as unhandled (the real await still sees it).
+		notificationPromise.catch(() => {});
 		try {
 			await this.transport!.write('ota', payload);
 		} catch (err) {
@@ -1036,6 +1067,11 @@ class SessionStore {
 			console.warn('Unsolicited OTA notification:', parsed);
 		}
 	}
+	/**
+	 * Test isolation: the store is a module singleton, so component tests
+	 * must reset it between tests. Implemented in a test-only helper
+	 * (src/lib/testing/session-reset.ts) so it never ships in the bundle.
+	 */
 }
 
 export const session = new SessionStore();

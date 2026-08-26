@@ -18,7 +18,7 @@ Every one of these is a structural property of "one script tag, no build", not a
 - **Make escaping structural.** Svelte escapes text interpolation by default; `{@html}` becomes the single audited escape hatch and is banned by lint. The class of bug that produced the user-list XSS stops being reachable.
 - **Add gates: type check, lint, unit tests, and a declared bundle budget**, all failing the build rather than warning. The budget exists because a framework's cost has to be measured, not asserted.
 - **Deploy the build output, not the source directory.** The Pages workflow gains an install-and-build step, publishes `web-companion/build`, and sets the project-site base path so assets resolve under `/finger_print/`.
-- **No new user-facing features.** This is a re-platforming: every requirement in `web-companion-app` must hold afterwards, verified against a real device before the legacy assets are deleted.
+- **No new user-facing features.** This is a re-platforming: every requirement in `web-companion-app` must hold afterwards, verified against a real device before this change is archived.
 
 ### Capabilities
 
@@ -40,4 +40,4 @@ None on the firmware side — the GATT contract is unchanged, and this change sh
 
 - **A dependency tree where there was none.** The shipped output keeps zero runtime dependencies, but the build gains a lockfile and a supply chain. Mitigated by pinning through the committed lockfile, installing with `npm ci` in CI, and keeping every dependency a devDependency.
 - **SvelteKit brings a router the app barely uses.** The companion is one page with modal-ish views. The router is paid for regardless; the budget check is there to keep that cost visible and bounded. See `design.md` for why SvelteKit is still preferred over bare Svelte + Vite.
-- **A rewrite can silently drop behaviour.** The wizard's resume logic and the OTA resume/grace-period handling are the two places where that is most likely and least visible. Parity is a task-level checklist against the existing spec, verified on hardware before deletion of the old app.
+- **A rewrite can silently drop behaviour.** The wizard's resume logic and the OTA resume/grace-period handling are the two places where that is most likely and least visible. Parity is a task-level checklist against the existing spec, verified on hardware and recorded per flow before the change is archived. Where deployment was switched ahead of that verification, the outstanding flows and the accepted risk are recorded rather than assumed away.

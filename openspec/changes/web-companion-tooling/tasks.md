@@ -45,7 +45,7 @@
 - [x] 5.1 Update `.github/workflows/deploy-web-companion.yml`: set up the pinned Node version, `npm ci`, run the gates, build, upload `web-companion/build`
 - [x] 5.2 Confirm the workflow publishes nothing when a gate fails, leaving the previously deployed site in place
 - [x] 5.3 Deploy from a branch or preview and verify against the real Pages URL that assets resolve under the project subpath and `_app/**` is present
-- [x] 5.4 Record the measured initial-load size from the first real build, then tighten the declared budget to measured + 20 %
+- [x] 5.4 Record the measured initial-load size from the first real build, then set the declared budget to measured + 10 %, capped at the previous declared budget — recording a measurement may tighten the budget but never raise it
 
 ## 6. Parity Verification (hardware)
 
@@ -57,7 +57,7 @@
 - [ ] 6.6 Self-affecting change warnings, and confirming the warning does not block the change
 - [ ] 6.7 Health view updating from notifications, with unknown shown as unknown and an assumed lock state shown as awaiting confirmation
 - [ ] 6.8 OTA transfer to completion, plus a mid-transfer disconnect with resume from the returned offset
-- [ ] 6.9 Record the parity results in the change before switching deployment
+- [ ] 6.9 Record the parity results per flow in the change; the change SHALL NOT be archived while any of 6.1-6.8 is outstanding
 
 ## 7. Legacy Removal And Docs
 
@@ -66,9 +66,28 @@
 - [x] 7.3 Check `doc/` for references to the companion as dependency-free static files and update them
 - [x] 7.4 Confirm the build output directory is git-ignored and no built assets are committed
 
-> **Note (2026-08-25):** 7.x was executed with the user's explicit decision to
-> proceed before the hardware parity checklist (6.x), accepting the residual
-> risk; the 6.x flows are covered by 58 automated protocol/component tests and
-> remain to be confirmed on hardware against the live deployment. `doc/` scan
-> (7.3) found no dependency-free/static-file claims to update — the manuals
-> reference the companion behaviourally, which is unchanged.
+> **Note (2026-08-25, revised 2026-08-26):** 7.x was executed with the user's
+> explicit decision to proceed before the hardware parity checklist (6.x),
+> accepting the residual risk; the 6.x flows are covered by 58 automated
+> protocol/component tests and remain to be confirmed on hardware against the
+> live deployment. This deviation is recorded per the capability's "Switching
+> ahead of verification is recorded as a deviation" scenario, and **6.1-6.8
+> must be completed and recorded before this change is archived** — archiving
+> with them open would write an unverified parity claim into
+> `openspec/specs/`. `doc/` scan (7.3) found no dependency-free/static-file
+> claims to update — the manuals reference the companion behaviourally, which
+> is unchanged.
+
+## 8. Review Fixes
+
+Findings from the post-application review of the implemented change
+(2026-08-26). Each is a defect against this change's own requirements.
+
+- [x] 8.1 Correct the budget ratchet: the declared budget was raised from 46 080 to 54 729 bytes when the first real measurement (45 608) was recorded. Re-declare it at measured + 10 % capped at the previous value, and state the never-raise rule in `design.md` so the next measurement cannot loosen it again
+- [x] 8.2 Declare a budget for the lazily loaded dashboard chunk as well, and report the initial load and the load-to-dashboard total separately, so weight moved behind a deferred import is still measured; verify the new limit red before green
+- [x] 8.3 Stop reporting configuration outcomes in the OTA panel: give the session a `configStatus` distinct from `otaStatus`, render it with the configuration controls, and cover it with a test that a config read leaves the firmware-update status untouched
+- [x] 8.4 Map every outcome the firmware can report — including `failed` and `unavailable`, which `sdf_services_um_outcome_name()` emits and the app currently renders as `Request failed (failed).` — and test that no device outcome reaches the user as a raw token
+- [x] 8.5 Handle a failed deferred import: give the dashboard's `{#await import(...)}` a `{:catch}` that states the view could not be loaded and offers a retry, rather than rendering nothing
+- [x] 8.6 Separate an OTA chunk response timeout from an over-MTU rejection: a timeout should be reported as a timeout and resumed, not answered by halving the chunk size (carried over faithfully from the legacy app, so a behaviour fix rather than a regression — record it in the parity notes)
+- [x] 8.7 Isolate component tests from the shared session singleton: reset it between tests so ordering cannot mask a failure
+- [x] 8.8 Re-run the full gate after 8.1-8.7 and update `gate-evidence.md` with the corrected budget figures

@@ -215,7 +215,8 @@ export const cases = [
 			'Progress advances chunk-by-chunk during upload.',
 			'After END: "Verifying and installing" then the expected disconnect is treated as success (presumed-success), not an error.',
 			'After resume: BEGIN returns the device-held offset and the transfer continues from there, not from zero.',
-			'The device boots the new firmware after completion.'
+			'The device boots the new firmware after completion.',
+			'Behaviour fix vs the legacy app (review task 8.6): a chunk write that draws no response is reported as a timeout and retried from the same offset - the chunk size is NOT halved on a timeout, only on a genuine over-MTU write rejection.'
 		]
 	}
 ];

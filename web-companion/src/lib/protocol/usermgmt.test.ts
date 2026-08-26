@@ -47,6 +47,7 @@ describe('reply decoding and classification', () => {
 });
 
 describe('refusal reasons map to distinct messages', () => {
+	// Every outcome sdf_services_um_outcome_name() can emit on the wire.
 	const reasons = [
 		'not_found',
 		'id_occupied',
@@ -55,7 +56,9 @@ describe('refusal reasons map to distinct messages', () => {
 		'busy',
 		'denied',
 		'timeout',
-		'invalid'
+		'invalid',
+		'failed',
+		'unavailable'
 	];
 
 	it('every named refusal has its own message', () => {
@@ -63,6 +66,12 @@ describe('refusal reasons map to distinct messages', () => {
 			const message = umResultMessage(reason);
 			expect(message).toBeTruthy();
 			expect(message).not.toBe(`Request failed (${reason}).`);
+		}
+	});
+
+	it('no device outcome reaches the user as a raw token', () => {
+		for (const reason of reasons) {
+			expect(umResultMessage(reason)).not.toMatch(/\(\w+\)\.$/);
 		}
 	});
 
@@ -75,10 +84,8 @@ describe('refusal reasons map to distinct messages', () => {
 		expect(umResultMessage('something_new')).toBe('Request failed (something_new).');
 	});
 
-	it('the declared table covers exactly the named reasons plus ok', () => {
-		expect(Object.keys(UM_RESULT_MESSAGES).sort()).toEqual(
-			[...reasons, 'ok'].sort()
-		);
+	it('the declared table covers exactly the firmware outcomes plus ok', () => {
+		expect(Object.keys(UM_RESULT_MESSAGES).sort()).toEqual([...reasons, 'ok'].sort());
 	});
 });
 

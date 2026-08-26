@@ -89,9 +89,13 @@ Measured baseline of the current app (gzip -9):
 
 A minimal SvelteKit client runtime plus router is on the order of 15 KB gz before any app code. Compiled Svelte components are typically smaller than the equivalent imperative DOM code, so the app's own share should come in under today's 16 KB.
 
-**Initial budget: 45 KB gzip for the initial load (HTML + CSS + JS).** That is deliberately loose for the first landing — it exists to catch a dependency being added carelessly, not to make the first commit hard. A follow-up task tightens it to *measured + 20 %* once the real figure is known, so the budget ratchets down rather than drifting up.
+**Initial budget: 45 KB gzip for the initial load (HTML + CSS + JS).** That is deliberately loose for the first landing — it exists to catch a dependency being added carelessly, not to make the first commit hard. A follow-up task tightens it once the real figure is known: *measured + 10 %, capped at the previously declared budget*. The cap is the point — a bare "measured + N %" formula raises the budget whenever the measurement lands near the limit, which is how a gate quietly stops gating. **Recording a measurement may tighten the budget; it may never raise it.** Raising it is a separate, argued change.
+
+Deferred chunks get their own declared figure. Otherwise the initial-load number can be improved by moving code behind an `import()` without the app getting any smaller for the user, and the gate measures the shell instead of the app. Two numbers: initial load, and total to reach the dashboard.
 
 The budget is checked in CI on the built output and fails the job. It is declared in a file in the repo, not buried in a workflow step, so the number is reviewable in a diff.
+
+**The budget never rises.** A re-measurement re-declares `min(measured + headroom, previous limit)` — headroom 10 % for the initial load, and the previous declared value is always a ceiling. A budget change that loosens the limit is a defect regardless of what the new measurement says; if the measured size exceeds the capped limit, the app shrinks or the gate stays red. Weight moved behind a deferred import is still measured: the deferred chunks carry their own declared limit and the initial and load-to-dashboard totals are reported separately.
 
 ## Decision: GitHub Pages base path
 
@@ -122,6 +126,8 @@ The old and new apps cannot run side by side in one page, and there is no partia
 
 Steps 1-3 add files without touching `index.html` or `app.js`, so `main` stays deployable throughout: the Pages workflow keeps publishing the directory as-is until step 5 flips it to publish `build/`. Only step 5 is a one-way door, and it is behind a hardware parity check.
 
+**What actually happened (2026-08-26):** step 5 was taken ahead of step 4 by explicit decision, accepting the residual risk on the strength of the automated protocol and component tests. The gate did not disappear — it moved to the archive boundary: the parity checklist must be completed and recorded before this change is archived, because archiving is what writes the parity claim into `openspec/specs/`. The deviation is recorded in `tasks.md` and in the capability's requirement.
+
 The rollback for step 5 is reverting one commit, which restores both the workflow and the legacy assets together.
 
 ## What stays manual
@@ -129,7 +135,7 @@ The rollback for step 5 is reverting one commit, which restores both the workflo
 Web Bluetooth cannot be driven from headless CI: there is no automatable device picker, and the flows that matter (fingerprint scans, the setup window, an OTA that reboots the device) are physical. So the test pyramid here is deliberately lopsided —
 
 - **Automated:** protocol codecs, state transitions, reply-to-message mapping, component rendering with a fake transport.
-- **Manual, on hardware, before step 5:** the full wizard on a wiped device, login, user management with real scans, an OTA transfer including a mid-transfer disconnect and resume.
+- **Manual, on hardware, before archiving:** the full wizard on a wiped device, login, user management with real scans, an OTA transfer including a mid-transfer disconnect and resume.
 
 Pretending otherwise would be the failure mode of this change. The parity checklist in `tasks.md` is the artifact that makes the manual half accountable.
 

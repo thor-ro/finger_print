@@ -44,6 +44,7 @@
 			<button class="primary-btn apply" onclick={onApply}>Apply Changes</button>
 		</div>
 	{/if}
+	<p class="status-msg">{session.configStatus}</p>
 </section>
 
 <style>

@@ -59,7 +59,8 @@ export function usersOf(data: Notification): Array<{ id: number; name?: string; 
 
 /**
  * Renders each named refusal specifically rather than as a generic failure.
- * Each reason maps to its own message; none collapse into a shared text.
+ * Every outcome the firmware can report (sdf_services_um_outcome_name())
+ * maps to its own message; none collapse into a shared text.
  */
 export const UM_RESULT_MESSAGES: Record<string, string> = {
 	ok: 'Completed.',
@@ -70,7 +71,9 @@ export const UM_RESULT_MESSAGES: Record<string, string> = {
 	busy: 'Device busy with another action - try again shortly.',
 	denied: 'Denied: the fingerprint scanned was not an admin finger.',
 	timeout: 'Timed out: no admin fingerprint was scanned on the device.',
-	invalid: 'The device rejected the request as malformed.'
+	invalid: 'The device rejected the request as malformed.',
+	failed: 'Failed: a sensor or storage operation failed on the device.',
+	unavailable: 'Unavailable: device services are not initialised - try reconnecting.'
 };
 
 const GENERIC_FAILURE_PREFIX = 'Request failed';

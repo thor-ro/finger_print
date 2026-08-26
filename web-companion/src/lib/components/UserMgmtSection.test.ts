@@ -1,9 +1,15 @@
 // @vitest-environment jsdom
 import { cleanup, render, screen } from '@testing-library/svelte';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import UserMgmtSection from '$lib/components/UserMgmtSection.svelte';
 import { session } from '$lib/state/session.svelte';
+import { resetSessionForTests } from '$lib/testing/session-reset';
 
+// The store is a module singleton: reset it between tests so ordering
+// cannot mask a failure.
+beforeEach(() => {
+	resetSessionForTests();
+});
 afterEach(cleanup);
 
 describe('user-management rendering', () => {
