@@ -62,12 +62,16 @@ the limit is a defect.
   asset (the dashboard chunk and its dependencies). RED proof for the new
   limit: `totalLoadGzipBytes` temporarily set to 1000 →
   `total-load budget EXCEEDED by 52795 bytes`, exit 1.
-- GREEN after the review fixes (local build, gzip -9):
-  **initial 46 019 / 46 080 bytes**, **total 53 815 / 55 296 bytes**.
+- GREEN after the review fixes (CI, `BASE_PATH=/finger_print` build):
+  **initial 46 015 / 46 080 bytes**, **total 53 868 / 55 296 bytes**.
   Getting back under the capped initial budget required trimming: the test
   reset helper was moved out of the store class into a test-only module
-  (`src/lib/testing/session-reset.ts`) so it never ships, and the CSP
-  comment in `app.html` was shortened.
+  (`src/lib/testing/session-reset.ts`) so it never ships, the CSP comment in
+  `app.html` was shortened, and two overly long status strings in the
+  initial chunk were tightened. The first post-fix CI run still exceeded the
+  cap by 7 bytes (the BASE_PATH bootstrap is slightly larger than the plain
+  build's); per the never-raise rule the app shrank rather than the limit
+  rising.
 
   > **Correction (2026-08-26):** that step *raised* the budget — 46 080 ->
   > 54 729 — leaving ~9 KB of unguarded growth room, the opposite of the
