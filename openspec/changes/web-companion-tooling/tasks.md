@@ -3,7 +3,7 @@
 - [x] 1.1 Add a SvelteKit + Vite project under `web-companion/` (manifest, lockfile, TypeScript config, `svelte.config.js`, `vite.config.ts`), leaving `index.html`, `app.js` and `style.css` untouched and still deployable
 - [x] 1.2 Configure `adapter-static` with the single route prerendered and no SPA fallback; confirm the build emits no server bundle
 - [x] 1.3 Set `kit.paths.base` to the project-site subpath for production builds and empty for development; drive it from an environment variable so a fork with a different repository name does not need a source edit
-- [ ] 1.4 Emit `.nojekyll` in the build output and verify the `_app` directory survives a real Pages deploy
+- [x] 1.4 Emit `.nojekyll` in the build output and verify the `_app` directory survives a real Pages deploy
 - [x] 1.5 Pin the Node.js version in the repository (`.nvmrc` or equivalent) and record install/build/dev/test commands in `web-companion/README.md`
 - [ ] 1.6 Confirm `npm run dev` serves over a secure context and that the browser offers the Bluetooth device picker from `localhost`
 
@@ -38,14 +38,14 @@
 - [x] 4.3 Add Vitest and wire `npm test` to run headlessly
 - [x] 4.4 Add the bundle budget: declare the limit in a repository file, measure the compressed initial load from the built output, fail on overrun, and print measured-vs-budget either way
 - [x] 4.5 Verify each gate red before green — a deliberate type error, lint violation, failing test and oversized bundle each fail the workflow — and record the evidence
-- [ ] 4.6 Add a strict CSP via `<meta http-equiv>` (`script-src 'self'`, no `unsafe-inline`, no `unsafe-eval`) and confirm the app runs clean under it
+- [x] 4.6 Add a strict CSP via `<meta http-equiv>` (`script-src 'self'`, no `unsafe-inline`, no `unsafe-eval`) and confirm the app runs clean under it
 
 ## 5. Deployment
 
 - [x] 5.1 Update `.github/workflows/deploy-web-companion.yml`: set up the pinned Node version, `npm ci`, run the gates, build, upload `web-companion/build`
-- [ ] 5.2 Confirm the workflow publishes nothing when a gate fails, leaving the previously deployed site in place
-- [ ] 5.3 Deploy from a branch or preview and verify against the real Pages URL that assets resolve under the project subpath and `_app/**` is present
-- [ ] 5.4 Record the measured initial-load size from the first real build, then tighten the declared budget to measured + 20 %
+- [x] 5.2 Confirm the workflow publishes nothing when a gate fails, leaving the previously deployed site in place
+- [x] 5.3 Deploy from a branch or preview and verify against the real Pages URL that assets resolve under the project subpath and `_app/**` is present
+- [x] 5.4 Record the measured initial-load size from the first real build, then tighten the declared budget to measured + 20 %
 
 ## 6. Parity Verification (hardware)
 
@@ -61,7 +61,14 @@
 
 ## 7. Legacy Removal And Docs
 
-- [ ] 7.1 Delete `web-companion/app.js`, `web-companion/index.html` and `web-companion/style.css` once 5.x and 6.x are complete
-- [ ] 7.2 Rewrite `web-companion/README.md` for the build-based workflow, keeping the firmware-compatibility floor and browser-support notes intact
-- [ ] 7.3 Check `doc/` for references to the companion as dependency-free static files and update them
-- [ ] 7.4 Confirm the build output directory is git-ignored and no built assets are committed
+- [x] 7.1 Delete `web-companion/app.js`, `web-companion/index.html` and `web-companion/style.css` once 5.x and 6.x are complete
+- [x] 7.2 Rewrite `web-companion/README.md` for the build-based workflow, keeping the firmware-compatibility floor and browser-support notes intact
+- [x] 7.3 Check `doc/` for references to the companion as dependency-free static files and update them
+- [x] 7.4 Confirm the build output directory is git-ignored and no built assets are committed
+
+> **Note (2026-08-25):** 7.x was executed with the user's explicit decision to
+> proceed before the hardware parity checklist (6.x), accepting the residual
+> risk; the 6.x flows are covered by 58 automated protocol/component tests and
+> remain to be confirmed on hardware against the live deployment. `doc/` scan
+> (7.3) found no dependency-free/static-file claims to update — the manuals
+> reference the companion behaviourally, which is unchanged.

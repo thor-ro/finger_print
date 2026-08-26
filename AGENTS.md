@@ -53,6 +53,10 @@ The chip-target run is not yet clean: four suites assert host-environment behavi
 
 Switching `test_runner` between the two targets rewrites `dependencies.lock` and `managed_components/` in place, since the component manager keys both to the project directory rather than the build directory. Expect churn in `dependencies.lock`, and run `idf.py build` for the `linux` target last so the committed lock stays on the CI target.
 
+## Web Companion — `web-companion/` (SvelteKit, not firmware)
+
+The companion is a SvelteKit + Vite single-page app compiled to prerendered static assets and deployed to GitHub Pages (`https://thor-ro.github.io/finger_print/`) by `.github/workflows/deploy-web-companion.yml`. Node version is pinned in `.nvmrc`; `npm ci` from the committed lockfile; `npm run gate` chains the CI gates (svelte-check, lint, Vitest, gzip bundle budget from `budget.json`). Key invariants enforced by `web-companion/scripts/lint.mjs`: no `{@html}` under `src/`, `src/lib/protocol/` stays DOM-free, and `navigator.bluetooth` may only appear in `src/lib/transport/ble.ts`. `scripts/csp.mjs` (post-build) pins the SHA-256 of SvelteKit's inline bootstrap into the CSP meta; production builds need `BASE_PATH=/finger_print`. See `web-companion/README.md`.
+
 ## OTA Signature Gate (Layer 1) — `firmware/ota_signature_gate`
 
 Hardware-free CI gate proving OTA signature verification is active (replaces the deleted host-side crypto tests). Builds the fixture, splices pre-staged test images into a merged flash image, boots under esp-emu, and drives `sdf_ota_begin/write/verify_and_commit` over three cases: tampered → reject, foreign-key → reject, valid → commit. CI runs it as the `ota-signature (esp32c6 — esp-emu)` job.
