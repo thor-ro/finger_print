@@ -18,6 +18,10 @@ firmware/ota_signature_gate/build*
 firmware/ota_signature_gate/managed_components
 firmware/ota_signature_gate/sdkconfig
 firmware/ota_signature_gate/sdkconfig.old
+firmware/lockout_reset_gate/build*
+firmware/lockout_reset_gate/managed_components
+firmware/lockout_reset_gate/sdkconfig
+firmware/lockout_reset_gate/sdkconfig.old
 **/__pycache__/
 breakboard
 doc/UART_Fingerprint_Sensor_(C)_Demo

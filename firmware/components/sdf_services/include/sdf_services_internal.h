@@ -43,6 +43,24 @@ typedef struct {
   uint32_t failed_attempt_count;
   int64_t failed_attempt_window_start_us;
   int64_t lockout_until_us;
+  /* Believed state of the persisted NVS lockout record
+   * (persist-biometric-lockout): true from lockout entry or boot restore
+   * until a "cleared" write lands. The successful-match path consults it so
+   * it can heal a stale armed record with a single write without putting an
+   * NVS write on every unlock - matching is impossible while a live lockout
+   * is armed, so this flag is only ever true there if the record outlived
+   * its RAM deadline (e.g. the armed episode expired before the first scan
+   * of a boot). Guarded by lock like the other lockout fields. */
+  bool lockout_persist_armed;
+  /* Set by init's restore when the persisted record was armed; consumed by
+   * the first match cycle, which emits SECURITY_LOCKOUT at CRITICAL from
+   * outside the lock. The emission cannot ride init itself (the event router
+   * is not guaranteed running yet), but skipping it entirely would leave
+   * subscribers reporting no alarm while scans are refused, and would pair
+   * the eventual NORMAL clear with no CRITICAL - breaking the
+   * security-event-unification pairing both the alarm state and the audit
+   * trail depend on. */
+  bool lockout_restore_announce_pending;
   sdf_services_admin_action_t pending_admin_action;
   int64_t pending_admin_action_start_us;
   /* Target carried by the remote user-management actions DELETE_USER,
@@ -129,6 +147,20 @@ esp_err_t sdf_admin_task_init_queue(void);
 void sdf_admin_task_deinit_queue(void);
 esp_err_t sdf_enroll_task_init_queue(void);
 void sdf_enroll_task_deinit_queue(void);
+
+/* Runs one match cycle synchronously on the caller's task - the exact body
+ * sdf_match_task executes per dispatched event. Host (linux target) tests
+ * use it, behind the mock UART's scripted sensor replies, to drive the
+ * lockout persistence transitions (entry / expiry / successful-match clear)
+ * without hardware. Not called by production code. */
+void sdf_match_task_run_cycle_for_test(void);
+
+/* Boot-time lockout restore core (persist-biometric-lockout), called by
+ * sdf_services_init() with s_state.lock held and before any task exists.
+ * now_us is injected so host tests can pin the "full fresh duration from
+ * boot" arithmetic deterministically. Missing/unreadable records resolve to
+ * "not locked out"; the unreadable case is logged. */
+void sdf_services_restore_lockout_locked(int64_t now_us);
 
 /* Button handling */
 esp_err_t sdf_button_init(void);

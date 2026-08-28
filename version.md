@@ -2,6 +2,22 @@
 
 This file tracks firmware-level changes and maps them to project versions.
 
+## Unreleased
+
+### Security
+- **Biometric lockout now survives a reset (`persist-biometric-lockout`).** The lockout was held only in RAM, so power-cycling the device cleared it and the rate limit could be bypassed indefinitely by resetting between bursts. The armed state is now latched in NVS and restored in `sdf_services_init()` before the match task exists. A restored lockout re-arms a *full* `lockout_duration_ms` measured from boot rather than a remainder: elapsed wall-clock time is not recoverable across a power loss (no battery-backed RTC, and `esp_timer_get_time()` restarts at zero), so any persisted deadline would always read as already expired. It is written at the two transitions of an episode — entry, and clear by expiry or successful match — never per failed attempt, so an attacker pacing failed scans cannot turn the control into flash wear. A restored lockout announces itself as a CRITICAL `SECURITY_LOCKOUT`, keeping the alarm/clear pairing the companion status and the audit trail both depend on. A missing or unreadable record fails open and is logged; `sdf_storage_erase_all()` clears the latch, so a factory reset still works.
+- The dead `failed_attempts` field is removed from `sdf_power_retention_t` rather than populated: a deep-sleep-only mechanism alongside the NVS one would be two sources of truth for one control, with the weaker covering the case an attacker chooses.
+
+### Fixed
+- **Chip-target task-watchdog introspection was stubbed out.** `sdf_platform_time_wdt_is_registered()` returned a constant `true` on every non-`linux` target, `sdf_platform_time_wdt_has_warned()` a constant `false` and `sdf_platform_time_wdt_get_warning_count()` a constant `0`, so on real hardware the WDT accessors reported fiction. `is_registered()` now queries `esp_task_wdt_status()`, and the other two read the warned-task table the chip path already maintained. This made three previously-failing on-chip tests pass and is the difference between the WDT accessors being observable and being decorative.
+- **The compiled firmware version could be stale.** `firmware/cmake/version.cmake` evaluates `git describe` at CMake *configure* time, so an incremental `idf.py build` into an existing build directory kept stamping the version captured when that directory was first configured — an image built at one commit could report another. The version files under `.git` are now `CMAKE_CONFIGURE_DEPENDS`, forcing a re-configure when HEAD, the index or the reflog moves. This matters because the string reaches `esp_app_desc` and `sdf_ota_version_compare()`'s upgrade/downgrade gate.
+- **`sdf_app` did not compile for the chip target.** `sdf_app_test_exports.inc` still called `sdf_app_map_lock_state_to_zigbee()`, which had been split into `sdf_app_map_nuki_state_to_device()` + `sdf_app_map_device_lock_state_to_zigbee()`; the shim now composes the two, which reproduces the original mapping. The host target never caught this because it does not compile `sdf_app`.
+
+### Added
+- `test_sdf_platform_sleep_retention_chip_roundtrip` — asserts a real RTC-retention write/read round-trip on chip, covering what the linux `..._sleep_retention_linux_noops` test can only stub.
+- 15 tests for the persisted lockout: the storage latch's round-trip, absent/cleared/erase-all states and null guard; and, driven through the real match-cycle body against the host mock sensor, lockout entry persisting, sub-threshold attempts writing nothing, expiry and successful-match clearing, restore arming a full duration from boot, restore refusing to scan, absent/wrong-typed/unreadable records permitting it, and the restored lockout's CRITICAL announcement being emitted exactly once.
+- `firmware/lockout_reset_gate` + `scripts/run_lockout_reset_gate.sh` — a hardware-free esp-emu gate for the one claim no unit test on either target can make: that a lockout armed before a device reset is still in force after it. One image, two boots separated by a real `esp_restart()`; boot 2 asserts the restore re-armed a full duration from that boot, that a match cycle refuses to reach the sensor, and that the restored lockout announces itself once as a CRITICAL `SECURITY_LOCKOUT`.
+
 ## 0.2.2 — 2026-08-20
 
 ### Changed

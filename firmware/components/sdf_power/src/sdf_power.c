@@ -689,7 +689,6 @@ esp_err_t sdf_power_prepare_deep_sleep(sdf_power_retention_t *state) {
   state->zigbee_join_state = sdf_protocol_zigbee_is_ready() ? 1 : 0;
   state->sensor_power_state = 0;
   state->enrolled_user_count = 0;
-  state->failed_attempts = 0;
 
   state->crc16 = sdf_power_crc16(state, sizeof(sdf_power_retention_t) - sizeof(state->crc16));
 

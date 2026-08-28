@@ -32,7 +32,6 @@ typedef struct {
     uint8_t zigbee_join_state;
     uint8_t sensor_power_state;
     uint8_t enrolled_user_count;
-    uint32_t failed_attempts;
     int64_t last_activity_us;
     int64_t next_checkin_us;
     uint16_t crc16;

@@ -113,6 +113,20 @@ esp_err_t sdf_storage_setup_complete_save(bool complete);
 esp_err_t sdf_storage_setup_complete_load(bool *complete_out);
 esp_err_t sdf_storage_setup_complete_clear(void);
 
+/* Biometric-lockout latch (persist-biometric-lockout). Written only at the
+ * two transitions of a lockout episode - entry and clear - never per failed
+ * attempt, bounding flash wear to two writes per episode. The record is a
+ * flag, deliberately NOT a deadline: esp_timer_get_time() restarts near 0
+ * across a power loss, so any persisted deadline would always read as
+ * expired; the caller re-arms a fresh duration from boot instead.
+ * Unlike the setup latch above, an absent key is reported as
+ * ESP_ERR_NOT_FOUND rather than translated to ESP_OK/false: "never locked
+ * out" and "lockout was cleared" are the same state for every caller here,
+ * so load() keeps them distinguishable from a genuine read failure. */
+esp_err_t sdf_storage_lockout_save(bool armed);
+esp_err_t sdf_storage_lockout_load(bool *armed_out);
+esp_err_t sdf_storage_lockout_clear(void);
+
 /* Admission records: the identities that were deliberately granted
  * allow-list trust (setup completion or a pairing-window admit), stored as
  * addr type plus 6-byte address like sdf_storage_ble_target_save(). Sized to

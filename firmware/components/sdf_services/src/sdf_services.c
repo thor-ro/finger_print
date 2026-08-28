@@ -1021,6 +1021,35 @@ static void sdf_services_mark_uninitialized(void) {
   }
 }
 
+void sdf_services_restore_lockout_locked(int64_t now_us) {
+  /* Called with s_state.lock held and before any task exists (see
+   * sdf_services_init). Reads the persisted flag - not a deadline - because
+   * esp_timer_get_time() restarts near 0 across power loss (D1). A "not
+   * found" record is the normal fresh-device case; any other read failure
+   * fails open and is logged so an NVS glitch never bricks biometric entry
+   * (D4). Time, when needed, is always a full lockout_duration_ms from
+   * boot (D2). NVS read is blocking but this is boot-only and lock-owned
+   * by definition; runtime persistence (the writes) stays outside the lock
+   * as D3 requires. */
+  bool armed = false;
+  esp_err_t err = sdf_storage_lockout_load(&armed);
+  if (err == ESP_OK && armed) {
+    s_state.lockout_until_us = now_us + ((int64_t)s_state.config.lockout_duration_ms * 1000LL);
+    s_state.failed_attempt_count = 0;
+    s_state.failed_attempt_window_start_us = 0;
+    s_state.lockout_persist_armed = true;
+    s_state.lockout_restore_announce_pending = true;
+  } else if (err == ESP_ERR_NOT_FOUND) {
+    /* Never locked out, or cleared - remain not locked out. Fields already
+     * zeroed by the caller. */
+  } else if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Failed to load lockout state, treating as not locked out: %s",
+             esp_err_to_name(err));
+  } else {
+    /* err == ESP_OK && !armed -> cleared record, also not locked out. */
+  }
+}
+
 esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   if (config == NULL || config->match_poll_interval_ms == 0 ||
       config->match_cooldown_ms == 0 || config->failed_attempt_threshold == 0 ||
@@ -1059,6 +1088,14 @@ esp_err_t sdf_services_init(const sdf_services_config_t *config) {
   s_state.failed_attempt_count = 0;
   s_state.failed_attempt_window_start_us = 0;
   s_state.lockout_until_us = 0;
+  s_state.lockout_persist_armed = false;
+  s_state.lockout_restore_announce_pending = false;
+  /* Restore any armed lockout from before the reset/power-loss. Reads the
+   * persisted flag alongside the enrolled-user cache, still under the same
+   * lock and before any task exists so the first scan cannot race it (D4).
+   * The call never writes NVS - only the later entry/clear sites do (D3) -
+   * and it re-arms a full duration from boot, not a stored deadline (D1/D2). */
+  sdf_services_restore_lockout_locked(esp_timer_get_time());
   s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
   s_state.pending_admin_action_start_us = 0;
   s_state.permission_change_pending = false;
@@ -1767,6 +1804,8 @@ esp_err_t sdf_services_reset_state(void) {
   s_state.failed_attempt_count = 0;
   s_state.lockout_until_us = 0;
   s_state.failed_attempt_window_start_us = 0;
+  s_state.lockout_persist_armed = false;
+  s_state.lockout_restore_announce_pending = false;
   s_state.pending_admin_action = SDF_SERVICES_ADMIN_ACTION_NONE;
   s_state.pending_admin_action_start_us = 0;
   s_state.pending_admin_action_user_id = 0;

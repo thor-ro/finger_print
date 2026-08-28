@@ -116,6 +116,14 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     uint32_t lockout_duration_ms;
     int64_t now_us = esp_timer_get_time();
     bool lockout_cleared = false;
+    /* Snapshot of s->lockout_restore_announce_pending and
+     * s->lockout_persist_armed taken under the lock below; both are acted on
+     * only after xSemaphoreGive() - like every decision this cycle makes,
+     * and in particular because the NVS writes they trigger are blocking
+     * I/O that must never run while holding the services lock (the same rule
+     * that keeps the UART round-trip outside it). */
+    bool announce_restored = false;
+    bool success_heal_record = false;
     bool run_match = false;
 
     if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) != pdTRUE) {
@@ -132,6 +140,7 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         s->failed_attempt_count = 0;
         s->failed_attempt_window_start_us = 0;
         lockout_cleared = true;
+        s->lockout_persist_armed = false;
     }
 
     if (now_us >= s->match_cooldown_until_us &&
@@ -145,9 +154,46 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
     failed_attempt_threshold = s->config.failed_attempt_threshold;
     failed_attempt_window_ms = s->config.failed_attempt_window_ms;
     lockout_duration_ms = s->config.lockout_duration_ms;
+    announce_restored = s->lockout_restore_announce_pending;
     xSemaphoreGive(s->lock);
 
+    /* A lockout restored at boot announces itself here rather than from
+     * init(): the event router is not guaranteed running until after init
+     * returns, but the first match cycle - however it was triggered - is.
+     * Announcing unconditionally (even when the restored deadline already
+     * expired before this first cycle ran) keeps the CRITICAL/NORMAL pair
+     * intact: subscribers must never see a lockout clear they never saw
+     * armed, or the companion alarm state and audit trail desync
+     * (security-event-unification). The pending flag is only consumed when
+     * the emission actually happens - if the router is not ready yet the
+     * next cycle retries rather than silently losing the CRITICAL and
+     * later emitting an unpaired NORMAL clear (D5). */
+    if (announce_restored && sdf_services_is_ready()) {
+        sdf_event_router_event_t evt = {
+            .type = SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
+            .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+            .priority = SDF_EVENT_ROUTER_PRIO_CRITICAL,
+            .payload.security.user_id = 0,
+            .payload.security.failed_attempts = failed_attempt_threshold,
+        };
+        sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
+        if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
+            s->lockout_restore_announce_pending = false;
+            xSemaphoreGive(s->lock);
+        }
+    }
+
     if (lockout_cleared) {
+        /* The lockout episode ended at its deadline: retire the persisted
+         * armed record so a reset no longer re-arms it. Best-effort, outside
+         * the lock (blocking I/O); a failed write leaves the record armed,
+         * which costs one redundant boot-time lockout, never a stuck one -
+         * the RAM deadline is already cleared above. */
+        esp_err_t persist_err = sdf_storage_lockout_clear();
+        if (persist_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist lockout cleared state: %s",
+                     esp_err_to_name(persist_err));
+        }
         sdf_match_emit_lockout_cleared();
     }
 
@@ -222,13 +268,34 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
                     s->failed_attempt_count = 0;
                     s->failed_attempt_window_start_us = 0;
                     emit_lockout = true;
+                    /* Record that the armed episode is (about to be)
+                     * persisted; only the entry and clear transitions write
+                     * NVS - never the per-attempt increments above, which an
+                     * attacker pacing scans could otherwise turn into a
+                     * flash-wear DoS (persist-biometric-lockout D3). */
+                    s->lockout_persist_armed = true;
                 }
             }
         } else if (match_result == SDF_FINGERPRINT_OP_OK) {
             s->failed_attempt_count = 0;
             s->failed_attempt_window_start_us = 0;
+            /* Matching is structurally impossible while a live lockout is
+             * armed (run_match gates on it), so a set flag here can only
+             * mean a stale armed record outlived its RAM deadline. Heal it
+             * with one write after the lock is released; on every ordinary
+             * unlock this snapshot reads false and no NVS traffic happens. */
+            success_heal_record = s->lockout_persist_armed;
+            s->lockout_persist_armed = false;
         }
         xSemaphoreGive(s->lock);
+    }
+
+    if (success_heal_record) {
+        esp_err_t persist_err = sdf_storage_lockout_clear();
+        if (persist_err != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to persist lockout cleared state: %s",
+                     esp_err_to_name(persist_err));
+        }
     }
 
     if (match_result == SDF_FINGERPRINT_OP_NO_MATCH ||
@@ -248,6 +315,19 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         }
 
         if (emit_lockout) {
+            /* Persist the armed episode before announcing it. Outside the
+             * lock (blocking I/O), and best-effort: a failed write still
+             * leaves the lockout fully enforced for this boot - it only
+             * means a later reset would drop it, which is logged so the
+             * degraded durability is visible (persist-biometric-lockout:
+             * "Failed persistence does not break matching"). */
+            esp_err_t persist_err = sdf_storage_lockout_save(true);
+            if (persist_err != ESP_OK) {
+                ESP_LOGW(TAG,
+                         "Failed to persist lockout armed state; lockout "
+                         "still applies for this boot: %s",
+                         esp_err_to_name(persist_err));
+            }
             if (!sdf_services_is_ready()) {
                 return;
             }
@@ -288,6 +368,14 @@ static void sdf_match_task_run_match_cycle(sdf_match_task_state_t *match_state) 
         .payload.biometric.permission = match.permission,
     };
     sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
+}
+
+void sdf_match_task_run_cycle_for_test(void) {
+    /* Host (linux) tests drive the exact match-task body synchronously,
+     * behind the mock UART's scripted sensor replies, to exercise the
+     * lockout persistence transitions without hardware. Not used by
+     * production code; runs on the caller's task. */
+    sdf_match_task_run_match_cycle(&s_match_state);
 }
 
 void sdf_match_task(void *arg) {

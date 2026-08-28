@@ -34,7 +34,8 @@ bool test_sdf_app_valid_lock_action(uint8_t lock_action) {
 
 sdf_protocol_zigbee_lock_state_t
 test_sdf_app_map_lock_state_to_zigbee(uint8_t nuki_lock_state) {
-  return sdf_app_map_lock_state_to_zigbee(nuki_lock_state);
+  return sdf_app_map_device_lock_state_to_zigbee(
+      sdf_app_map_nuki_state_to_device(nuki_lock_state));
 }
 
 uint8_t test_sdf_app_choose_fingerprint_permission(

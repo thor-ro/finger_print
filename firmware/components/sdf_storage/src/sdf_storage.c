@@ -17,6 +17,7 @@
 #define SDF_STORAGE_KEY_ENROLLED_USERS_BMP "enr_bmp"
 #define SDF_STORAGE_KEY_ENROLLED_USERS_PERM "enr_perm"
 #define SDF_STORAGE_KEY_SETUP_COMPLETE "setup_done"
+#define SDF_STORAGE_KEY_LOCKOUT "bio_lockout"
 #define SDF_STORAGE_KEY_ADMISSION_PREFIX "adm_"
 
 static const char *TAG = "sdf_storage";
@@ -703,6 +704,81 @@ esp_err_t sdf_storage_setup_complete_clear(void) {
   }
 
   err = nvs_erase_key(handle, SDF_STORAGE_KEY_SETUP_COMPLETE);
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    err = ESP_OK;
+  }
+
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_lockout_save(bool armed) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_set_u8(handle, SDF_STORAGE_KEY_LOCKOUT, armed ? 1u : 0u);
+  if (err == ESP_OK) {
+    err = nvs_commit(handle);
+  }
+
+  nvs_close(handle);
+  return err;
+}
+
+esp_err_t sdf_storage_lockout_load(bool *armed_out) {
+  if (armed_out == NULL) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  /* Default to "not locked out" on every exit path: callers fail open on
+   * this record (persist-biometric-lockout design.md D4), so leaving the
+   * out-param defined even on error paths keeps that contract obvious. */
+  *armed_out = false;
+
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    /* A namespace that has never been written is the fresh-device case and
+     * must read as NOT_FOUND; anything else (NVS not initialised, partition
+     * unreadable) is a genuine failure and is handed back verbatim, because
+     * the caller only logs the record it could not read - collapsing these
+     * into NOT_FOUND would make a storage glitch indistinguishable from a
+     * device that has simply never locked out. */
+    return err == ESP_ERR_NVS_NOT_FOUND ? ESP_ERR_NOT_FOUND : err;
+  }
+
+  uint8_t value = 0;
+  err = nvs_get_u8(handle, SDF_STORAGE_KEY_LOCKOUT, &value);
+  nvs_close(handle);
+
+  if (err == ESP_ERR_NVS_NOT_FOUND) {
+    /* Key never written: a device that has never locked out, or one whose
+     * episode was cleared - both report NOT_FOUND per the header contract. */
+    return ESP_ERR_NOT_FOUND;
+  }
+  /* Anything else (including a corrupt/type-mismatched record) is handed
+   * back verbatim so the caller can log it; armed_out stays false. */
+  if (err == ESP_OK) {
+    *armed_out = (value != 0);
+  }
+  return err;
+}
+
+esp_err_t sdf_storage_lockout_clear(void) {
+  nvs_handle_t handle;
+  esp_err_t err = nvs_open(SDF_STORAGE_NAMESPACE, NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    return err;
+  }
+
+  err = nvs_erase_key(handle, SDF_STORAGE_KEY_LOCKOUT);
   if (err == ESP_ERR_NVS_NOT_FOUND) {
     err = ESP_OK;
   }

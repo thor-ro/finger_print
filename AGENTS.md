@@ -49,7 +49,14 @@ esp-emu --chip esp32c6 --firmware /tmp/tr_merged.bin --elf /tmp/tr_hw/sdf_test_r
 idf.py -B /tmp/tr_hw -D SDKCONFIG=/tmp/sdkconfig.hw -p <PORT> flash monitor
 ```
 
-The chip-target run is not yet clean: four suites assert host-environment behaviour (the linux sleep-retention and WDT stubs) or need absent peripherals (fingerprint sensor). Everything else passes.
+The chip-target run is clean: **352 tests, 0 failures, 13 ignored** (2026-08-28, under esp-emu; the same suite minus `persist-biometric-lockout`'s five `sdf_storage` cases ran 347/0/13 on an ESP32-C6 over USB the same day). The host `linux` run is **426 / 0 / 12**; the totals differ legitimately because two tests that assert linux-only mock contracts (`..._gpio_get_level_returns_mock_fixed_value`, `..._sleep_retention_linux_noops`) self-ignore on chip, and `test_sdf_platform_sleep_retention_chip_roundtrip` self-ignores on linux.
+
+Two chip-target gotchas when reading a failing run:
+
+- Unity misreports the *filename* as `./main/test_runner_main.c` for every assertion; the line number belongs to the component's own test file. Resolve failures by line, not by the printed path.
+- The runner calls `abort()` after printing `FAIL`, so the board enters a panic/reboot loop and replays the whole suite on each boot. Capture one boot's worth.
+
+The fingerprint sensor is a genuinely absent peripheral on a bare devkit - its UART probe times out and logs `Sensor probe FAILED ... check wiring`, but no test depends on it. Likewise `Failed to persist enrolled-user cache to NVS ... ESP_FAIL` is injected on purpose by `test_sdf_storage_set_enrolled_users_save_fail_count()`.
 
 Switching `test_runner` between the two targets rewrites `dependencies.lock` and `managed_components/` in place, since the component manager keys both to the project directory rather than the build directory. Expect churn in `dependencies.lock`, and run `idf.py build` for the `linux` target last so the committed lock stays on the CI target.
 
@@ -65,6 +72,38 @@ Hardware-free CI gate proving OTA signature verification is active (replaces the
 source /Users/thorstenropertz/.espressif/v6.0.2/esp-idf/export.sh
 scripts/run_ota_signature_gate.sh          # PASS requires all three cases; exits non-zero otherwise
 scripts/run_ota_signature_gate.sh --no-verify   # self-test: with verification compiled out the tampered/foreign images must be ACCEPTED
+```
+
+## Lockout Reset Gate — `firmware/lockout_reset_gate`
+
+Hardware-free gate proving the persisted biometric lockout survives a device
+reset (`persist-biometric-lockout`). One image, two boots under esp-emu,
+separated by a real `esp_restart()`: boot 1 arms and persists the lockout;
+boot 2 brings the full `sdf_app` closure up and asserts that
+`sdf_services_init()`'s restore re-armed a full
+`CONFIG_SDF_SECURITY_BIOMETRIC_LOCKOUT_MS` **from that boot** (not a
+remainder), that a match cycle refuses to reach the sensor, and that the
+restored lockout announces itself once as a CRITICAL `SECURITY_LOCKOUT`. This
+is the one claim no unit test on either target can make.
+
+Two fixture-only stand-ins, both forced by the emulator having no fingerprint
+sensor and both documented in `main/lockout_reset_gate_main.c`: boot 1 arms via
+`sdf_storage_lockout_save(true)` rather than five failed scans (an emulated
+`fp_match_1n()` can only time out, and a timeout is deliberately not a failed
+attempt), and boot 2 seeds one enrolled user so the match cycle gets past its
+empty-set early return.
+
+Two fixture-only build differences from production: it merges at 4MB, because
+esp-emu v0.40.1 re-detects the flash as 4MB after a soft reset and an 8MB image
+header aborts boot 2 before `app_main()` (the partition table ends at
+`0x400000`, so the layout is unchanged); and it defines
+`SDF_EVENT_ROUTER_SUBS_GATE_FIXTURE=1` so its own observer is a *declared*
+subscriber — the router pool is sized with zero headroom on purpose, so an
+undeclared 24th subscription would (correctly) fail `sdf_event_router_start()`.
+
+```bash
+source /Users/thorstenropertz/.espressif/v6.0.2/esp-idf/export.sh
+scripts/run_lockout_reset_gate.sh   # PASS requires restored + refused + CRITICAL announcement
 ```
 
 ## BLE OTA Harness (Layer 2) — `tools/ble_ota_harness` + `firmware/ble_ota_gate`
@@ -102,7 +141,7 @@ Each component exposes public API in `include/` and internals in `src/`:
 ## Security Defaults
 Configured in `firmware/sdkconfig.defaults`:
 - Nonce replay window: 8 entries
-- Biometric fail threshold: 5 attempts in 60s → 120s lockout
+- Biometric fail threshold: 5 attempts in 60s → 120s lockout. The lockout is persisted to NVS, so power-cycling out of it does not work: a reboot re-arms a full 120s from boot rather than resuming the remainder (elapsed wall-clock time is not recoverable — no battery-backed RTC, and `esp_timer_get_time()` restarts at zero). Only a successful match or a factory reset clears it. NVS is written at the two transitions of an episode, never per failed attempt, so pacing failed scans cannot be turned into flash wear.
 - Encrypted NVS required at boot
 - OTA signature verification: ESP-IDF signed-app verification (Secure Boot V2 signature scheme without hardware secure boot or eFuse), enabled via `CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y` / `CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y`. The signing key is `ota_signing_key.pem` at the project root (P-256, PEM, auto-generated by `firmware/components/sdf_ota/CMakeLists.txt` on first build, or injected from the `OTA_SIGNING_KEY` CI secret); there is no separate `idf.py sign_ota` step — `idf.py build` signs the image directly. The first image on any device must be flashed signed over serial: signature verification checks against the *running* app's own signature block (no eFuse-backed key), so an unsigned or wrongly-signed running image cannot accept any OTA update afterwards. Signing-key rotation and crossing the format boundary (this footer-based scheme vs. IDF signed-app) both require a serial reflash — neither is possible over the air.
 - OTA downgrade: allowed with warning
@@ -158,7 +197,7 @@ When making architectural changes, you **must** update the corresponding documen
 - Match task uses suspend flag + extended polling (10s) when idle instead of WDT delete/recreate + semaphore-block for deep sleep transitions. This keeps the WDT active and reduces context-switch overhead.
 - `.github/workflows/firmware-ci.yml` gates `firmware/**` pushes/PRs with three independent jobs: `build-firmware` (`idf.py build` for `esp32c6`), `test-firmware` (host-side Unity via `test_runner`'s `linux` target), and `ota-signature` (the emulator gate, see above). The unit test job only covers what `test_runner` links on `linux` — the `sdf_app`/lock-flow suites run only on the chip target (see Testing above) and CI does not run them, so a green `test-firmware` check is not full regression coverage.
 - `sdf_ota_version_compare()` lives in `sdf_ota_version.c` only. It used to be duplicated in `sdf_ota.c`, and because `sdf_ota.c` is not compiled for `IDF_TARGET=linux`, the host suite tested one comparator while the device ran the other. Keep it single-definition. It orders `git describe` pre-releases (`<tag>-<commits>-g<hash>`) by commit count, not lexically — that is the form `PROJECT_VER` takes, so changing it changes the OTA upgrade/downgrade gate.
-- `scripts/` holds the OTA signature gate runner (`run_ota_signature_gate.sh`), its fixture-preparation script (`ota_signature_gate_prepare.py`), and the BLE OTA harness runner (`run_ble_ota_harness.sh`); `tools/ble_ota_harness/` holds the Bumble-based GATT central (see Testing above). Neither directory contains production firmware.
+- `scripts/` holds the OTA signature gate runner (`run_ota_signature_gate.sh`), its fixture-preparation script (`ota_signature_gate_prepare.py`), the BLE OTA harness runner (`run_ble_ota_harness.sh`), and the lockout reset gate runner (`run_lockout_reset_gate.sh`); `tools/ble_ota_harness/` holds the Bumble-based GATT central (see Testing above). Neither directory contains production firmware.
 
 ## Instructions
 Make use of codebase-memory-mcp and serena to understand the codebase.

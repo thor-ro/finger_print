@@ -1,0 +1,164 @@
+CONFIG_IDF_TARGET="esp32c6"
+# 4MB, not production's 8MB. This is an esp-emu workaround, not a product
+# divergence: this is the only fixture that reboots itself (esp_restart()
+# between phase 1 and phase 2), and esp-emu v0.40.1 re-detects the flash as
+# 4MB after a soft reset, so an image header claiming 8MB aborts the second
+# boot in __esp_system_init_fn_init_flash before app_main() runs. The
+# partition table (copied verbatim from production) ends at 0x400000, so 4MB
+# holds the identical layout and nothing about the scenario under test
+# changes.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# BLE (NimBLE stack)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_BLE_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+CONFIG_BT_BLUEDROID_ENABLED=n
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
+CONFIG_BT_NIMBLE_GATT_CLIENT=y
+CONFIG_BT_NIMBLE_GATT_SERVER=y
+CONFIG_BT_NIMBLE_GAP_SERVICE=y
+CONFIG_BT_NIMBLE_50_FEATURE_SUPPORT=y
+# Persist bond keys to NVS so paired companion phones don't need to
+# re-pair after every reboot (the encrypted GATT characteristics in
+# sdf_ble_companion require an established bond).
+CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# sdf_ble_companion registers 4 NOTIFY-capable characteristics (auth,
+# config, enroll, ota) and CONFIG_BT_NIMBLE_MAX_BONDS allows up to 3
+# bonded peers, so worst-case persisted-CCCD (notification subscription)
+# demand is 4 x 3 = 12. Raise the default (8) to 16 to cover that with
+# headroom for one additional NOTIFY characteristic.
+CONFIG_BT_NIMBLE_MAX_CCCDS=16
+
+# Zigbee (option names may vary by ESP-IDF/esp-zigbee version).
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZED=y
+# CONFIG_ZB_ZCZR is not set
+
+# NVS - identical to production's sdkconfig.defaults (CONFIG_NVS_ENCRYPTION=y,
+# HMAC-eFuse-derived key). Left unchanged from production rather than
+# disabled: this fixture only ever runs under esp-emu (no real chip is ever
+# flashed - see design.md D4/D6), so there is no physical eFuse for this
+# Kconfig to burn, and matching production exactly here keeps the harness
+# faithful to the storage-security posture group 8's OTA transfers exercise.
+CONFIG_NVS_ENCRYPTION=y
+CONFIG_NVS_SEC_HMAC_EFUSE_KEY_ID=0
+
+# MbedTLS crypto primitives needed for Nuki API
+CONFIG_MBEDTLS_ECP_DP_CURVE25519_ENABLED=y
+CONFIG_MBEDTLS_ECP_C=y
+CONFIG_MBEDTLS_ECDH_C=y
+# ESP-IDF v6.0 (Mbed TLS v4.0/TF-PSA-Crypto) only compiles poly1305.c when
+# PSA_WANT_ALG_CHACHA20_POLY1305 is requested, which requires CHACHAPOLY_C
+# (and its CHACHA20_C dependency); there is no longer a standalone
+# MBEDTLS_POLY1305_C Kconfig option. sdf_nuki_crypto.c only needs the
+# legacy mbedtls_poly1305_* functions, which are still compiled in as a
+# side effect of this.
+CONFIG_MBEDTLS_CHACHA20_C=y
+CONFIG_MBEDTLS_CHACHAPOLY_C=y
+
+# Own partition table (D4): firmware/partition_table.csv is untouched. This
+# is an exact copy of production's layout - see partition_table.csv's own
+# header comment.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partition_table.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partition_table.csv"
+
+# SDF power management knobs (unchanged from production)
+CONFIG_SDF_POWER_FP_EN_GPIO=2
+CONFIG_SDF_ENROLLMENT_BTN_GPIO=4
+CONFIG_SDF_PLATFORM_WDT_TIMEOUT_MS=15000
+CONFIG_SDF_POWER_CHECKIN_INTERVAL_MS=15000
+CONFIG_SDF_POWER_IDLE_BEFORE_SLEEP_MS=5000
+CONFIG_SDF_POWER_POST_WAKE_GUARD_MS=1500
+CONFIG_SDF_POWER_LOOP_INTERVAL_MS=250
+CONFIG_SDF_POWER_BATTERY_REPORT_INTERVAL_MS=60000
+CONFIG_SDF_POWER_BATTERY_DEFAULT_PERCENT=100
+CONFIG_SDF_POWER_FP_WAKE_GPIO=3
+CONFIG_SDF_POWER_ENABLE_LIGHT_SLEEP=y
+CONFIG_SDF_POWER_ENABLE_BLE_RADIO_GATING=y
+
+# SDF hardcoded GPIO / pin defaults (unchanged from production)
+CONFIG_SDF_FP_TX_PIN=0
+CONFIG_SDF_FP_RX_PIN=1
+CONFIG_SDF_FP_UART_PORT=1
+CONFIG_SDF_FP_BAUD_RATE=115200
+CONFIG_SDF_BATTERY_ADC_PIN=5
+CONFIG_SDF_MATCH_POLL_INTERVAL_MS=400
+CONFIG_SDF_MATCH_COOLDOWN_MS=3000
+CONFIG_SDF_FP_RESPONSE_TIMEOUT_MS=12000
+CONFIG_SDF_FP_RX_BUFFER_SIZE=256
+CONFIG_SDF_FP_TX_BUFFER_SIZE=256
+
+# SDF security & hardening knobs (unchanged from production)
+CONFIG_SDF_SECURITY_NONCE_REPLAY_WINDOW=8
+CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_THRESHOLD=5
+CONFIG_SDF_SECURITY_BIOMETRIC_FAIL_WINDOW_MS=60000
+CONFIG_SDF_SECURITY_BIOMETRIC_LOCKOUT_MS=120000
+CONFIG_SDF_SECURITY_REQUIRE_ENCRYPTED_NVS=y
+
+# Same IDF signed-app OTA scheme as firmware/sdkconfig.defaults
+# (adopt-idf-signed-app-ota): CONFIG_SECURE_BOOT stays unset (no eFuse
+# burned), CONFIG_SECURE_SIGNED_ON_UPDATE_NO_SECURE_BOOT (default y, below)
+# is what actually gates esp_ota_end()'s call into esp_image_verify() - see
+# bootloader/Kconfig.projbuild:608-620. The signing key path is relative to
+# this project directory (firmware/ble_ota_gate/), two levels up from the
+# repo root, matching firmware/ota_signature_gate/sdkconfig.defaults's own
+# path (unlike firmware/'s "../ota_signing_key.pem", which is only one
+# level up).
+CONFIG_SECURE_SIGNED_APPS_NO_SECURE_BOOT=y
+CONFIG_SECURE_SIGNED_APPS_ECDSA_V2_SCHEME=y
+CONFIG_SECURE_BOOT_ECDSA_KEY_LEN_256_BITS=y
+CONFIG_SECURE_BOOT_BUILD_SIGNED_BINARIES=y
+CONFIG_SECURE_BOOT_SIGNING_KEY="../../ota_signing_key.pem"
+
+# Firmware size optimizations for OTA (unchanged from production)
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_OPTIMIZATION_ASSERTION_LEVEL=0
+# WiFi/TLS stack removed with BLE-based OTA transfer (replace-wifi-ota-with-ble-transfer).
+# ESP_WIFI_ENABLED and MBEDTLS_CERTIFICATE_BUNDLE both default to "y" on esp32c6
+# (SOC_WIFI_SUPPORTED), so they must be explicitly disabled here rather than merely
+# omitted, otherwise the WiFi/TLS stack stays linked despite no component requiring it.
+CONFIG_ESP_WIFI_ENABLED=n
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=n
+CONFIG_NEWLIB_NANO_FORMAT=y
+
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_DEFAULT_LEVEL=3
+CONFIG_BOOTLOADER_LOG_LEVEL_INFO=y
+CONFIG_BOOTLOADER_LOG_LEVEL=3
+
+CONFIG_SDF_WS2812_LED_GPIO=8
+
+# Bootloader rollback for OTA (unchanged from production)
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_WDT_ENABLE=y
+CONFIG_BOOTLOADER_WDT_TIME_MS=90000
+
+# Power management for Zigbee sleepy end device
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_PM_DFS_INIT_AUTO=y
+
+# fingerprint.c's owner task uses a reserved indexed task notification
+# (FP_REPLY_NOTIFY_IDX) for its "request complete" doorbell, separate from
+# index 0 (e.g. sdf_match_task's wake-ISR signal) - needs >= 2 entries.
+CONFIG_FREERTOS_TASK_NOTIFICATION_ARRAY_ENTRIES=2
+
+# SDF Zigbee sleep knobs
+CONFIG_SDF_ZIGBEE_ENABLE=y
+CONFIG_SDF_ZIGBEE_SLEEP_ENABLE=y
+CONFIG_SDF_ZIGBEE_SLEEP_THRESHOLD_MS=20
+
+# SDF BLE connection mode
+CONFIG_SDF_BLE_CONNECTION_MODE_ON_DEMAND=y
+
+# SDF OTA configuration
+CONFIG_SDF_OTA_ENABLE=y
+CONFIG_SDF_OTA_ALLOW_DOWNGRADE=y
+CONFIG_SDF_OTA_BOOTLOADER_ROLLBACK=y
+CONFIG_SDF_OTA_ZIGBEE_QUERY_INTERVAL_HOURS=24

@@ -11,6 +11,7 @@ static const char *TAG = "sdf_platform_time";
 #include "freertos/task.h"
 
 static void *s_wdt_warned_tasks[SDF_PLATFORM_WDT_MAX_TASKS] = {0};
+static uint32_t s_wdt_warning_count = 0;
 static portMUX_TYPE s_wdt_warn_mux = portMUX_INITIALIZER_UNLOCKED;
 #else
 #include "freertos/FreeRTOS.h"
@@ -165,6 +166,7 @@ void sdf_platform_time_wdt_reset(void) {
                     break;
                 }
             }
+            s_wdt_warning_count++;
         }
         portEXIT_CRITICAL(&s_wdt_warn_mux);
 
@@ -223,8 +225,15 @@ void sdf_platform_time_wdt_feed(uint32_t timeout_ms) {
 
 bool sdf_platform_time_wdt_is_registered(void *task_handle) {
 #ifndef CONFIG_IDF_TARGET_LINUX
-    (void)task_handle;
-    return true;
+    /* esp_task_wdt_status() only compares the handle against the TWDT's own
+     * subscriber list - it never dereferences it - so a handle belonging to an
+     * already-deleted task is safe to pass and correctly reads as unregistered. */
+    TaskHandle_t target = task_handle ? (TaskHandle_t)task_handle
+                                      : xTaskGetCurrentTaskHandle();
+    if (target == NULL) {
+        return false;
+    }
+    return esp_task_wdt_status(target) == ESP_OK;
 #else
     void *target = task_handle ? task_handle : (void *)xTaskGetCurrentTaskHandle();
     if (target == NULL) {
@@ -245,8 +254,20 @@ bool sdf_platform_time_wdt_is_registered(void *task_handle) {
 
 bool sdf_platform_time_wdt_has_warned(void *task_handle) {
 #ifndef CONFIG_IDF_TARGET_LINUX
-    (void)task_handle;
-    return false;
+    void *target = task_handle ? task_handle : (void *)xTaskGetCurrentTaskHandle();
+    if (target == NULL) {
+        return false;
+    }
+    bool found = false;
+    portENTER_CRITICAL(&s_wdt_warn_mux);
+    for (size_t i = 0; i < SDF_PLATFORM_WDT_MAX_TASKS; i++) {
+        if (s_wdt_warned_tasks[i] == target) {
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_wdt_warn_mux);
+    return found;
 #else
     void *target = task_handle ? task_handle : (void *)xTaskGetCurrentTaskHandle();
     if (target == NULL) {
@@ -267,7 +288,10 @@ bool sdf_platform_time_wdt_has_warned(void *task_handle) {
 
 uint32_t sdf_platform_time_wdt_get_warning_count(void) {
 #ifndef CONFIG_IDF_TARGET_LINUX
-    return 0;
+    portENTER_CRITICAL(&s_wdt_warn_mux);
+    uint32_t count = s_wdt_warning_count;
+    portEXIT_CRITICAL(&s_wdt_warn_mux);
+    return count;
 #else
     pthread_mutex_lock(&s_wdt_lock);
     uint32_t count = s_wdt_warning_count;
@@ -282,6 +306,7 @@ void sdf_platform_time_wdt_clear_warned_tasks(void) {
     for (size_t i = 0; i < SDF_PLATFORM_WDT_MAX_TASKS; i++) {
         s_wdt_warned_tasks[i] = NULL;
     }
+    s_wdt_warning_count = 0;
     portEXIT_CRITICAL(&s_wdt_warn_mux);
 #else
     pthread_mutex_lock(&s_wdt_lock);

@@ -108,6 +108,12 @@ extern void test_sdf_storage_admission_empty_store_reads_as_zero_count(void);
 extern void test_sdf_storage_admission_clear_all(void);
 extern void test_sdf_storage_admission_invalid_args(void);
 extern void test_sdf_storage_admission_without_latch_leaves_device_in_setup_phase(void);
+/* persist-biometric-lockout: the storage latch behind the durable lockout. */
+extern void test_sdf_storage_lockout_save_load_roundtrip(void);
+extern void test_sdf_storage_lockout_clear_makes_record_absent(void);
+extern void test_sdf_storage_lockout_load_absent_on_fresh_device(void);
+extern void test_sdf_storage_lockout_load_rejects_null(void);
+extern void test_sdf_storage_lockout_cleared_by_erase_all(void);
 extern void test_setup_state_wire_byte_values_are_stable(void);
 
 /* SDF Config tests */
@@ -127,6 +133,7 @@ extern void test_sdf_platform_gpio_is_rtc_capable_boundary(void);
 extern void test_sdf_platform_map_wakeup_reason_all_causes(void);
 extern void test_sdf_power_crc16_ccitt_known_vector(void);
 extern void test_sdf_platform_sleep_retention_linux_noops(void);
+extern void test_sdf_platform_sleep_retention_chip_roundtrip(void);
 extern void test_sdf_platform_sleep_wakeup_from_linux_noops(void);
 extern void test_sdf_platform_nvs_security_status_defaults_and_erase_before_init(void);
 extern void test_sdf_platform_time_wdt_registration_lifecycle(void);
@@ -177,6 +184,18 @@ extern void test_delete_user_unenrolled_id_not_found_without_sensor_traffic(void
 extern void test_clear_all_users_still_clears_single_admin_device(void);
 extern void test_delete_user_destroys_bound_credential(void);
 extern void test_deleted_name_is_available_for_reuse(void);
+/* persist-biometric-lockout. Host-only for the same reason as the guard suite
+ * above: they run the real match-cycle body against the Linux mock UART. */
+extern void test_lockout_entry_persists_armed_record(void);
+extern void test_lockout_failed_attempt_below_threshold_writes_nothing(void);
+extern void test_lockout_expiry_clears_persisted_record(void);
+extern void test_lockout_successful_match_clears_stale_persisted_record(void);
+extern void test_lockout_restore_arms_full_duration_from_boot(void);
+extern void test_lockout_restore_refuses_matching(void);
+extern void test_lockout_restore_absent_record_permits_matching(void);
+extern void test_lockout_restore_wrong_typed_record_reads_as_absent(void);
+extern void test_lockout_restore_unreadable_record_permits_matching(void);
+extern void test_lockout_restore_announces_critical_event(void);
 extern void test_web_auth_stretch_credential_is_deterministic(void);
 extern void test_web_auth_stretch_credential_differs_by_salt(void);
 extern void test_web_auth_stretch_credential_invalid_args(void);
@@ -595,6 +614,11 @@ void app_main(void) {
   RUN_TEST(test_sdf_storage_admission_clear_all);
   RUN_TEST(test_sdf_storage_admission_invalid_args);
   RUN_TEST(test_sdf_storage_admission_without_latch_leaves_device_in_setup_phase);
+  RUN_TEST(test_sdf_storage_lockout_save_load_roundtrip);
+  RUN_TEST(test_sdf_storage_lockout_clear_makes_record_absent);
+  RUN_TEST(test_sdf_storage_lockout_load_absent_on_fresh_device);
+  RUN_TEST(test_sdf_storage_lockout_load_rejects_null);
+  RUN_TEST(test_sdf_storage_lockout_cleared_by_erase_all);
   RUN_TEST(test_setup_state_wire_byte_values_are_stable);
 
   /* SDF Config tests */
@@ -614,6 +638,7 @@ void app_main(void) {
   RUN_TEST(test_sdf_platform_map_wakeup_reason_all_causes);
   RUN_TEST(test_sdf_power_crc16_ccitt_known_vector);
   RUN_TEST(test_sdf_platform_sleep_retention_linux_noops);
+  RUN_TEST(test_sdf_platform_sleep_retention_chip_roundtrip);
   RUN_TEST(test_sdf_platform_sleep_wakeup_from_linux_noops);
   RUN_TEST(test_sdf_platform_nvs_security_status_defaults_and_erase_before_init);
   RUN_TEST(test_sdf_platform_time_wdt_registration_lifecycle);
@@ -662,6 +687,17 @@ void app_main(void) {
   RUN_TEST(test_clear_all_users_still_clears_single_admin_device);
   RUN_TEST(test_delete_user_destroys_bound_credential);
   RUN_TEST(test_deleted_name_is_available_for_reuse);
+  /* persist-biometric-lockout: same host-only block - see above. */
+  RUN_TEST(test_lockout_entry_persists_armed_record);
+  RUN_TEST(test_lockout_failed_attempt_below_threshold_writes_nothing);
+  RUN_TEST(test_lockout_expiry_clears_persisted_record);
+  RUN_TEST(test_lockout_successful_match_clears_stale_persisted_record);
+  RUN_TEST(test_lockout_restore_arms_full_duration_from_boot);
+  RUN_TEST(test_lockout_restore_refuses_matching);
+  RUN_TEST(test_lockout_restore_absent_record_permits_matching);
+  RUN_TEST(test_lockout_restore_wrong_typed_record_reads_as_absent);
+  RUN_TEST(test_lockout_restore_unreadable_record_permits_matching);
+  RUN_TEST(test_lockout_restore_announces_critical_event);
 #endif
   RUN_TEST(test_web_auth_stretch_credential_is_deterministic);
   RUN_TEST(test_web_auth_stretch_credential_differs_by_salt);

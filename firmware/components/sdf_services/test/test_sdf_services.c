@@ -2196,3 +2196,379 @@ void test_permission_change_untouched_when_no_change_is_pending(void) {
   TEST_ASSERT_EQUAL(SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION,
                     st->pending_admin_action);
 }
+
+/* ---------------------------------------------------------------------------
+ * persist-biometric-lockout: the lockout latch survives a reset.
+ *
+ * These drive the real match-cycle body through
+ * sdf_match_task_run_cycle_for_test(), with the Linux mock UART scripting the
+ * sensor's reply, so the persistence writes happen at exactly the sites
+ * production takes them - after the services lock is released, at the two
+ * transitions of an episode and nowhere else. Host-target-only for the same
+ * reason as the delete-guard suite above: only there is there a mock sensor.
+ * ------------------------------------------------------------------------- */
+
+#ifdef CONFIG_IDF_TARGET_LINUX
+
+#include "esp_timer.h"
+
+#define TEST_FP_CMD_MATCH_1_N 0x0Cu
+#define TEST_FP_ACK_NOUSER 0x05u
+
+/* Scripts one sensor reply to the next MATCH_1_N. q3 (byte 4) is what
+ * fp_handle_match_1n() switches on: ACK_NOUSER means "finger seen, no match"
+ * (the only result that counts as a failed attempt), 1..3 means a match at
+ * that permission level. */
+static void queue_match_reply(uint8_t q3, uint16_t user_id) {
+  uint8_t frame[8] = {TEST_FP_MARKER,        TEST_FP_CMD_MATCH_1_N,
+                      (uint8_t)(user_id >> 8), (uint8_t)(user_id & 0xFFu),
+                      q3,                    0x00,
+                      0x00,                  TEST_FP_MARKER};
+  frame[6] = (uint8_t)(frame[1] ^ frame[2] ^ frame[3] ^ frame[4] ^ frame[5]);
+  sdf_mock_uart_queue_response(frame, sizeof(frame));
+}
+
+/* Every cycle arms match_cooldown_until_us, and a lockout under test must not
+ * be confused with a cooldown, so tests that run more than one cycle clear it
+ * between them. */
+static void clear_match_cooldown(void) {
+  sdf_services_state()->match_cooldown_until_us = 0;
+}
+
+/* Shared arrangement: services + mock sensor up, one enrolled user (the match
+ * cycle returns immediately when the enrolled set is empty), no persisted
+ * record, and lockout parameters pinned rather than inherited from the device
+ * config so the arithmetic below is exact. */
+static void lockout_test_setup(uint32_t threshold, uint32_t lockout_ms) {
+  delete_guard_test_setup();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_clear());
+  seed_enrolled_user(1, 3);
+
+  sdf_services_state_t *s = sdf_services_state();
+  s->config.failed_attempt_threshold = threshold;
+  s->config.failed_attempt_window_ms = 60000u;
+  s->config.lockout_duration_ms = lockout_ms;
+  s->config.match_cooldown_ms = 0u;
+  s->lockout_until_us = 0;
+  s->failed_attempt_count = 0;
+  s->failed_attempt_window_start_us = 0;
+  s->lockout_persist_armed = false;
+  s->lockout_restore_announce_pending = false;
+}
+
+static void lockout_test_teardown(void) {
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_clear());
+  sdf_services_state_t *s = sdf_services_state();
+  s->lockout_until_us = 0;
+  s->failed_attempt_count = 0;
+  s->lockout_persist_armed = false;
+  s->lockout_restore_announce_pending = false;
+  delete_guard_test_teardown();
+}
+
+/* Task 5.2 - reaching the threshold writes the armed record. Threshold 1 keeps
+ * it to a single scan; the point under test is that the write happens at all
+ * and reports armed, not how many scans it took to get there. */
+void test_lockout_entry_persists_armed_record(void) {
+  lockout_test_setup(1u, 120000u);
+
+  queue_match_reply(TEST_FP_ACK_NOUSER, 0);
+  sdf_match_task_run_cycle_for_test();
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_TRUE(s->lockout_until_us > 0);
+  TEST_ASSERT_TRUE(s->lockout_persist_armed);
+
+  bool armed = false;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_load(&armed));
+  TEST_ASSERT_TRUE(armed);
+
+  lockout_test_teardown();
+}
+
+/* The flash-wear bound from D3: a failed attempt below the threshold must not
+ * write anything. An attacker who can pace scans indefinitely otherwise turns
+ * every scan into a flash write. */
+void test_lockout_failed_attempt_below_threshold_writes_nothing(void) {
+  lockout_test_setup(3u, 120000u);
+
+  queue_match_reply(TEST_FP_ACK_NOUSER, 0);
+  sdf_match_task_run_cycle_for_test();
+  clear_match_cooldown();
+  queue_match_reply(TEST_FP_ACK_NOUSER, 0);
+  sdf_match_task_run_cycle_for_test();
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(2, s->failed_attempt_count);
+  TEST_ASSERT_EQUAL(0, s->lockout_until_us);
+  TEST_ASSERT_FALSE(s->lockout_persist_armed);
+
+  bool armed = true;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+
+  lockout_test_teardown();
+}
+
+/* Task 5.4 - the episode ends at its deadline and the record is retired, so a
+ * later reset does not re-arm a lockout that was already served. */
+void test_lockout_expiry_clears_persisted_record(void) {
+  /* Threshold 3, not 1: the same cycle that clears the expired lockout goes on
+   * to run the scan below, and at a threshold of 1 that one no-match would
+   * re-arm the lockout before the assertions could see it cleared. */
+  lockout_test_setup(3u, 120000u);
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+  s->lockout_persist_armed = true;
+  /* A deadline in the past but non-zero: the clear branch gates on
+   * lockout_until_us > 0 && now >= lockout_until_us. */
+  s->lockout_until_us = 1;
+
+  queue_match_reply(TEST_FP_ACK_NOUSER, 0);
+  sdf_match_task_run_cycle_for_test();
+
+  TEST_ASSERT_FALSE(s->lockout_persist_armed);
+  bool armed = true;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+
+  lockout_test_teardown();
+}
+
+/* Task 5.3 - a successful match retires a stale armed record. Matching is
+ * structurally impossible while a live lockout is armed, so this only ever
+ * fires for a record that outlived its RAM deadline; one write heals it, and
+ * an ordinary unlock (no record) must stay write-free. */
+void test_lockout_successful_match_clears_stale_persisted_record(void) {
+  lockout_test_setup(3u, 120000u);
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+  s->lockout_persist_armed = true;
+  s->lockout_until_us = 0;
+
+  queue_match_reply(3u, 1u);
+  sdf_match_task_run_cycle_for_test();
+
+  TEST_ASSERT_FALSE(s->lockout_persist_armed);
+  bool armed = true;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+
+  /* An unlock with no record outstanding leaves the record absent and takes
+   * the no-write path. */
+  clear_match_cooldown();
+  queue_match_reply(3u, 1u);
+  sdf_match_task_run_cycle_for_test();
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+
+  lockout_test_teardown();
+}
+
+/* Task 5.5 - the restore arms a full fresh duration measured from the injected
+ * boot instant, never a remainder: esp_timer_get_time() restarts near zero
+ * across a power loss, so there is no remainder to compute (D1/D2). */
+void test_lockout_restore_arms_full_duration_from_boot(void) {
+  lockout_test_setup(3u, 120000u);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+
+  sdf_services_state_t *s = sdf_services_state();
+  s->failed_attempt_count = 7;
+
+  const int64_t boot_us = 1000;
+  TEST_ASSERT_EQUAL(pdTRUE,
+                    xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)));
+  sdf_services_restore_lockout_locked(boot_us);
+  xSemaphoreGive(s->lock);
+
+  TEST_ASSERT_EQUAL_INT64(boot_us + 120000LL * 1000LL, s->lockout_until_us);
+  TEST_ASSERT_EQUAL(0, s->failed_attempt_count);
+  TEST_ASSERT_TRUE(s->lockout_persist_armed);
+  TEST_ASSERT_TRUE(s->lockout_restore_announce_pending);
+
+  lockout_test_teardown();
+}
+
+/* Task 5.5, second half - a restored lockout actually refuses to scan. Asserted
+ * at the UART, not at the state field: no sensor command may leave the device
+ * while the lockout stands. */
+void test_lockout_restore_refuses_matching(void) {
+  lockout_test_setup(3u, 120000u);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(pdTRUE,
+                    xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)));
+  sdf_services_restore_lockout_locked(esp_timer_get_time());
+  xSemaphoreGive(s->lock);
+
+  uint32_t writes_before = sdf_mock_uart_write_count();
+  queue_match_reply(3u, 1u);
+  sdf_match_task_run_cycle_for_test();
+
+  TEST_ASSERT_EQUAL(writes_before, sdf_mock_uart_write_count());
+
+  lockout_test_teardown();
+}
+
+/* Task 5.6 - a fresh device has no record and must scan normally. The UART
+ * write count is the evidence that the cycle reached the sensor. */
+void test_lockout_restore_absent_record_permits_matching(void) {
+  lockout_test_setup(3u, 120000u);
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(pdTRUE,
+                    xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)));
+  sdf_services_restore_lockout_locked(esp_timer_get_time());
+  xSemaphoreGive(s->lock);
+
+  TEST_ASSERT_EQUAL(0, s->lockout_until_us);
+  TEST_ASSERT_FALSE(s->lockout_persist_armed);
+  TEST_ASSERT_FALSE(s->lockout_restore_announce_pending);
+
+  uint32_t writes_before = sdf_mock_uart_write_count();
+  queue_match_reply(3u, 1u);
+  sdf_match_task_run_cycle_for_test();
+  TEST_ASSERT_TRUE(sdf_mock_uart_write_count() > writes_before);
+
+  lockout_test_teardown();
+}
+
+/* Task 5.6, second half - a record written with the wrong type. NVS looks keys
+ * up by name *and* type, so nvs_get_u8() reports such a record as NOT_FOUND
+ * rather than as a type mismatch: to every caller it is indistinguishable from
+ * a device that never locked out, and it fails open by that route. Pinned here
+ * because the loader's contract depends on it - if a future IDF started
+ * returning ESP_ERR_NVS_TYPE_MISMATCH, the record would surface as a read
+ * failure and start being logged as one. */
+void test_lockout_restore_wrong_typed_record_reads_as_absent(void) {
+  lockout_test_setup(3u, 120000u);
+
+  nvs_handle_t handle;
+  TEST_ASSERT_EQUAL(ESP_OK, nvs_open("nuki", NVS_READWRITE, &handle));
+  TEST_ASSERT_EQUAL(ESP_OK, nvs_set_u32(handle, "bio_lockout", 0xDEADBEEFu));
+  TEST_ASSERT_EQUAL(ESP_OK, nvs_commit(handle));
+  nvs_close(handle);
+
+  bool armed = true;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+  TEST_ASSERT_FALSE(armed);
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(pdTRUE,
+                    xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)));
+  sdf_services_restore_lockout_locked(esp_timer_get_time());
+  xSemaphoreGive(s->lock);
+
+  TEST_ASSERT_EQUAL(0, s->lockout_until_us);
+  TEST_ASSERT_FALSE(s->lockout_persist_armed);
+
+  uint32_t writes_before = sdf_mock_uart_write_count();
+  queue_match_reply(3u, 1u);
+  sdf_match_task_run_cycle_for_test();
+  TEST_ASSERT_TRUE(sdf_mock_uart_write_count() > writes_before);
+
+  nvs_open("nuki", NVS_READWRITE, &handle);
+  nvs_erase_key(handle, "bio_lockout");
+  nvs_commit(handle);
+  nvs_close(handle);
+  lockout_test_teardown();
+}
+
+/* Task 5.6, third case - the record genuinely cannot be read (here: NVS not
+ * initialised at all, which is what a partition-level glitch looks like from
+ * sdf_storage). The error reaches the caller verbatim rather than disguised as
+ * NOT_FOUND, so the restore logs it - and still fails open, because failing
+ * closed would make biometric entry unavailable with no way for the user to
+ * recover it (D4). */
+void test_lockout_restore_unreadable_record_permits_matching(void) {
+  lockout_test_setup(3u, 120000u);
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+  TEST_ASSERT_EQUAL(ESP_OK, nvs_flash_deinit());
+
+  bool armed = true;
+  esp_err_t err = sdf_storage_lockout_load(&armed);
+  TEST_ASSERT_NOT_EQUAL(ESP_OK, err);
+  TEST_ASSERT_NOT_EQUAL(ESP_ERR_NOT_FOUND, err);
+  TEST_ASSERT_FALSE(armed);
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(pdTRUE,
+                    xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)));
+  sdf_services_restore_lockout_locked(esp_timer_get_time());
+  xSemaphoreGive(s->lock);
+
+  TEST_ASSERT_EQUAL(0, s->lockout_until_us);
+  TEST_ASSERT_FALSE(s->lockout_persist_armed);
+
+  uint32_t writes_before = sdf_mock_uart_write_count();
+  queue_match_reply(3u, 1u);
+  sdf_match_task_run_cycle_for_test();
+  TEST_ASSERT_TRUE(sdf_mock_uart_write_count() > writes_before);
+
+  TEST_ASSERT_EQUAL(ESP_OK, nvs_flash_init());
+  lockout_test_teardown();
+}
+
+#endif /* CONFIG_IDF_TARGET_LINUX */
+
+#ifdef CONFIG_IDF_TARGET_LINUX
+
+static int s_lockout_evt_count = 0;
+static sdf_event_router_event_t s_lockout_evt;
+
+static void lockout_evt_handler(void *ctx, const sdf_event_router_event_t *event) {
+  (void)ctx;
+  s_lockout_evt_count++;
+  s_lockout_evt = *event;
+}
+
+/* D5 / "Restored lockout announced" - a lockout restored at boot must announce
+ * itself as CRITICAL, exactly as entering one does. Without it the companion
+ * reports no alarm while scans are refused, and the eventual NORMAL clear
+ * arrives unpaired, desyncing the alarm state from the audit trail
+ * (security-event-unification). The emission rides the first match cycle
+ * rather than init, because the router is not guaranteed running until init
+ * returns.
+ *
+ * The router is reset here to get a subscription in before start(), then left
+ * initialised-but-unstarted - the state ensure_services_initialized() leaves
+ * behind - so a later suite that needs dispatch can start it itself. */
+void test_lockout_restore_announces_critical_event(void) {
+  sdf_event_router_reset_for_test();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_init());
+  s_lockout_evt_count = 0;
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_event_router_subscribe(SDF_EVENT_ROUTER_SECURITY_LOCKOUT,
+                                               SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                               lockout_evt_handler, NULL));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_start());
+
+  lockout_test_setup(3u, 120000u);
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(pdTRUE,
+                    xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)));
+  sdf_services_restore_lockout_locked(esp_timer_get_time());
+  xSemaphoreGive(s->lock);
+
+  sdf_match_task_run_cycle_for_test();
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  TEST_ASSERT_EQUAL(1, s_lockout_evt_count);
+  TEST_ASSERT_EQUAL(SDF_EVENT_ROUTER_SECURITY_LOCKOUT, s_lockout_evt.type);
+  TEST_ASSERT_EQUAL(SDF_EVENT_ROUTER_PRIO_CRITICAL, s_lockout_evt.priority);
+  /* Consumed once: the announcement is not repeated on every later cycle. */
+  TEST_ASSERT_FALSE(s->lockout_restore_announce_pending);
+
+  clear_match_cooldown();
+  sdf_match_task_run_cycle_for_test();
+  vTaskDelay(pdMS_TO_TICKS(50));
+  TEST_ASSERT_EQUAL(1, s_lockout_evt_count);
+
+  lockout_test_teardown();
+  sdf_event_router_reset_for_test();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_init());
+}
+
+#endif /* CONFIG_IDF_TARGET_LINUX */

@@ -894,3 +894,84 @@ void test_sdf_storage_admission_without_latch_leaves_device_in_setup_phase(void)
 
   nvs_teardown();
 }
+
+// -----------------------------------------------------------------------------
+// Biometric-lockout latch (persist-biometric-lockout)
+// -----------------------------------------------------------------------------
+
+/* The record is a flag, not a deadline, and its three states have to stay
+ * distinguishable: armed, explicitly cleared, and never written. The first two
+ * are what the match task writes at a lockout episode's two transitions; the
+ * third is a fresh device. */
+void test_sdf_storage_lockout_save_load_roundtrip(void) {
+  nvs_setup();
+
+  bool armed = false;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_load(&armed));
+  TEST_ASSERT_TRUE(armed);
+
+  /* Overwriting with false is a distinct state from clearing: the key still
+   * exists, so the load reports ESP_OK rather than NOT_FOUND. */
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(false));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_load(&armed));
+  TEST_ASSERT_FALSE(armed);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_lockout_clear_makes_record_absent(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_clear());
+
+  bool armed = true;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+  // The out-param is defined even on the error path - callers fail open on it.
+  TEST_ASSERT_FALSE(armed);
+
+  // Clearing an absent record is not an error.
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_clear());
+
+  nvs_teardown();
+}
+
+/* A device that has never locked out has no key at all, and that must read as
+ * NOT_FOUND rather than as a read failure - sdf_services_restore_lockout_locked()
+ * logs a warning for the latter and stays silent for the former. */
+void test_sdf_storage_lockout_load_absent_on_fresh_device(void) {
+  nvs_setup();
+
+  bool armed = true;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+  TEST_ASSERT_FALSE(armed);
+
+  nvs_teardown();
+}
+
+void test_sdf_storage_lockout_load_rejects_null(void) {
+  nvs_setup();
+  TEST_ASSERT_EQUAL(ESP_ERR_INVALID_ARG, sdf_storage_lockout_load(NULL));
+  nvs_teardown();
+}
+
+/* Factory reset must not leave a device locked out: erase_all() wipes the whole
+ * NVS partition, so the latch goes with it. Asserted rather than assumed,
+ * because a future key moved to a second namespace would silently survive. */
+void test_sdf_storage_lockout_cleared_by_erase_all(void) {
+  nvs_setup();
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_save(true));
+  bool armed = false;
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_lockout_load(&armed));
+  TEST_ASSERT_TRUE(armed);
+
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_storage_erase_all());
+
+  armed = true;
+  TEST_ASSERT_EQUAL(ESP_ERR_NOT_FOUND, sdf_storage_lockout_load(&armed));
+  TEST_ASSERT_FALSE(armed);
+
+  nvs_teardown();
+}

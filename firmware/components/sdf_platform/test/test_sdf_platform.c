@@ -19,9 +19,13 @@ void test_sdf_platform_gpio_set_level_returns_mock_ok(void) {
 }
 
 void test_sdf_platform_gpio_get_level_returns_mock_fixed_value(void) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+  TEST_IGNORE_MESSAGE("Asserts the linux gpio mock; on chip the level is real");
+#else
   // The linux mock's gpio_get_level always returns 1 regardless of pin.
   TEST_ASSERT_EQUAL(1, sdf_platform_gpio_get_level(0));
   TEST_ASSERT_EQUAL(1, sdf_platform_gpio_get_level(3));
+#endif
 }
 
 void test_sdf_platform_gpio_is_rtc_capable_boundary(void) {
@@ -94,6 +98,11 @@ void test_sdf_power_crc16_ccitt_known_vector(void) {
 // -----------------------------------------------------------------------------
 
 void test_sdf_platform_sleep_retention_linux_noops(void) {
+#ifndef CONFIG_IDF_TARGET_LINUX
+  TEST_IGNORE_MESSAGE(
+      "Asserts the linux no-op stubs; the chip has real RTC retention memory "
+      "(see test_sdf_platform_sleep_retention_chip_roundtrip)");
+#else
   // Under CONFIG_IDF_TARGET_LINUX there's no real RTC retention memory:
   // write/read are no-ops that still report success, and the buffer isn't
   // touched.
@@ -106,6 +115,27 @@ void test_sdf_platform_sleep_retention_linux_noops(void) {
   TEST_ASSERT_EQUAL_HEX8_ARRAY(expected_unchanged, readback, 4);
 
   TEST_ASSERT_FALSE(sdf_platform_sleep_retention_valid());
+#endif
+}
+
+/* Chip counterpart of the above: retention memory is a real RTC-backed buffer,
+ * so a write must be observable by a subsequent read within the same boot. */
+void test_sdf_platform_sleep_retention_chip_roundtrip(void) {
+#ifdef CONFIG_IDF_TARGET_LINUX
+  TEST_IGNORE_MESSAGE("Requires real RTC retention memory");
+#else
+  static const uint8_t pattern[4] = {0xDE, 0xAD, 0xBE, 0xEF};
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_platform_sleep_retention_write(pattern, sizeof(pattern)));
+
+  uint8_t readback[4] = {0};
+  TEST_ASSERT_EQUAL(ESP_OK,
+                    sdf_platform_sleep_retention_read(readback, sizeof(readback)));
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(pattern, readback, sizeof(pattern));
+
+  // The pattern is not a valid retention block, so the magic check must reject it.
+  TEST_ASSERT_FALSE(sdf_platform_sleep_retention_valid());
+#endif
 }
 
 void test_sdf_platform_sleep_wakeup_from_linux_noops(void) {
