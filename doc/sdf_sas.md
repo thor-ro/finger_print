@@ -465,11 +465,13 @@ FPS -> LED : flash_green()
 FPS -> ENR : ACK OK
 ENR -> SM : apply_step_result(ACK_OK)
 SM --> ENR : next_action = EXECUTE_STEP(cmd=STEP_2)
+ENR -> EVT : emit ENROLLMENT_STEP_COMPLETE (captured=1, next=2)
 ENR -> FPS : fp_enroll_step(2, user_id, perm)
 FPS -> LED : flash_green()
 FPS -> ENR : ACK OK
 ENR -> SM : apply_step_result(ACK_OK)
 SM --> ENR : next_action = EXECUTE_STEP(cmd=STEP_3)
+ENR -> EVT : emit ENROLLMENT_STEP_COMPLETE (captured=2, next=3)
 ENR -> FPS : fp_enroll_step(3, user_id, perm)
 FPS -> LED : solid_green()
 FPS -> ENR : ACK OK
@@ -486,7 +488,8 @@ note over SM : Retry policy (steps 1-2: 3x ACK_FAIL\nstep 3: immediate fail)
 1. Starts the SM on enrollment request
 2. After each driver result, calls `apply_step_result()` to get the next action
 3. Executes the returned action (driver call, LED, or event emission)
-4. On COMPLETE/FAIL, emits `ENROLLMENT_COMPLETE` / `ENROLLMENT_FAILED` events via event router
+4. On each captured scan, emits `ENROLLMENT_STEP_COMPLETE` carrying the captured count and the scan now expected — the same payload pairing the terminal events use, so a subscriber reads one shape throughout
+5. On COMPLETE/FAIL, emits `ENROLLMENT_COMPLETE` / `ENROLLMENT_FAILED` events via event router
 
 This replaces the old callback-based design where `sdf_app` subscribed to `enrollment_cb` in `sdf_services_config_t`. Now `sdf_app` subscribes to `ENROLLMENT_COMPLETE` and `ENROLLMENT_FAILED` events from the event router.
 
@@ -664,6 +667,8 @@ Authorization rules per verb:
 The user list has exactly one serialized shape, shared with the Zigbee report: `[{"id":1,"perm":3,"name":"Alice"},{"id":5,"perm":1}]`, produced by a single serializer (`sdf_services_format_user_list()`); a user holding no name omits the field rather than carrying an empty one. Because ten users can exceed one notification, the list reply is chunked: each part carries `{"req":N,"verb":"list","part":i,"end":true|false,"users":[...]}`, and only the final part has `"end":true`, so a truncated list is never indistinguishable from a complete one.
 
 Enrolment progress notifications keep their existing shapes (`{"status":"success"|"failed",...}`); when an enrolment was started by a user-management request they additionally carry `"req":<id>`, so progress is attributable to the request that began it.
+
+Between the start and that terminal notification, each captured scan produces `{"status":"progress","captured":C,"step":N,"total":T}`: `C` scans are in, the device is now waiting for scan `N` of `T`. It carries `"req":<id>` under the same attribution rule but **does not consume it** — the terminal reply for that request is still owed, so a companion correlating by id must not resolve the request on a progress notification. A retried scan captured nothing and announces nothing, so the sequence never moves backwards. Delivery follows the same admission as the terminal notifications: authenticated connections receive it on the Enrollment characteristic, and while the setup phase is armed the setup connection receives it on the User-Management characteristic — without that, the first-time wizard, which enrols the first Admin before any account exists, would see no enrolment notifications at all.
 
 ### BLE Companion Setup-State Wire Format
 

@@ -184,6 +184,10 @@ extern void test_delete_user_unenrolled_id_not_found_without_sensor_traffic(void
 extern void test_clear_all_users_still_clears_single_admin_device(void);
 extern void test_delete_user_destroys_bound_credential(void);
 extern void test_deleted_name_is_available_for_reuse(void);
+/* add-wizard-enroll-scan-prompts. Host-only for the same reason: a scan can
+ * only succeed against the Linux mock UART's scripted-response hook. */
+extern void test_enrollment_captured_scan_announces_the_next_one(void);
+extern void test_enrollment_retried_scan_announces_nothing(void);
 /* persist-biometric-lockout. Host-only for the same reason as the guard suite
  * above: they run the real match-cycle body against the Linux mock UART. */
 extern void test_lockout_entry_persists_armed_record(void);
@@ -687,6 +691,9 @@ void app_main(void) {
   RUN_TEST(test_clear_all_users_still_clears_single_admin_device);
   RUN_TEST(test_delete_user_destroys_bound_credential);
   RUN_TEST(test_deleted_name_is_available_for_reuse);
+  /* add-wizard-enroll-scan-prompts: host-only */
+  RUN_TEST(test_enrollment_captured_scan_announces_the_next_one);
+  RUN_TEST(test_enrollment_retried_scan_announces_nothing);
   /* persist-biometric-lockout: same host-only block - see above. */
   RUN_TEST(test_lockout_entry_persists_armed_record);
   RUN_TEST(test_lockout_failed_attempt_below_threshold_writes_nothing);

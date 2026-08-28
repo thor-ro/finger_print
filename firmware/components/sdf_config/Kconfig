@@ -194,9 +194,12 @@ menu "Fingerprint"
 
         config SDF_FP_BAUD_RATE
             int "Fingerprint UART baud rate"
-            default 115200
+            default 19200
             help
                 Baud rate for fingerprint sensor UART communication.
+                The sensor module runs at 19200 8N1; it does not answer at
+                any other rate, so a wrong value here shows up only as a
+                boot-time "Sensor probe FAILED ... check wiring".
 
         config SDF_FP_RESPONSE_TIMEOUT_MS
             int "Fingerprint response timeout (ms)"

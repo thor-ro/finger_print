@@ -16,7 +16,7 @@ When the lock is powered on for the first time (or after a factory reset), it en
 
 1. **Arm:** On first power-on the device arms automatically. If it has lapsed, press the Configuration Button once to re-arm.
 2. **Connect:** Open the [web-companion app](../web-companion/README.md) in a Web-Bluetooth-capable browser and connect to the device. Only one connection is accepted at a time — if someone else holds the slot, press the button on the device to reclaim it.
-3. **Enrol the Admin Fingerprint:** Follow the wizard's step 1. Place the admin's finger on the sensor **three consecutive times**; the fingerprint is saved as **User ID 1** with **Admin privileges (Permission 3)**.
+3. **Enrol the Admin Fingerprint:** Follow the wizard's step 1. The wizard asks for the admin's finger **one scan at a time**: it prompts for scan 1, marks it as soon as the device confirms it, then asks you to lift the finger and place it again for the next — **three scans** in total. The fingerprint is saved as **User ID 1** with **Admin privileges (Permission 3)**.
 4. **Register Your Account:** Create your companion-app username/password. Confirming requires a scan of the Admin finger you just enrolled.
 5. **Pair Your Nuki Lock:** Put your Nuki Smart Lock into pairing mode (hold its button ~5 s until the LED glows), then start pairing from the wizard.
 6. **Finish Setup:** Confirm the final wizard step. The device records that setup is complete, locks itself to this browser's companion, and switches to filtered advertising.
@@ -90,7 +90,7 @@ Enrollment of additional fingerprints is available through the Web Companion App
 3. **Authorize:** The Admin (any user with Permission 3) touches the fingerprint sensor within 10 seconds.
    - If a non-Admin fingerprint is scanned, the LED flashes **red** and the action is rejected.
    - If no fingerprint is provided within 10 seconds, the LED flashes **red** and the device returns to idle.
-4. **Biometric Capture:** Once authorized, the new user places their finger on the sensor **three consecutive times**. After each successful scan, the LED flashes **green**.
+4. **Biometric Capture:** Once authorized, the new user places their finger on the sensor **three consecutive times**. After each successful scan, the LED flashes **green** and the companion app's Enroll Fingerprint panel marks that scan and asks for the next one.
 5. **Completion:** After the third scan, the template is saved with the chosen User ID and permission. The LED breathes solid **green** for a few seconds.
 
 ### Admin User Enrollment (Companion App)

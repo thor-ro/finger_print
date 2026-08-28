@@ -38,7 +38,15 @@ Use `idf.py monitor` to observe UART output during testing.
 
 # Hardware Verification Todo — fp-power-optimizations
 
-Run these steps on the ESP32-C6 target after flashing the firmware with 115200 baud fingerprint UART.
+Run these steps on the ESP32-C6 target after flashing the firmware.
+
+> **Note (2026-08-28):** this section was written assuming a 115200 baud
+> fingerprint UART. The sensor module is fixed at **19200 bps 8N1**
+> (`doc/UART_Fingerprint_Sensor_User_Manual_en.md` line 82) and has no
+> baud-change command, so 115200 was never reachable — it presented as a
+> boot-time `Sensor probe FAILED ... check wiring`. The steps below have been
+> corrected to 19200; the 19200-vs-115200 timing comparison is dropped as
+> unachievable.
 
 ## Prerequisites
 
@@ -49,9 +57,9 @@ Run these steps on the ESP32-C6 target after flashing the firmware with 115200 b
 ## Tasks
 
 - [ ] Flash firmware to hardware: `idf.py -p /dev/cu.Maker4-1405 flash`
-- [ ] Verify 115200 baud UART communication is stable
+- [ ] Verify 19200 baud UART communication is stable
   - Power on device and monitor UART logs
-  - Confirm `Fingerprint initialized (port=..., baud=115200, ...)` log appears
+  - Confirm `Fingerprint initialized (port=..., baud=19200, ...)` log appears
   - Run `fp_probe` (triggered automatically on boot) - confirm "Sensor probe OK" logs
   - Verify no UART framing errors or timeouts during match/enroll operations
 - [ ] Verify interrupt-driven match task wake (no continuous polling)
@@ -60,19 +68,18 @@ Run these steps on the ESP32-C6 target after flashing the firmware with 115200 b
   - Confirm NO periodic "Match request received" or "WDT reset" logs at 400ms intervals
   - Place finger on sensor - confirm immediate match cycle starts (WAKE interrupt triggered)
   - Verify `Match request received` log appears immediately on finger placement
-- [ ] Verify fingerprint match works reliably at 115200 baud
+- [ ] Verify fingerprint match works reliably at 19200 baud
   - Enroll a new admin finger (short press button, 3 touches)
   - Test 10 consecutive matches with enrolled finger - confirm all succeed
   - Test 5 consecutive mismatches with unenrolled finger - confirm `NO_MATCH` returned
   - Verify no `TIMEOUT` or `PROTOCOL_ERROR` results during normal operation
-- [ ] Verify enrollment works at 115200 baud
+- [ ] Verify enrollment works at 19200 baud
   - Start admin enrollment (short press button)
   - Complete 3 enrollment steps - confirm green LED after each
   - Verify enrollment completes and new user can unlock
-- [ ] Measure active time reduction (optional, requires current probe)
-  - Measure active current draw duration for single match at 19200 vs 115200
-  - Confirm ~6x reduction in UART transaction time
-  - Verify faster return to light/deep sleep after match
+- [ ] Measure active time at 19200 baud (optional, requires current probe)
+  - Measure active current draw duration for a single match
+  - Verify return to light/deep sleep after match
 
 ## Notes
 

@@ -1564,7 +1564,7 @@ static void delete_guard_test_setup(void) {
       .tx_pin = 0,
       .rx_pin = 1,
       .power_en_pin = 2,
-      .baud_rate = 115200,
+      .baud_rate = 19200,
       .response_timeout_ms = 1000,
       .rx_buffer_size = 256,
       .tx_buffer_size = 256,
@@ -1772,6 +1772,98 @@ void test_deleted_name_is_available_for_reuse(void) {
 
   sdf_storage_web_user_clear_all();
   delete_guard_test_teardown();
+}
+
+/* ---------------------------------------------------------------------------
+ * add-wizard-enroll-scan-prompts: a captured scan is announced as it happens,
+ * so a companion can ask for one fingerprint at a time instead of stating a
+ * total and going silent until the outcome.
+ *
+ * Host-target-only for the same reason as the delete guard above: the scan
+ * itself needs a scripted sensor ACK (sdf_mock_uart_queue_response()) to
+ * succeed at all.
+ * ------------------------------------------------------------------------- */
+
+#define TEST_FP_CMD_ENROLL_1 0x01u
+
+static int s_enroll_step_evt_count;
+static sdf_event_router_event_t s_enroll_step_evt;
+
+static void enroll_step_evt_handler(void *ctx,
+                                    const sdf_event_router_event_t *event) {
+  (void)ctx;
+  s_enroll_step_evt_count++;
+  s_enroll_step_evt = *event;
+}
+
+/* Same frame shape as queue_sensor_ack(), with the ACK byte chosen by the
+ * caller so a failing scan can be scripted too. */
+static void queue_sensor_reply(uint8_t cmd, uint8_t ack) {
+  uint8_t frame[8] = {TEST_FP_MARKER, cmd, 0x00, 0x00, ack, 0x00, 0x00,
+                      TEST_FP_MARKER};
+  frame[6] = (uint8_t)(frame[1] ^ frame[2] ^ frame[3] ^ frame[4] ^ frame[5]);
+  sdf_mock_uart_queue_response(frame, sizeof(frame));
+}
+
+static void enroll_progress_test_setup(void) {
+  sdf_event_router_reset_for_test();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_init());
+  s_enroll_step_evt_count = 0;
+  memset(&s_enroll_step_evt, 0, sizeof(s_enroll_step_evt));
+  TEST_ASSERT_EQUAL(
+      ESP_OK, sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                                         SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                         enroll_step_evt_handler, NULL));
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_event_router_start());
+  delete_guard_test_setup();
+}
+
+static void enroll_progress_test_teardown(void) {
+  sdf_services_state_t *s = sdf_services_state();
+  sdf_enrollment_sm_init(&s->enrollment);
+  delete_guard_test_teardown();
+}
+
+/* Task 1.1/1.2: the scan that succeeded is counted, and the scan now
+ * expected is named - the pair a client needs to prompt for exactly one
+ * finger placement. */
+void test_enrollment_captured_scan_announces_the_next_one(void) {
+  enroll_progress_test_setup();
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_enrollment_sm_start(&s->enrollment, 3, 1));
+  queue_sensor_reply(TEST_FP_CMD_ENROLL_1, SDF_FINGERPRINT_ACK_SUCCESS);
+
+  sdf_services_run_enrollment_step();
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  TEST_ASSERT_EQUAL(1, s_enroll_step_evt_count);
+  TEST_ASSERT_EQUAL(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                    s_enroll_step_evt.type);
+  TEST_ASSERT_EQUAL(1, s_enroll_step_evt.payload.enrollment.step);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_2,
+                    s_enroll_step_evt.payload.enrollment.status);
+
+  enroll_progress_test_teardown();
+}
+
+/* Task 1.3: a retried scan captured nothing, so it announces nothing - a
+ * client that counted it would ask for the wrong finger placement. */
+void test_enrollment_retried_scan_announces_nothing(void) {
+  enroll_progress_test_setup();
+
+  sdf_services_state_t *s = sdf_services_state();
+  TEST_ASSERT_EQUAL(ESP_OK, sdf_enrollment_sm_start(&s->enrollment, 3, 1));
+  queue_sensor_reply(TEST_FP_CMD_ENROLL_1, SDF_FINGERPRINT_ACK_FAIL);
+
+  sdf_services_run_enrollment_step();
+  vTaskDelay(pdMS_TO_TICKS(50));
+
+  TEST_ASSERT_EQUAL(0, s_enroll_step_evt_count);
+  TEST_ASSERT_EQUAL(SDF_ENROLLMENT_STATE_STEP_1, s->enrollment.state);
+  TEST_ASSERT_EQUAL(0, s->enrollment.completed_steps);
+
+  enroll_progress_test_teardown();
 }
 
 #endif /* CONFIG_IDF_TARGET_LINUX */

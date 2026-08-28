@@ -3,9 +3,12 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
+	ENROLL_DEFAULT_SCANS,
 	UM_RESULT_MESSAGES,
 	decodeNotification,
 	encodeUmRequest,
+	enrollProgressOf,
+	isEnrollProgress,
 	isListPart,
 	isUmReply,
 	requestIdOf,
@@ -104,5 +107,67 @@ describe('permission names', () => {
 		expect(umPermissionName(3)).toBe('Admin');
 		expect(umPermissionName(1)).toBe('Standard');
 		expect(umPermissionName(2)).toBe('Level 2');
+	});
+});
+
+
+describe('enrolment progress notifications', () => {
+	it('recognises a progress notification', () => {
+		expect(isEnrollProgress({ status: 'progress', captured: 1, step: 2, total: 3 })).toBe(true);
+	});
+
+	it('does not mistake an outcome or a reply for progress', () => {
+		expect(isEnrollProgress({ status: 'success', user_id: 1 })).toBe(false);
+		expect(isEnrollProgress({ status: 'failed', step: 2, error_code: 1 })).toBe(false);
+		expect(isEnrollProgress({ req: 4, result: 'ok' })).toBe(false);
+		expect(isEnrollProgress({ req: 4, users: [] })).toBe(false);
+	});
+
+	it('is not classified as a terminal reply, so it resolves nothing', () => {
+		const progress = { status: 'progress', captured: 1, step: 2, total: 3, req: 9 };
+		expect(isUmReply(progress)).toBe(false);
+		expect(isListPart(progress)).toBe(false);
+	});
+
+	it('carries the request id without it being a reply', () => {
+		expect(requestIdOf({ status: 'progress', step: 1, req: 12 })).toBe(12);
+	});
+
+	it('reads captured, expected scan and total', () => {
+		expect(enrollProgressOf({ status: 'progress', captured: 2, step: 3, total: 3 })).toEqual({
+			captured: 2,
+			step: 3,
+			total: 3
+		});
+	});
+
+	it('defaults the total to the usual scan count', () => {
+		expect(enrollProgressOf({ status: 'progress', captured: 1, step: 2 }).total).toBe(
+			ENROLL_DEFAULT_SCANS
+		);
+	});
+
+	it('derives the captured count from the expected scan when it is absent', () => {
+		expect(enrollProgressOf({ status: 'progress', step: 3 }).captured).toBe(2);
+	});
+
+	it('clamps values a device should never send', () => {
+		expect(enrollProgressOf({ status: 'progress', captured: 9, step: 9, total: 3 })).toEqual({
+			captured: 3,
+			step: 3,
+			total: 3
+		});
+		expect(enrollProgressOf({ status: 'progress', captured: -1, step: 0, total: 3 })).toEqual({
+			captured: 0,
+			step: 1,
+			total: 3
+		});
+	});
+
+	it('decodes a device progress frame end to end', () => {
+		const frame = new TextEncoder().encode('{"status":"progress","captured":1,"step":2,"total":3}');
+		const parsed = decodeNotification(frame)!;
+		expect(isEnrollProgress(parsed)).toBe(true);
+		expect(enrollProgressOf(parsed)).toEqual({ captured: 1, step: 2, total: 3 });
 	});
 });

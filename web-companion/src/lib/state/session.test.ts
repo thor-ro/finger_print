@@ -192,3 +192,144 @@ describe('test isolation covers the whole store', () => {
 		expect(declared.filter((name) => !cleared.has(name))).toEqual([]);
 	});
 });
+
+describe('wizard asks for one fingerprint scan at a time', () => {
+	async function connectInSetupPhase(t: FakeTransport): Promise<void> {
+		t.queueRead('setup_state', new Uint8Array([0])); // SETUP_NOT_STARTED
+		await session.connect(() => t);
+	}
+
+	function progress(captured: number, step: number): Uint8Array {
+		return jsonBytes({ status: 'progress', captured, step, total: 3 });
+	}
+
+	async function startAdminEnrolment(t: FakeTransport): Promise<void> {
+		t.scriptWrite('enroll', { respond: jsonBytes({ req: 1, result: 'ok' }) });
+		await session.wizardEnrollAdmin();
+	}
+
+	it('asks for the first scan by name with nothing captured yet', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		await startAdminEnrolment(t);
+
+		expect(session.view).toBe('wizard');
+		expect(session.wizardEnrollProgressVisible).toBe(true);
+		expect(session.wizardEnrollCaptured).toBe(0);
+		expect(session.wizardEnrollExpected).toBe(1);
+		expect(session.wizardEnrollMessage).toContain('scan 1 of 3');
+	});
+
+	it('advances the prompt on each scan the device reports captured', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		await startAdminEnrolment(t);
+
+		t.notify('enroll', progress(1, 2));
+		expect(session.wizardEnrollCaptured).toBe(1);
+		expect(session.wizardEnrollExpected).toBe(2);
+		expect(session.wizardEnrollMessage).toContain('scan 2 of 3');
+
+		t.notify('enroll', progress(2, 3));
+		expect(session.wizardEnrollCaptured).toBe(2);
+		expect(session.wizardEnrollExpected).toBe(3);
+		expect(session.wizardEnrollMessage).toContain('scan 3 of 3');
+	});
+
+	it('does not advance without the device saying so', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		await startAdminEnrolment(t);
+
+		vi.useFakeTimers();
+		await vi.advanceTimersByTimeAsync(30_000);
+
+		expect(session.wizardEnrollCaptured).toBe(0);
+		expect(session.wizardEnrollExpected).toBe(1);
+	});
+
+	it('shows every scan captured, then moves on to registration', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		await startAdminEnrolment(t);
+		t.notify('enroll', progress(1, 2));
+		t.notify('enroll', progress(2, 3));
+
+		t.notify('enroll', jsonBytes({ status: 'success', user_id: 1 }));
+
+		expect(session.wizardEnrollCaptured).toBe(session.wizardEnrollTotal);
+		expect(session.wizardEnrollProgressVisible).toBe(false);
+		expect(session.wizardStep).toBe('register');
+	});
+
+	it('stops asking for a scan when the enrolment fails', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		await startAdminEnrolment(t);
+		t.notify('enroll', progress(1, 2));
+
+		t.notify('enroll', jsonBytes({ status: 'failed', step: 2, error_code: 1 }));
+
+		expect(session.wizardEnrollProgressVisible).toBe(false);
+		expect(session.wizardEnrollExpected).toBe(0);
+		expect(session.wizardEnrollMessage).toBe('');
+		expect(session.wizardEnrollStatus).toContain('failed at step 2');
+		expect(session.wizardStep).toBe('enroll');
+	});
+
+	it('a progress notification does not resolve the request that started it', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		t.scriptWrite('enroll', {
+			respond: [progress(0, 1), jsonBytes({ req: 1, result: 'ok' })]
+		});
+
+		await session.wizardEnrollAdmin();
+
+		// The terminal reply still arrived and was the one acted on.
+		expect(session.wizardEnrollStatus).toBe('');
+		expect(session.wizardEnrollProgressVisible).toBe(true);
+	});
+
+	it('states the scan count when the device reports no progress at all', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		await startAdminEnrolment(t);
+
+		expect(session.wizardEnrollProgressVisible).toBe(true);
+		expect(session.wizardEnrollTotal).toBe(3);
+		expect(session.wizardEnrollMessage).toContain('of 3');
+	});
+});
+
+describe('dashboard enrolment shares the per-scan prompting', () => {
+	it('tracks captured scans from the device notifications', async () => {
+		const t = new FakeTransport();
+		await session.connect(() => t);
+		t.scriptWrite('enroll', { respond: jsonBytes({ req: 1, result: 'ok' }) });
+
+		await session.enroll(2, 1);
+		expect(session.enrollExpected).toBe(1);
+
+		t.notify('enroll', jsonBytes({ status: 'progress', captured: 1, step: 2, total: 3 }));
+
+		expect(session.enrollCaptured).toBe(1);
+		expect(session.enrollExpected).toBe(2);
+		expect(session.enrollMessage).toContain('scan 2 of 3');
+	});
+
+	it('does not expect a scan of the new user before the admin authorizes', async () => {
+		vi.useFakeTimers();
+		const t = new FakeTransport();
+		await session.connect(() => t);
+		t.scriptWrite('enroll', {}); // no reply yet: still waiting on the admin
+
+		const pending = session.enroll(2, 1);
+		expect(session.enrollExpected).toBe(0);
+		expect(session.enrollMessage).toContain('authorizing Admin scan');
+
+		// Let the client-side reply timeout lapse so nothing is left pending.
+		await vi.advanceTimersByTimeAsync(20_000);
+		await pending;
+	});
+});

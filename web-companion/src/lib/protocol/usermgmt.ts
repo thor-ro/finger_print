@@ -13,8 +13,11 @@
  *   request:   {"req":N,"verb":"list"|"enroll"|"delete"|"set_permission"|"rename",...}
  *   reply:     {"req":N,"result":"<outcome>"}
  *   list part: {"req":N,"verb":"list","part":i,"end":true|false,"users":[...]}
- *   progress:  {"status":"success"|"failed","user_id":..,"step":..,"error_code":..}
- *              plus "req":N when started by a user-management request.
+ *   progress:  {"status":"progress","captured":C,"step":N,"total":T}
+ *   outcome:   {"status":"success"|"failed","user_id":..,"step":..,"error_code":..}
+ *              plus "req":N when started by a user-management request. A
+ *              progress notification carries the id without consuming it -
+ *              the terminal reply for that request is still owed.
  */
 
 export interface UmRequest {
@@ -50,6 +53,44 @@ export function isUmReply(data: Notification): boolean {
 
 export function requestIdOf(data: Notification): number | undefined {
 	return typeof data.req === 'number' ? data.req : undefined;
+}
+
+/** Scans an enrolment takes when the device does not say otherwise. */
+export const ENROLL_DEFAULT_SCANS = 3;
+
+export interface EnrollProgress {
+	/** Scans the device has captured so far. */
+	captured: number;
+	/** Scan the device is waiting for now, 1-based. */
+	step: number;
+	/** Scans this enrolment requires in total. */
+	total: number;
+}
+
+/**
+ * A progress notification reports which scan the device is waiting for. It
+ * is not a terminal reply and not a list part, so it never resolves a
+ * pending request - it only moves the display forward.
+ */
+export function isEnrollProgress(data: Notification): boolean {
+	return data.status === 'progress' && !isUmReply(data) && !isListPart(data);
+}
+
+/**
+ * Reads a progress notification, tolerating a device that omits fields: an
+ * absent total means the usual three scans, and an absent captured count is
+ * derived from the scan being asked for.
+ */
+export function enrollProgressOf(data: Notification): EnrollProgress {
+	const total = typeof data.total === 'number' && data.total > 0 ? data.total : ENROLL_DEFAULT_SCANS;
+	const step = typeof data.step === 'number' ? clamp(data.step, 1, total) : 1;
+	const captured =
+		typeof data.captured === 'number' ? clamp(data.captured, 0, total) : Math.max(0, step - 1);
+	return { captured, step, total };
+}
+
+function clamp(value: number, min: number, max: number): number {
+	return Math.min(max, Math.max(min, Math.trunc(value)));
 }
 
 /** The users carried by a list part (already validated as an array). */

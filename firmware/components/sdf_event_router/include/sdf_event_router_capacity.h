@@ -11,7 +11,7 @@
 #define SDF_EVENT_ROUTER_SUBS_SERVICES_MATCH  3
 #define SDF_EVENT_ROUTER_SUBS_SERVICES_ADMIN  4
 #define SDF_EVENT_ROUTER_SUBS_SERVICES_ENROLL 3
-#define SDF_EVENT_ROUTER_SUBS_BLE_COMPANION   3
+#define SDF_EVENT_ROUTER_SUBS_BLE_COMPANION   4
 
 /* Emulator gate fixtures (firmware/lockout_reset_gate) link the full sdf_app
  * closure and add an observer of their own on top of it. Declared here like
@@ -28,7 +28,7 @@
      SDF_EVENT_ROUTER_SUBS_SERVICES_ADMIN + \
      SDF_EVENT_ROUTER_SUBS_SERVICES_ENROLL + \
      SDF_EVENT_ROUTER_SUBS_BLE_COMPANION + \
-     SDF_EVENT_ROUTER_SUBS_GATE_FIXTURE) /* 23 in a production build */
+     SDF_EVENT_ROUTER_SUBS_GATE_FIXTURE) /* 24 in a production build */
 
 /* Headroom above declared total. Set to 0: sizing the pool exactly at the
  * declared total ensures that any undeclared subscription immediately causes

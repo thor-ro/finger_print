@@ -32,8 +32,9 @@
 
 		{#if session.enrollProgressVisible}
 			<ScanProgress
-				stepText={session.enrollStepText}
-				percent={session.enrollPercent}
+				captured={session.enrollCaptured}
+				expected={session.enrollExpected}
+				total={session.enrollTotal}
 				message={session.enrollMessage}
 			/>
 		{/if}

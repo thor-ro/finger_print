@@ -36,3 +36,4 @@ ota_signing_key.pem
 # Web companion build artifacts
 node_modules/
 web-companion/.svelte-kit/
+firmware/test_runner/managed_components

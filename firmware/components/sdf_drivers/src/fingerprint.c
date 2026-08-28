@@ -128,6 +128,7 @@ typedef struct {
   int tx_pin;
   int rx_pin;
   int power_en_pin;
+  uint32_t baud_rate;
   uint32_t response_timeout_ms;
   QueueHandle_t request_queue;
   TaskHandle_t owner_task;
@@ -141,6 +142,7 @@ static fp_state_t s_state = {
     .tx_pin = -1,
     .rx_pin = -1,
     .power_en_pin = -1,
+    .baud_rate = 0,
     .response_timeout_ms = 0,
     .request_queue = NULL,
     .owner_task = NULL,
@@ -363,10 +365,12 @@ static esp_err_t fp_handle_probe(void) {
 #endif
   }
 
+  /* A wrong baud rate is indistinguishable from a wiring fault here - the
+   * sensor simply never answers - so report it alongside the pins. */
   ESP_LOGE(TAG, "Sensor probe FAILED after %u attempts – check wiring "
-                "(TX=%d, RX=%d, power_en=%d)",
+                "(TX=%d, RX=%d, power_en=%d) and baud (%u)",
            (unsigned)max_attempts, s_state.tx_pin, s_state.rx_pin,
-           s_state.power_en_pin);
+           s_state.power_en_pin, (unsigned)s_state.baud_rate);
   s_state.response_timeout_ms = saved_timeout;
   return err;
 }
@@ -1254,6 +1258,7 @@ esp_err_t fp_init(const sdf_fingerprint_driver_config_t *config) {
   s_state.uart_port = config->uart_port;
   s_state.tx_pin = config->tx_pin;
   s_state.rx_pin = config->rx_pin;
+  s_state.baud_rate = config->baud_rate;
   s_state.response_timeout_ms = config->response_timeout_ms;
   fp_set_power_direct(false);
   s_state.power_is_on = false;

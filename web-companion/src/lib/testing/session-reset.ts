@@ -21,8 +21,9 @@ export function resetSessionForTests(): void {
 	s.wizardIndicator = '';
 	s.wizardEnrollStatus = '';
 	s.wizardEnrollProgressVisible = false;
-	s.wizardEnrollStepText = 'Step 1 of 3';
-	s.wizardEnrollPercent = 0;
+	s.wizardEnrollCaptured = 0;
+	s.wizardEnrollExpected = 1;
+	s.wizardEnrollTotal = 3;
 	s.wizardEnrollMessage = '';
 	s.wizardRegisterStatus = '';
 	s.wizardNukiStatus = '';
@@ -35,8 +36,9 @@ export function resetSessionForTests(): void {
 	s.configVisible = false;
 	s.configStatus = '';
 	s.enrollProgressVisible = false;
-	s.enrollStepText = 'Step 1 of 3';
-	s.enrollPercent = 0;
+	s.enrollCaptured = 0;
+	s.enrollExpected = 0;
+	s.enrollTotal = 3;
 	s.enrollMessage = '';
 	s.enrollResultText = '';
 	s.enrollResultColor = '';

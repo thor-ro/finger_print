@@ -28,6 +28,19 @@ const OTA_RESPONSE_TIMEOUT_MS = 10000;
 // declared ambiguous.
 const OTA_COMPLETION_GRACE_MS = 5000;
 
+/**
+ * Asks for one scan at a time. The device reports which scan it is waiting
+ * for; nothing here advances on a timer, so the prompt can never claim a
+ * scan the device has not confirmed.
+ */
+function scanPrompt(progress: um.EnrollProgress, whose: string): string {
+	const { captured, step, total } = progress;
+	if (captured === 0) {
+		return `Place ${whose} on the sensor - scan ${step} of ${total}.`;
+	}
+	return `Scan ${captured} of ${total} captured. Lift the finger, then place it again for scan ${step} of ${total}.`;
+}
+
 export type ViewId = 'connection' | 'wizard' | 'auth' | 'dashboard';
 
 export interface UmUser {
@@ -64,8 +77,9 @@ class SessionStore {
 	wizardIndicator = $state('');
 	wizardEnrollStatus = $state('');
 	wizardEnrollProgressVisible = $state(false);
-	wizardEnrollStepText = $state('Step 1 of 3');
-	wizardEnrollPercent = $state(0);
+	wizardEnrollCaptured = $state(0);
+	wizardEnrollExpected = $state(1);
+	wizardEnrollTotal = $state(um.ENROLL_DEFAULT_SCANS);
 	wizardEnrollMessage = $state('');
 	wizardRegisterStatus = $state('');
 	wizardNukiStatus = $state('');
@@ -86,8 +100,9 @@ class SessionStore {
 
 	// --- Dashboard: enrollment panel ---
 	enrollProgressVisible = $state(false);
-	enrollStepText = $state('Step 1 of 3');
-	enrollPercent = $state(0);
+	enrollCaptured = $state(0);
+	enrollExpected = $state(0);
+	enrollTotal = $state(um.ENROLL_DEFAULT_SCANS);
 	enrollMessage = $state('');
 	enrollResultText = $state('');
 	enrollResultColor = $state('');
@@ -210,12 +225,19 @@ class SessionStore {
 			return;
 		}
 		if (result.result === 'ok') {
+			// Started. The device reports each captured scan from here; this
+			// is only the opening prompt, and it is also what a device that
+			// reports no progress at all leaves on screen.
 			this.wizardEnrollProgressVisible = true;
-			this.wizardEnrollStepText = 'Step 1 of 3';
-			this.wizardEnrollPercent = 33;
-			this.wizardEnrollMessage =
-				'Place the admin finger on the sensor for each of the 3 scans...';
-			return; // progress notifications take it from here
+			this.wizardEnrollCaptured = 0;
+			this.wizardEnrollExpected = 1;
+			this.wizardEnrollTotal = um.ENROLL_DEFAULT_SCANS;
+			this.wizardEnrollStatus = '';
+			this.wizardEnrollMessage = scanPrompt(
+				{ captured: 0, step: 1, total: um.ENROLL_DEFAULT_SCANS },
+				"the admin's finger"
+			);
+			return;
 		}
 		this.wizardEnrollStatus = um.umResultMessage(String(result.result));
 	}
@@ -744,6 +766,11 @@ class SessionStore {
 
 		this.enrollResultText = '';
 		this.enrollProgressVisible = true;
+		this.enrollCaptured = 0;
+		// No scan of the new user's finger is expected yet - the authorizing
+		// Admin scan comes first, and it is not one of the three.
+		this.enrollExpected = 0;
+		this.enrollTotal = um.ENROLL_DEFAULT_SCANS;
 		this.enrollMessage = 'Waiting for the authorizing Admin scan on the device...';
 
 		const result = await this.sendUmRequest({ verb: 'enroll', user_id: userId, permission });
@@ -754,7 +781,10 @@ class SessionStore {
 		}
 		if (result.result === 'ok') {
 			// Enrolment started: progress notifications take it from here.
-			this.enrollMessage = 'Authorized - follow the prompts: the new user scans three times.';
+			// This wording is also what a device that reports no progress
+			// leaves on screen, so it states the scan count itself.
+			this.enrollExpected = 1;
+			this.enrollMessage = `Authorized - the new user now scans ${this.enrollTotal} times.`;
 			return true;
 		}
 		this.enrollProgressVisible = false;
@@ -790,37 +820,50 @@ class SessionStore {
 		}
 
 		if (parsed.status === 'success') {
+			this.enrollCaptured = this.enrollTotal;
+			this.enrollExpected = 0;
 			this.enrollProgressVisible = false;
 			this.enrollResultColor = 'var(--ok)';
 			this.enrollResultText = `Enrollment successful! User ID: ${parsed.user_id}`;
 		} else if (parsed.status === 'failed') {
 			this.enrollProgressVisible = false;
+			this.enrollExpected = 0;
 			this.enrollResultColor = 'var(--danger)';
 			this.enrollResultText = `Enrollment failed at step ${parsed.step}: error ${parsed.error_code}`;
-		} else if (parsed.step !== undefined) {
-			const step = Number(parsed.step);
-			const maxSteps = 3;
-			this.enrollStepText = `Step ${step} of ${maxSteps}`;
-			this.enrollPercent = Math.round((step / maxSteps) * 100);
-			this.enrollMessage = `Place finger for step ${step}...`;
+		} else if (um.isEnrollProgress(parsed)) {
+			const progress = um.enrollProgressOf(parsed);
+			this.enrollProgressVisible = true;
+			this.enrollCaptured = progress.captured;
+			this.enrollExpected = progress.step;
+			this.enrollTotal = progress.total;
+			this.enrollMessage = scanPrompt(progress, "the new user's finger");
 		}
 	}
 
 	private handleWizardEnrollNotification(parsed: um.Notification): void {
 		if (parsed.status === 'success') {
+			// Show the last scan as captured before the step goes away, so
+			// the visualization never ends mid-count.
+			this.wizardEnrollCaptured = this.wizardEnrollTotal;
+			this.wizardEnrollExpected = 0;
 			this.wizardEnrollProgressVisible = false;
+			this.wizardEnrollMessage = '';
 			this.wizardEnrollStatus = 'Admin enrolment successful.';
 			this.showWizardStep('register');
 			this.wizardIndicator = 'Admin enrolled - register your account below.';
 		} else if (parsed.status === 'failed') {
 			this.wizardEnrollProgressVisible = false;
+			this.wizardEnrollExpected = 0;
+			this.wizardEnrollMessage = '';
 			this.wizardEnrollStatus =
 				`Enrolment failed at step ${parsed.step} (error ${parsed.error_code}) - try again.`;
-		} else if (parsed.step !== undefined) {
-			const maxSteps = 3;
-			this.wizardEnrollStepText = `Step ${parsed.step} of ${maxSteps}`;
-			this.wizardEnrollPercent = Math.round((Number(parsed.step) / maxSteps) * 100);
-			this.wizardEnrollMessage = `Place finger for scan ${parsed.step} of ${maxSteps}...`;
+		} else if (um.isEnrollProgress(parsed)) {
+			const progress = um.enrollProgressOf(parsed);
+			this.wizardEnrollProgressVisible = true;
+			this.wizardEnrollCaptured = progress.captured;
+			this.wizardEnrollExpected = progress.step;
+			this.wizardEnrollTotal = progress.total;
+			this.wizardEnrollMessage = scanPrompt(progress, "the admin's finger");
 		}
 	}
 

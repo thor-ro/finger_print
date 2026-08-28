@@ -132,6 +132,22 @@ static void sdf_enroll_task_emit_complete(uint16_t user_id, uint8_t permission) 
              (unsigned)user_id, (unsigned)permission);
 }
 
+/* Announces that a scan was captured and the machine has moved on to the
+ * next one. `completed` counts captured scans, `state` is the scan now
+ * expected - the same pairing sdf_services_emit_enrollment_event() uses, so
+ * subscribers read one shape for both the start and the advances. */
+static void sdf_enroll_task_emit_step_progress(uint8_t completed, uint8_t state) {
+    sdf_event_router_event_t evt = {
+        .type = SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+        .priority = SDF_EVENT_ROUTER_PRIO_NORMAL,
+        .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+        .payload.enrollment = {.step = completed, .status = state}
+    };
+    sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS);
+    ESP_LOGI(TAG, "Enrollment progress: captured=%u next_state=%u",
+             (unsigned)completed, (unsigned)state);
+}
+
 static void sdf_enroll_task_emit_failed(uint8_t step, int8_t error_code) {
     sdf_event_router_event_t evt = {
         .type = SDF_EVENT_ROUTER_ENROLLMENT_FAILED,
@@ -290,13 +306,19 @@ void sdf_services_run_enrollment_step(void) {
             break;
         }
 
-        case SDF_ENROLL_ACT_EXECUTE_STEP:
+        case SDF_ENROLL_ACT_EXECUTE_STEP: {
+            /* Read the transition's result before releasing the lock; the
+             * emit itself happens outside it, like every other emit here. */
+            uint8_t captured = s->enrollment.completed_steps;
+            uint8_t next_state = (uint8_t)s->enrollment.state;
             xSemaphoreGive(s->lock);
+            sdf_enroll_task_emit_step_progress(captured, next_state);
             if (s_enroll_state.retry_timer) {
                 esp_timer_start_once(s_enroll_state.retry_timer,
                                      (uint64_t)SDF_ENROLL_RETRY_INTERVAL_MS * 1000ULL);
             }
             break;
+        }
 
         case SDF_ENROLL_ACT_NONE:
         default:

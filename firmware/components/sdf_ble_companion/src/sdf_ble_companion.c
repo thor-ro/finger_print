@@ -237,6 +237,85 @@ static sdf_ble_companion_connection_t *sdf_ble_companion_get_free_conn(void) {
     return NULL;
 }
 
+/* Scans one enrolment takes: the STEP_1..STEP_3 run of the enrolment state
+ * machine. Sent with each progress notification so the client renders the
+ * count the device actually requires rather than one of its own. */
+#define SDF_BLE_COMPANION_ENROLL_SCANS \
+    ((int)SDF_ENROLLMENT_STATE_STEP_3 - (int)SDF_ENROLLMENT_STATE_STEP_1 + 1)
+
+/* Delivers an enrolment notification to the connections entitled to it.
+ *
+ * Authenticated connections always are. So is the setup-phase connection,
+ * even though it is deliberately unauthenticated: the first Admin enrolment
+ * - the one the setup wizard drives - happens before any account exists to
+ * log in with, so gating delivery on AUTHENTICATED would leave the wizard
+ * blind to the enrolment it just started. The write side already admits that
+ * connection (sdf_ble_companion_um_admits); this is the same admission on
+ * the notify side, keyed on the setup phase still being armed rather than on
+ * the setup *state*, which advances the moment the enrolment succeeds.
+ *
+ * Unauthenticated delivery goes through notify_um(), which writes the same
+ * characteristic without the authentication gate that notify_enroll()
+ * applies. */
+static void sdf_ble_companion_deliver_enroll_json(const char *json) {
+    if (!json) return;
+    size_t len = strlen(json);
+    bool setup_armed = sdf_services_setup_phase_is_armed();
+
+    for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
+        if (!s_connections[i].connected) {
+            continue;
+        }
+        if (s_connections[i].auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
+            sdf_ble_companion_notify_enroll(s_connections[i].conn_handle,
+                                            (const uint8_t *)json, len);
+        } else if (setup_armed) {
+            sdf_ble_companion_notify_um(s_connections[i].conn_handle,
+                                        (const uint8_t *)json, len);
+        }
+    }
+}
+
+/* Enrolment progress (add-wizard-enroll-scan-prompts): announced each time
+ * the scan set changes, so a client can ask for one scan at a time instead
+ * of stating a total and going silent until the outcome.
+ *
+ * payload.enrollment.step counts captured scans; payload.enrollment.status
+ * is the state now entered. Only the in-progress states are progress - the
+ * event is emitted on a failed start too, and that is the terminal reply's
+ * business, not this notification's. */
+static void sdf_ble_companion_enrollment_step_handler(void *ctx,
+                                                       const sdf_event_router_event_t *event) {
+    (void)ctx;
+    if (!event) return;
+
+    uint8_t captured = event->payload.enrollment.step;
+    uint8_t state = event->payload.enrollment.status;
+    if (state < SDF_ENROLLMENT_STATE_STEP_1 || state > SDF_ENROLLMENT_STATE_STEP_3) {
+        return;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return;
+    cJSON_AddStringToObject(root, "status", "progress");
+    cJSON_AddNumberToObject(root, "captured", captured);
+    cJSON_AddNumberToObject(root, "step", state);
+    cJSON_AddNumberToObject(root, "total", SDF_BLE_COMPANION_ENROLL_SCANS);
+    /* Attribution (companion-user-mgmt): the id is carried but NOT consumed
+     * - the terminal reply for this request is still owed. */
+    if (s_um_active_enroll_req_id != 0) {
+        cJSON_AddNumberToObject(root, "req",
+                                (double)s_um_active_enroll_req_id);
+    }
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (json_str) {
+        sdf_ble_companion_deliver_enroll_json(json_str);
+        free(json_str);
+    }
+}
+
 static void sdf_ble_companion_enrollment_complete_handler(void *ctx,
                                                            const sdf_event_router_event_t *event) {
     (void)ctx;
@@ -260,14 +339,7 @@ static void sdf_ble_companion_enrollment_complete_handler(void *ctx,
     cJSON_Delete(root);
 
     if (json_str) {
-        // Broadcast to all authenticated connections
-        for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
-            if (s_connections[i].connected &&
-                s_connections[i].auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
-                sdf_ble_companion_notify_enroll(s_connections[i].conn_handle,
-                                                 (const uint8_t *)json_str, strlen(json_str));
-            }
-        }
+        sdf_ble_companion_deliver_enroll_json(json_str);
         free(json_str);
     }
 }
@@ -296,14 +368,7 @@ static void sdf_ble_companion_enrollment_failed_handler(void *ctx,
     cJSON_Delete(root);
 
     if (json_str) {
-        // Broadcast to all authenticated connections
-        for (int i = 0; i < SDF_BLE_COMPANION_MAX_CONNECTIONS; i++) {
-            if (s_connections[i].connected &&
-                s_connections[i].auth_state == SDF_BLE_COMPANION_AUTH_STATE_AUTHENTICATED) {
-                sdf_ble_companion_notify_enroll(s_connections[i].conn_handle,
-                                                 (const uint8_t *)json_str, strlen(json_str));
-            }
-        }
+        sdf_ble_companion_deliver_enroll_json(json_str);
         free(json_str);
     }
 }
@@ -2027,6 +2092,15 @@ esp_err_t sdf_ble_companion_init(const sdf_ble_companion_callbacks_t *callbacks)
                                      NULL);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "Failed to subscribe to enrollment complete: %s", esp_err_to_name(err));
+    }
+
+    err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
+                                     SDF_EVENT_ROUTER_PRIO_NORMAL,
+                                     sdf_ble_companion_enrollment_step_handler,
+                                     NULL);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to subscribe to enrollment step progress: %s",
+                 esp_err_to_name(err));
     }
 
     err = sdf_event_router_subscribe(SDF_EVENT_ROUTER_ENROLLMENT_FAILED,

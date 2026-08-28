@@ -17,16 +17,22 @@
 	<section class="dashboard-section">
 		<h3>Step 1 of 4 · Enrol the Admin Fingerprint</h3>
 		<p>
-			The first Admin fingerprint unlocks every later step. Place the admin's
-			finger on the sensor when prompted by the device.
+			The first Admin fingerprint unlocks every later step. It takes
+			{session.wizardEnrollTotal} scans of the same finger; this page asks for them
+			one at a time and marks each one the device confirms.
 		</p>
-		<button class="primary-btn" onclick={() => void session.wizardEnrollAdmin()}>
-			Enrol Admin Finger
+		<button
+			class="primary-btn"
+			disabled={session.wizardEnrollProgressVisible}
+			onclick={() => void session.wizardEnrollAdmin()}
+		>
+			{session.wizardEnrollProgressVisible ? 'Enrolment in progress…' : 'Enrol Admin Finger'}
 		</button>
 		{#if session.wizardEnrollProgressVisible}
 			<ScanProgress
-				stepText={session.wizardEnrollStepText}
-				percent={session.wizardEnrollPercent}
+				captured={session.wizardEnrollCaptured}
+				expected={session.wizardEnrollExpected}
+				total={session.wizardEnrollTotal}
 				message={session.wizardEnrollMessage}
 			/>
 		{/if}

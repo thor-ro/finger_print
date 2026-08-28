@@ -49,7 +49,7 @@ esp-emu --chip esp32c6 --firmware /tmp/tr_merged.bin --elf /tmp/tr_hw/sdf_test_r
 idf.py -B /tmp/tr_hw -D SDKCONFIG=/tmp/sdkconfig.hw -p <PORT> flash monitor
 ```
 
-The chip-target run is clean: **352 tests, 0 failures, 13 ignored** (2026-08-28, under esp-emu; the same suite minus `persist-biometric-lockout`'s five `sdf_storage` cases ran 347/0/13 on an ESP32-C6 over USB the same day). The host `linux` run is **426 / 0 / 12**; the totals differ legitimately because two tests that assert linux-only mock contracts (`..._gpio_get_level_returns_mock_fixed_value`, `..._sleep_retention_linux_noops`) self-ignore on chip, and `test_sdf_platform_sleep_retention_chip_roundtrip` self-ignores on linux.
+The chip-target run is clean: **352 tests, 0 failures, 13 ignored** (2026-08-28, under esp-emu; the same suite minus `persist-biometric-lockout`'s five `sdf_storage` cases ran 347/0/13 on an ESP32-C6 over USB the same day). The host `linux` run is **428 / 0 / 12**; the totals differ legitimately because two tests that assert linux-only mock contracts (`..._gpio_get_level_returns_mock_fixed_value`, `..._sleep_retention_linux_noops`) self-ignore on chip, and `test_sdf_platform_sleep_retention_chip_roundtrip` self-ignores on linux.
 
 Two chip-target gotchas when reading a failing run:
 
@@ -99,7 +99,7 @@ header aborts boot 2 before `app_main()` (the partition table ends at
 `0x400000`, so the layout is unchanged); and it defines
 `SDF_EVENT_ROUTER_SUBS_GATE_FIXTURE=1` so its own observer is a *declared*
 subscriber — the router pool is sized with zero headroom on purpose, so an
-undeclared 24th subscription would (correctly) fail `sdf_event_router_start()`.
+undeclared 25th subscription would (correctly) fail `sdf_event_router_start()`.
 
 ```bash
 source /Users/thorstenropertz/.espressif/v6.0.2/esp-idf/export.sh

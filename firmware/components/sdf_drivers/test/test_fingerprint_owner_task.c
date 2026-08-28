@@ -29,7 +29,7 @@ static sdf_fingerprint_driver_config_t fp_test_config(void) {
       .tx_pin = 0,
       .rx_pin = 1,
       .power_en_pin = 2,
-      .baud_rate = 115200,
+      .baud_rate = 19200,
       .response_timeout_ms = 5000,
       .rx_buffer_size = 256,
       .tx_buffer_size = 256,
