@@ -14,15 +14,23 @@ import {
 	stretchPassword
 } from './auth';
 
-// Vectors captured from the legacy app's derivation so the port is provably
-// unchanged: PBKDF2-HMAC-SHA256 stretch then HMAC-SHA256(stretched, nonce).
+// Vectors computed from the FIRMWARE's definition of the credential:
+// PBKDF2-HMAC-SHA256(SHA-256(password), salt, iterations), then
+// HMAC-SHA256(stretched, nonce).
+//
+// These previously held vectors "captured from the legacy app's derivation",
+// which stretched the raw password instead. That pinned the client to its own
+// behaviour rather than to sdf_services_web_auth_stretch_credential(), so a
+// derivation that could never match the device passed its tests and every
+// login failed on hardware. Derive expectations from the contract, never from
+// what this module happens to do.
 const VECTOR = {
 	password: 'correct horse',
 	salt: Uint8Array.from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]),
 	iterations: 1000,
 	nonce: Uint8Array.from([255, 254, 253, 252, 251, 250, 249, 248, 247, 246, 245, 244, 243, 242, 241, 240]),
-	stretchedHex: 'c914cc4f06cc6e8f46d157e3a1b5aa7abceebb17bb0444cd4c4ac16ca2ae9864',
-	responseHex: '6472866d04315dabfa2910ebc5d18d59a50e925bdede4e9562cd89a6fa4fc9f4',
+	stretchedHex: 'b094fa8ecd7e2c0bf520b0f0382584810a3adad51f0a9356c667cd82c1504b8f',
+	responseHex: '284d7dca4687f5565aecf6aba8bad349441c9f67f9620290af37c3694082c435',
 	sha256Hex: '4104d36f8da2c254349f85836793ebe029e0c957063a34c91c2e9203187b5631'
 };
 
@@ -111,5 +119,42 @@ describe('command encoding', () => {
 
 	it('rejects names over the 31-byte wire limit', () => {
 		expect(() => encodeLoginInit('x'.repeat(32))).toThrow();
+	});
+});
+
+describe('the stretch key material matches what REGISTER sent', () => {
+	/* Independent re-derivation, so this asserts the firmware's contract
+	 * rather than the implementation's current behaviour. */
+	async function pbkdf2(keyMaterial: Uint8Array): Promise<string> {
+		const key = await crypto.subtle.importKey(
+			'raw',
+			keyMaterial as unknown as BufferSource,
+			{ name: 'PBKDF2' },
+			false,
+			['deriveBits']
+		);
+		const bits = await crypto.subtle.deriveBits(
+			{
+				name: 'PBKDF2',
+				salt: VECTOR.salt as unknown as BufferSource,
+				iterations: VECTOR.iterations,
+				hash: 'SHA-256'
+			},
+			key,
+			RESPONSE_LEN * 8
+		);
+		return hex(new Uint8Array(bits));
+	}
+
+	it('stretches SHA-256(password) - the bytes REGISTER puts on the wire', async () => {
+		const stretched = await stretchPassword(VECTOR.password, VECTOR.salt, VECTOR.iterations);
+		expect(hex(stretched)).toBe(await pbkdf2(await hashPassword(VECTOR.password)));
+	});
+
+	it('does NOT stretch the raw password', async () => {
+		// The device never receives the raw password, so a credential derived
+		// from it cannot match the one stored at REGISTER.
+		const stretched = await stretchPassword(VECTOR.password, VECTOR.salt, VECTOR.iterations);
+		expect(hex(stretched)).not.toBe(await pbkdf2(new TextEncoder().encode(VECTOR.password)));
 	});
 });

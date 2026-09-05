@@ -107,6 +107,13 @@ export async function hashPassword(password: string): Promise<Uint8Array> {
  * device never has to spend the (expensive, tunable) stretching cost on its
  * own CPU per login attempt - only once, server-side, at REGISTER. Mirrors
  * sdf_services_web_auth_stretch_credential() in the firmware.
+ *
+ * The PBKDF2 key material is SHA-256(password) - the exact bytes REGISTER put
+ * on the wire - NOT the raw password. The device never receives the raw
+ * password, so the credential it stored is
+ * PBKDF2(SHA-256(password), salt, iterations); stretching the raw password
+ * here produced a different value, and every login failed regardless of the
+ * password being correct.
  */
 export async function stretchPassword(
 	password: string,
@@ -115,7 +122,7 @@ export async function stretchPassword(
 ): Promise<Uint8Array> {
 	const passwordKey = await crypto.subtle.importKey(
 		'raw',
-		new TextEncoder().encode(password),
+		buf(await hashPassword(password)),
 		{ name: 'PBKDF2' },
 		false,
 		['deriveBits']
