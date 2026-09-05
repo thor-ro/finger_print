@@ -1,42 +1,88 @@
 <script lang="ts">
+	import { formatRemaining, presentEnrol } from '$lib/protocol/setup';
 	import { session } from '$lib/state/session.svelte';
 	import ScanProgress from './ScanProgress.svelte';
+
+	const remaining = $derived(session.wizardDeadlineRemainingMs);
+	const expired = $derived(remaining !== null && remaining <= 0);
+
+	const enrol = $derived(
+		presentEnrol({
+			phase: session.wizardEnrollPhase,
+			captured: session.wizardEnrollCaptured,
+			expected: session.wizardEnrollExpected,
+			total: session.wizardEnrollTotal,
+			error: session.wizardEnrollError
+		})
+	);
+
+	function onEnrolAction(): void {
+		if (session.wizardEnrollPhase === 'success') session.wizardEnrollContinue();
+		else if (session.wizardEnrollPhase === 'failed') session.wizardEnrollRetry();
+		else void session.wizardEnrollAdmin();
+	}
 </script>
 
 <h2>First-Time Setup</h2>
 <div class="alert warning">
-	<strong>Time limit:</strong> Setup must be completed within the
-	device's setup window (about 15 minutes from when the device was
-	armed or the button was pressed). If the window lapses, all
-	progress is erased — including enrolled fingerprints, accounts,
-	and pairing data — and the device must be re-armed with its button.
+	{#if expired}
+		<p class="deadline-head">Time is up.</p>
+		<p class="fineprint">
+			The device discarded this attempt. Press its button to re-arm setup, then
+			reconnect and start again.
+		</p>
+	{:else if remaining !== null}
+		<p class="deadline-head" aria-live="polite">At most {formatRemaining(remaining)} left</p>
+		<p class="fineprint">
+			If it lapses, all progress is erased and the device must be re-armed with
+			its button. The clock starts at the device's first connection, so it may
+			have less left than shown.
+		</p>
+	{:else}
+		<p class="fineprint">
+			Setup runs under a time limit on the device — about 10 minutes. If it
+			lapses, progress is erased and the device must be re-armed with its button.
+		</p>
+	{/if}
 </div>
 <p class="status-msg">{session.wizardIndicator}</p>
 
 {#if session.wizardStep === 'enroll'}
 	<section class="dashboard-section">
 		<h3>Step 1 of 4 · Enrol the Admin Fingerprint</h3>
-		<p>
-			The first Admin fingerprint unlocks every later step. It takes
-			{session.wizardEnrollTotal} scans of the same finger; this page asks for them
-			one at a time and marks each one the device confirms.
-		</p>
-		<button
-			class="primary-btn"
-			disabled={session.wizardEnrollProgressVisible}
-			onclick={() => void session.wizardEnrollAdmin()}
-		>
-			{session.wizardEnrollProgressVisible ? 'Enrolment in progress…' : 'Enrol Admin Finger'}
-		</button>
-		{#if session.wizardEnrollProgressVisible}
+
+		{#if enrol.tone === 'none'}
+			{#if enrol.headline}
+				<p class="instruction" role="status">{enrol.headline}</p>
+			{/if}
+			<p class="fineprint">{enrol.sub}</p>
+		{:else}
+			<div class="outcome {enrol.tone}" role={enrol.tone === 'bad' ? 'alert' : 'status'}>
+				<p class="outcome-head">
+					<span aria-hidden="true">{enrol.tone === 'ok' ? '✓' : '✕'}</span>
+					{enrol.headline}
+				</p>
+				<p>{enrol.sub}</p>
+				{#if session.wizardEnrollHint}
+					<p class="fineprint">{session.wizardEnrollHint}</p>
+				{/if}
+			</div>
+		{/if}
+
+		<!-- The markers carry the count; the lines above carry the words, so
+		     the prompt is never printed twice. -->
+		{#if enrol.markers}
 			<ScanProgress
 				captured={session.wizardEnrollCaptured}
 				expected={session.wizardEnrollExpected}
 				total={session.wizardEnrollTotal}
-				message={session.wizardEnrollMessage}
+				message=""
 			/>
 		{/if}
-		<p class="status-msg">{session.wizardEnrollStatus}</p>
+
+		{#if enrol.action}
+			<button class="primary-btn" onclick={onEnrolAction}>{enrol.action}</button>
+		{/if}
 	</section>
 {:else if session.wizardStep === 'register'}
 	<section class="dashboard-section">
@@ -101,5 +147,51 @@
 <style>
 	form {
 		max-width: 24rem;
+	}
+
+	/* One instruction, sized so it is the thing you read first. */
+	.instruction {
+		font-size: 1.35rem;
+		font-weight: 600;
+		margin: 0.75rem 0 0.25rem;
+	}
+	.deadline-head,
+	.outcome-head {
+		font-weight: 600;
+		margin: 0 0 0.25rem;
+	}
+	.outcome-head {
+		font-size: 1.2rem;
+	}
+	.fineprint {
+		margin: 0.25rem 0 0.5rem;
+		color: var(--muted);
+		font-size: 0.875rem;
+	}
+
+	.outcome {
+		border-radius: var(--radius);
+		border: 1px solid var(--border);
+		padding: 0.75rem 1rem;
+		margin: 0.75rem 0;
+	}
+	/* Colour reinforces the glyph and the sentence; it never carries the
+	   outcome on its own (themes/CONTRACT.md). */
+	.outcome.ok {
+		border-color: var(--ok);
+		background: var(--info-tint);
+	}
+	.outcome.ok .outcome-head {
+		color: var(--ok);
+	}
+	.outcome.bad {
+		border-color: var(--danger);
+		background: var(--danger-tint);
+	}
+	.outcome.bad .outcome-head {
+		color: var(--danger);
+	}
+	.outcome p {
+		margin: 0.25rem 0 0;
 	}
 </style>

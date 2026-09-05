@@ -43,6 +43,19 @@ function scanPrompt(progress: um.EnrollProgress, whose: string): string {
 
 export type ViewId = 'connection' | 'wizard' | 'auth' | 'dashboard';
 
+/**
+ * The one thing the Admin-enrolment step is doing right now. The wizard
+ * renders exactly one instruction per phase, so the user is never left to
+ * infer their next move from a status sentence:
+ *
+ *   idle      nothing started - explain, offer the button
+ *   starting  request sent, device has not acknowledged yet
+ *   scanning  device is waiting for a specific scan (captured/expected say which)
+ *   success   the finger is enrolled; the user confirms before moving on
+ *   failed    it did not work, and `wizardEnrollError` says why
+ */
+export type WizardEnrollPhase = 'idle' | 'starting' | 'scanning' | 'success' | 'failed';
+
 export interface UmUser {
 	id: number;
 	name?: string;
@@ -75,15 +88,24 @@ class SessionStore {
 	setupCompleted = $state(true); // true = not in setup phase
 	wizardStep = $state<setup.WizardStepId>('enroll');
 	wizardIndicator = $state('');
-	wizardEnrollStatus = $state('');
+	wizardEnrollPhase = $state<WizardEnrollPhase>('idle');
+	/** Why the enrolment failed, in the user's terms. Empty unless failed. */
+	wizardEnrollError = $state('');
+	/** What the user should do about a failure, when there is something. */
+	wizardEnrollHint = $state('');
 	wizardEnrollProgressVisible = $state(false);
 	wizardEnrollCaptured = $state(0);
 	wizardEnrollExpected = $state(1);
 	wizardEnrollTotal = $state(um.ENROLL_DEFAULT_SCANS);
-	wizardEnrollMessage = $state('');
 	wizardRegisterStatus = $state('');
 	wizardNukiStatus = $state('');
 	wizardFinishStatus = $state('');
+	/**
+	 * Milliseconds left of the device's setup deadline as measured from this
+	 * browser's connect, or null while no countdown runs. An upper bound, not
+	 * a reading of the device's own clock - see setup.SETUP_DEADLINE_MS.
+	 */
+	wizardDeadlineRemainingMs = $state<number | null>(null);
 
 	// --- Auth view ---
 	isRegistering = $state(false);
@@ -127,6 +149,8 @@ class SessionStore {
 	private pendingAdminAction: { key: string; resolve: (v: boolean | null) => void } | null = null;
 	private lastConfigNotifyRaw: um.Notification | null = null;
 	private wizardRegisterPending = false;
+	private wizardDeadlineTimer: ReturnType<typeof setInterval> | null = null;
+	private wizardDeadlineEndsAt = 0;
 	private otaPendingNotification: {
 		resolve: (data: ota.DeviceStatus) => void;
 		reject: (err: Error) => void;
@@ -177,6 +201,7 @@ class SessionStore {
 
 			if (this.view === 'wizard') {
 				this.enterWizard(this.setupState ?? setup.SETUP_NOT_STARTED);
+				this.startWizardDeadline();
 			}
 			this.connectionStatus = '';
 		} catch (error) {
@@ -197,6 +222,7 @@ class SessionStore {
 				'and all progress was discarded — press the button on the device to ' +
 				'start setup again.';
 		}
+		this.stopWizardDeadline();
 		this.connectionStatus = 'Device disconnected.';
 		this.connected = false;
 		this.authenticated = false;
@@ -217,29 +243,139 @@ class SessionStore {
 		this.wizardIndicator = resumed.indicator;
 	}
 
+	/**
+	 * Starts (or restarts) the client-side view of the device's setup
+	 * deadline. Measured from this connect, so it is an upper bound on the
+	 * time actually left - a reconnect inherits a deadline the device
+	 * started earlier, and the device never reports the remainder.
+	 */
+	private startWizardDeadline(): void {
+		this.stopWizardDeadline();
+		this.wizardDeadlineEndsAt = Date.now() + setup.SETUP_DEADLINE_MS;
+		this.tickWizardDeadline();
+		this.wizardDeadlineTimer = setInterval(() => this.tickWizardDeadline(), 1000);
+	}
+
+	private stopWizardDeadline(): void {
+		if (this.wizardDeadlineTimer !== null) {
+			clearInterval(this.wizardDeadlineTimer);
+			this.wizardDeadlineTimer = null;
+		}
+		this.wizardDeadlineRemainingMs = null;
+	}
+
+	private tickWizardDeadline(): void {
+		const remaining = this.wizardDeadlineEndsAt - Date.now();
+		this.wizardDeadlineRemainingMs = Math.max(0, remaining);
+		if (remaining > 0) return;
+		/* Stop ticking but keep the zero on screen: the device has, by now,
+		 * wiped every partial result and disarmed the phase, and the button
+		 * press that re-arms it is the only way forward. The connection may
+		 * still look alive here - the device-side wipe runs before the
+		 * BLE-side termination it queues. */
+		if (this.wizardDeadlineTimer !== null) {
+			clearInterval(this.wizardDeadlineTimer);
+			this.wizardDeadlineTimer = null;
+		}
+	}
+
+	/**
+	 * The single writer of the Admin-enrolment step's state. Phase and the
+	 * legacy status/visibility fields move together here so no caller can
+	 * leave the two disagreeing - the mismatch that let a failed request sit
+	 * under an opening status line forever.
+	 */
+	private setWizardEnrollPhase(
+		phase: WizardEnrollPhase,
+		detail: { error?: string; hint?: string; progress?: um.EnrollProgress } = {}
+	): void {
+		this.wizardEnrollPhase = phase;
+		this.wizardEnrollError = detail.error ?? '';
+		this.wizardEnrollHint = detail.hint ?? '';
+		this.wizardEnrollProgressVisible = phase === 'starting' || phase === 'scanning';
+
+		switch (phase) {
+			case 'idle':
+				this.wizardEnrollCaptured = 0;
+				this.wizardEnrollExpected = 0;
+				return;
+			case 'starting':
+				this.wizardEnrollCaptured = 0;
+				this.wizardEnrollExpected = 0;
+				this.wizardEnrollTotal = um.ENROLL_DEFAULT_SCANS;
+				return;
+			case 'scanning': {
+				const progress = detail.progress ?? {
+					captured: 0,
+					step: 1,
+					total: um.ENROLL_DEFAULT_SCANS
+				};
+				this.wizardEnrollCaptured = progress.captured;
+				this.wizardEnrollExpected = progress.step;
+				this.wizardEnrollTotal = progress.total;
+				return;
+			}
+			case 'success':
+				// Every marker filled before the step is left, so the count
+				// never ends mid-way.
+				this.wizardEnrollCaptured = this.wizardEnrollTotal;
+				this.wizardEnrollExpected = 0;
+				return;
+			case 'failed':
+				this.wizardEnrollExpected = 0;
+				return;
+		}
+	}
+
 	async wizardEnrollAdmin(): Promise<void> {
-		this.wizardEnrollStatus = 'Starting Admin enrolment...';
-		const result = await this.sendUmRequest({ verb: 'enroll', user_id: 1, permission: 3 });
+		this.setWizardEnrollPhase('starting');
+		let result: um.Notification | null;
+		try {
+			result = await this.sendUmRequest({ verb: 'enroll', user_id: 1, permission: 3 });
+		} catch (err) {
+			/* The device answers an unadmitted enrolment write with an ATT
+			 * error rather than a reply, which is what a lapsed setup phase
+			 * looks like from here. Reported rather than swallowed: this
+			 * handler is invoked as `void`, so an escaping rejection left the
+			 * opening status line on screen with nothing else happening. */
+			this.setWizardEnrollPhase('failed', {
+				error: `The device refused to start enrolment (${(err as Error).message}).`,
+				hint:
+					'Its setup window has most likely lapsed. Press the button on the ' +
+					'device to re-arm setup, then reconnect and start again.'
+			});
+			return;
+		}
 		if (result === null) {
-			this.wizardEnrollStatus = 'No response received from the device - try again.';
+			this.setWizardEnrollPhase('failed', {
+				error: 'The device did not answer.',
+				hint: 'Check that it is still powered and in range, then try again.'
+			});
 			return;
 		}
 		if (result.result === 'ok') {
 			// Started. The device reports each captured scan from here; this
 			// is only the opening prompt, and it is also what a device that
 			// reports no progress at all leaves on screen.
-			this.wizardEnrollProgressVisible = true;
-			this.wizardEnrollCaptured = 0;
-			this.wizardEnrollExpected = 1;
-			this.wizardEnrollTotal = um.ENROLL_DEFAULT_SCANS;
-			this.wizardEnrollStatus = '';
-			this.wizardEnrollMessage = scanPrompt(
-				{ captured: 0, step: 1, total: um.ENROLL_DEFAULT_SCANS },
-				"the admin's finger"
-			);
+			this.setWizardEnrollPhase('scanning');
 			return;
 		}
-		this.wizardEnrollStatus = um.umResultMessage(String(result.result));
+		this.setWizardEnrollPhase('failed', {
+			error: um.umResultMessage(String(result.result)),
+			hint: 'Nothing was stored on the device. You can try again.'
+		});
+	}
+
+	/** Leaves the confirmed success screen for the next wizard step. */
+	wizardEnrollContinue(): void {
+		this.setWizardEnrollPhase('idle');
+		this.showWizardStep('register');
+		this.wizardIndicator = 'Admin enrolled - register your account below.';
+	}
+
+	/** Clears a failure so the step offers a clean retry. */
+	wizardEnrollRetry(): void {
+		this.setWizardEnrollPhase('idle');
 	}
 
 	async wizardRegister(username: string, password: string): Promise<void> {
@@ -307,6 +443,7 @@ class SessionStore {
 			const result = await resultPromise;
 			if (result === true) {
 				this.setupCompleted = true;
+				this.stopWizardDeadline();
 				this.wizardFinishStatus =
 					'Setup complete! The device is now claimed and paired to this browser: it has ' +
 					'switched to filtered advertising and will only accept reconnections from this companion.';
@@ -622,11 +759,23 @@ class SessionStore {
 		return this.transport!.write('enroll', payload).then(() => replyPromise);
 	}
 
-	listUsers(): Promise<'ok' | 'no-response'> {
+	listUsers(): Promise<'ok' | 'no-response' | 'error'> {
 		return (async () => {
 			this.umStatus = 'Requesting user list...';
 			this.umStatusRefusal = false;
-			const result = await this.sendUmRequest({ verb: 'list' });
+			let result: um.Notification | null;
+			try {
+				result = await this.sendUmRequest({ verb: 'list' });
+			} catch (err) {
+				/* A rejected write never reached the device - distinct from
+				 * the silence a timeout reports. Callers invoke this as
+				 * `void`, so an escaping rejection would leave the request
+				 * line on screen with nothing to follow it. */
+				console.error(err);
+				this.umStatus = `The device rejected the request: ${(err as Error).message}`;
+				this.umStatusRefusal = true;
+				return 'error';
+			}
 			// The terminal signal is the final list part's end marker; the
 			// resolved value is null only on a client-side timeout.
 			if (result === null) {
@@ -639,9 +788,15 @@ class SessionStore {
 	}
 
 	private async refreshUmUsersSilently(): Promise<void> {
-		const result = await this.sendUmRequest({ verb: 'list' });
-		if (result !== null) {
+		/* Self-contained: this runs after a change has already reported its
+		 * own outcome, so a failed refresh must not reject into the caller's
+		 * catch and overwrite that outcome with an error. The list simply
+		 * stays as it was, and the user can refresh it. */
+		try {
+			await this.sendUmRequest({ verb: 'list' });
 			// users applied by the list-part handler
+		} catch (err) {
+			console.error(err);
 		}
 	}
 
@@ -773,7 +928,19 @@ class SessionStore {
 		this.enrollTotal = um.ENROLL_DEFAULT_SCANS;
 		this.enrollMessage = 'Waiting for the authorizing Admin scan on the device...';
 
-		const result = await this.sendUmRequest({ verb: 'enroll', user_id: userId, permission });
+		let result: um.Notification | null;
+		try {
+			result = await this.sendUmRequest({ verb: 'enroll', user_id: userId, permission });
+		} catch (err) {
+			/* Same hole the wizard's enrolment had: invoked as `void`, so an
+			 * escaping rejection froze the panel on its opening message. */
+			console.error(err);
+			this.enrollProgressVisible = false;
+			this.enrollExpected = 0;
+			this.enrollResultColor = 'var(--danger)';
+			this.enrollResultText = `The device rejected the request: ${(err as Error).message}`;
+			return false;
+		}
 		if (result === null) {
 			this.enrollProgressVisible = false;
 			this.enrollResultText = 'No response received - check the device.';
@@ -842,28 +1009,19 @@ class SessionStore {
 
 	private handleWizardEnrollNotification(parsed: um.Notification): void {
 		if (parsed.status === 'success') {
-			// Show the last scan as captured before the step goes away, so
-			// the visualization never ends mid-count.
-			this.wizardEnrollCaptured = this.wizardEnrollTotal;
-			this.wizardEnrollExpected = 0;
-			this.wizardEnrollProgressVisible = false;
-			this.wizardEnrollMessage = '';
-			this.wizardEnrollStatus = 'Admin enrolment successful.';
-			this.showWizardStep('register');
-			this.wizardIndicator = 'Admin enrolled - register your account below.';
+			/* Deliberately does NOT advance the wizard: the confirmation is
+			 * the point, and auto-advancing replaced it with the next step's
+			 * form before it could be read. wizardEnrollContinue() moves on. */
+			this.setWizardEnrollPhase('success');
 		} else if (parsed.status === 'failed') {
-			this.wizardEnrollProgressVisible = false;
-			this.wizardEnrollExpected = 0;
-			this.wizardEnrollMessage = '';
-			this.wizardEnrollStatus =
-				`Enrolment failed at step ${parsed.step} (error ${parsed.error_code}) - try again.`;
+			this.setWizardEnrollPhase('failed', {
+				error: `Enrolment failed at scan ${parsed.step} of ${this.wizardEnrollTotal}.`,
+				hint:
+					'Place the same finger flat over the whole sensor, hold still ' +
+					'until it confirms, and lift between scans.'
+			});
 		} else if (um.isEnrollProgress(parsed)) {
-			const progress = um.enrollProgressOf(parsed);
-			this.wizardEnrollProgressVisible = true;
-			this.wizardEnrollCaptured = progress.captured;
-			this.wizardEnrollExpected = progress.step;
-			this.wizardEnrollTotal = progress.total;
-			this.wizardEnrollMessage = scanPrompt(progress, "the admin's finger");
+			this.setWizardEnrollPhase('scanning', { progress: um.enrollProgressOf(parsed) });
 		}
 	}
 

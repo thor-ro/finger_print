@@ -40,7 +40,11 @@
 	<div class="progress-bar" aria-hidden="true">
 		<div class="progress-fill" style="width: {percent}%"></div>
 	</div>
-	<p class="status-msg" role="status">{message}</p>
+	<!-- Omitted entirely when empty: `.status-msg` reserves a line height, and
+	     a caller that carries the wording itself would otherwise get a gap. -->
+	{#if message}
+		<p class="status-msg" role="status">{message}</p>
+	{/if}
 </div>
 
 <style>
