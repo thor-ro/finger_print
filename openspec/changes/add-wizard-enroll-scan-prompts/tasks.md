@@ -31,6 +31,7 @@
 - [x] 5.1 `ScanProgress.svelte`: one marker per scan (captured / expected / outstanding), tokens only, no colour literals. Evidence: rewritten around `{ captured, expected, total, message }`; `npm run themes` and `npm run lint` pass (both reject colour literals under `src/`).
 - [x] 5.2 `WizardView.svelte`: ask for the current scan by number; keep the button as the starting action only. Evidence: the step-1 copy now states `{session.wizardEnrollTotal}` scans asked "one at a time"; the button is disabled while an enrolment is in flight and reads "Enrolment in progress…".
 - [x] 5.3 Markers carry an accessible label so the count is not conveyed by colour alone. Evidence: `labelOf()` renders "Scan N of T: captured / waiting for your finger / not yet taken" in a `.visually-hidden` span per marker; the prompt sits in a `role="status"` region. Asserted by "states each marker in text, so the count is not carried by colour alone".
+- [x] 5.4 Keep the initial load inside its budget: the wizard now shares `ScanProgress.svelte` with the dashboard, which pulled it onto the initial path. Evidence: `ConnectionView` is the only view that can be on screen before a connection, so the wizard, the login pane and the dashboard moved behind one dynamic import (`PostConnectView.svelte`, awaited in `routes/+page.svelte`). One shared chunk, not three: split per view, Rollup either duplicates the common code or hoists it into an extra chunk, and the measured total load rose to 56.5 KB — over the 55.3 KB cap — while the initial load fell. Initial load 45.8 KB against the unchanged 48.1 KB cap; no budget limit moved.
 
 ## 6. Tests
 
@@ -43,7 +44,9 @@
 
 ## 7. Verification
 
-- [x] 7.1 `npm run gate` in `web-companion/` (svelte-check, lint, themes, vitest, bundle budget). Evidence: green — svelte-check 377 files / 0 errors, lint and theme checks clean, **10 test files / 100 tests passed**, budget 47.1 KB initial against a 48.1 KB cap and 54.2 KB total against 55.3 KB.
+- [x] 7.1 `npm run gate` in `web-companion/` (svelte-check, lint, themes, vitest, bundle budget). Evidence: green — svelte-check 379 files / 0 errors, lint (38 files) and theme checks clean, **10 test files / 100 tests passed**, budget 45.8 KB initial against a 48.1 KB cap and 55.1 KB total against 55.3 KB, measured on a `BASE_PATH=/finger_print` build (what the Pages workflow builds).
+
+  An earlier run of this task recorded 47.1 KB initial / 54.2 KB total. That measurement predated task 5.2's wiring of `ScanProgress` into the wizard: sharing the component with the dashboard moved ~1.7 KB of already-shipped code off the deferred dashboard chunk and onto the initial path, and the ~0.7 KB this change genuinely adds landed on top. On the merged commit the gate measured 49.7 KB initial and failed the deploy by 1,619 bytes. Task 5.4 is the fix; the numbers above are from the fixed tree.
 - [x] 7.2 Host Unity run (`firmware/test_runner`, linux target) green. Evidence: **428 Tests, 0 Failures, 12 Ignored** (426/0/12 before), both new tests `PASS` by name. The run also picked up a stale generated `firmware/test_runner/sdkconfig` still carrying `CONFIG_SDF_FP_BAUD_RATE=115200` from before the baud fix; realigned to 19200 so the host log no longer states a baud the sensor does not answer at.
 - [x] 7.3 Chip-target run green (esp-emu or hardware). Evidence: **352 Tests, 0 Failures, 13 Ignored** under esp-emu (esp32c6, out-of-tree `/private/tmp/tr_hw`) — unchanged from the baseline, as expected: both new tests are host-only.
 - [ ] 7.4 On hardware: run the wizard against the device and confirm each scan updates the visualization and prompts for the next.

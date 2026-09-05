@@ -28,6 +28,7 @@ The companion was written expecting better: `handleWizardEnrollNotification()` a
 - `src/lib/protocol/usermgmt.ts`: a progress predicate and decoder (stays DOM-free per the lint gate).
 - `src/lib/state/session.svelte.ts`: wizard and dashboard enrolment progress state driven by the notification instead of a static string.
 - `ScanProgress.svelte`, `WizardView.svelte`: per-scan markers and per-scan prompting. Colours come from theme tokens only.
+- `routes/+page.svelte`, `PostConnectView.svelte`: the wizard, the login pane and the dashboard move behind one dynamic import. Sharing `ScanProgress` with the dashboard put it on the initial load; only the connection view can be on screen before a device is connected, so the rest is deferred and the initial-load budget holds without being raised.
 
 **Tests**
 
