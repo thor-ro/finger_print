@@ -19,15 +19,22 @@ export function resetSessionForTests(): void {
 	s.setupCompleted = true;
 	s.wizardStep = 'enroll';
 	s.wizardIndicator = '';
-	s.wizardEnrollStatus = '';
+	s.wizardEnrollPhase = 'idle';
+	s.wizardEnrollError = '';
+	s.wizardEnrollHint = '';
 	s.wizardEnrollProgressVisible = false;
 	s.wizardEnrollCaptured = 0;
 	s.wizardEnrollExpected = 1;
 	s.wizardEnrollTotal = 3;
-	s.wizardEnrollMessage = '';
 	s.wizardRegisterStatus = '';
 	s.wizardNukiStatus = '';
 	s.wizardFinishStatus = '';
+	// Clears the interval as well as the reactive remainder; the explicit
+	// assignments below keep this file's per-field coverage checkable.
+	s.stopWizardDeadline();
+	s.wizardDeadlineRemainingMs = null;
+	s.wizardDeadlineTimer = null;
+	s.wizardDeadlineEndsAt = 0;
 	s.isRegistering = false;
 	s.authStatus = '';
 	s.boundUsername = '';

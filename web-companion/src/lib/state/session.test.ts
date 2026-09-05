@@ -4,10 +4,12 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cleanup, render, screen } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as setup from '$lib/protocol/setup';
 import { session } from '$lib/state/session.svelte';
 import { resetSessionForTests } from '$lib/testing/session-reset';
 import { FakeTransport } from '$lib/transport/FakeTransport';
 import ConfigSection from '$lib/components/ConfigSection.svelte';
+import WizardView from '$lib/components/WizardView.svelte';
 
 // The store is a module singleton: reset it between tests so ordering
 // cannot mask a failure.
@@ -217,7 +219,6 @@ describe('wizard asks for one fingerprint scan at a time', () => {
 		expect(session.wizardEnrollProgressVisible).toBe(true);
 		expect(session.wizardEnrollCaptured).toBe(0);
 		expect(session.wizardEnrollExpected).toBe(1);
-		expect(session.wizardEnrollMessage).toContain('scan 1 of 3');
 	});
 
 	it('advances the prompt on each scan the device reports captured', async () => {
@@ -228,12 +229,10 @@ describe('wizard asks for one fingerprint scan at a time', () => {
 		t.notify('enroll', progress(1, 2));
 		expect(session.wizardEnrollCaptured).toBe(1);
 		expect(session.wizardEnrollExpected).toBe(2);
-		expect(session.wizardEnrollMessage).toContain('scan 2 of 3');
 
 		t.notify('enroll', progress(2, 3));
 		expect(session.wizardEnrollCaptured).toBe(2);
 		expect(session.wizardEnrollExpected).toBe(3);
-		expect(session.wizardEnrollMessage).toContain('scan 3 of 3');
 	});
 
 	it('does not advance without the device saying so', async () => {
@@ -248,7 +247,7 @@ describe('wizard asks for one fingerprint scan at a time', () => {
 		expect(session.wizardEnrollExpected).toBe(1);
 	});
 
-	it('shows every scan captured, then moves on to registration', async () => {
+	it('confirms success on the step itself instead of jumping away', async () => {
 		const t = new FakeTransport();
 		await connectInSetupPhase(t);
 		await startAdminEnrolment(t);
@@ -257,9 +256,23 @@ describe('wizard asks for one fingerprint scan at a time', () => {
 
 		t.notify('enroll', jsonBytes({ status: 'success', user_id: 1 }));
 
+		expect(session.wizardEnrollPhase).toBe('success');
 		expect(session.wizardEnrollCaptured).toBe(session.wizardEnrollTotal);
 		expect(session.wizardEnrollProgressVisible).toBe(false);
+		// The confirmation is the point: advancing is the user's own click.
+		expect(session.wizardStep).toBe('enroll');
+	});
+
+	it('moves on only when the user confirms', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		await startAdminEnrolment(t);
+		t.notify('enroll', jsonBytes({ status: 'success', user_id: 1 }));
+
+		session.wizardEnrollContinue();
+
 		expect(session.wizardStep).toBe('register');
+		expect(session.wizardEnrollPhase).toBe('idle');
 	});
 
 	it('stops asking for a scan when the enrolment fails', async () => {
@@ -272,8 +285,9 @@ describe('wizard asks for one fingerprint scan at a time', () => {
 
 		expect(session.wizardEnrollProgressVisible).toBe(false);
 		expect(session.wizardEnrollExpected).toBe(0);
-		expect(session.wizardEnrollMessage).toBe('');
-		expect(session.wizardEnrollStatus).toContain('failed at step 2');
+		expect(session.wizardEnrollPhase).toBe('failed');
+		expect(session.wizardEnrollError).toContain('failed at scan 2');
+		expect(session.wizardEnrollHint).toBeTruthy();
 		expect(session.wizardStep).toBe('enroll');
 	});
 
@@ -287,7 +301,6 @@ describe('wizard asks for one fingerprint scan at a time', () => {
 		await session.wizardEnrollAdmin();
 
 		// The terminal reply still arrived and was the one acted on.
-		expect(session.wizardEnrollStatus).toBe('');
 		expect(session.wizardEnrollProgressVisible).toBe(true);
 	});
 
@@ -298,7 +311,7 @@ describe('wizard asks for one fingerprint scan at a time', () => {
 
 		expect(session.wizardEnrollProgressVisible).toBe(true);
 		expect(session.wizardEnrollTotal).toBe(3);
-		expect(session.wizardEnrollMessage).toContain('of 3');
+		expect(session.wizardEnrollExpected).toBe(1);
 	});
 });
 
@@ -331,5 +344,182 @@ describe('dashboard enrolment shares the per-scan prompting', () => {
 		// Let the client-side reply timeout lapse so nothing is left pending.
 		await vi.advanceTimersByTimeAsync(20_000);
 		await pending;
+	});
+});
+
+describe('a refused enrolment write is reported, not swallowed', () => {
+	async function connectInSetupPhase(t: FakeTransport): Promise<void> {
+		t.queueRead('setup_state', new Uint8Array([0])); // SETUP_NOT_STARTED
+		await session.connect(() => t);
+	}
+
+	it('replaces the opening status when the device rejects the write', async () => {
+		const t = new FakeTransport();
+		await connectInSetupPhase(t);
+		// What a lapsed setup phase looks like from the browser: the device
+		// answers the write with an ATT error instead of a reply.
+		t.scriptWrite('enroll', { fail: new Error('GATT operation not authorized.') });
+
+		await expect(session.wizardEnrollAdmin()).resolves.toBeUndefined();
+
+		expect(session.wizardEnrollPhase).toBe('failed');
+		expect(session.wizardEnrollError).toContain('GATT operation not authorized.');
+		expect(session.wizardEnrollHint).toContain('re-arm setup');
+		expect(session.wizardEnrollProgressVisible).toBe(false);
+	});
+});
+
+describe('setup deadline countdown', () => {
+	it('runs while the wizard is open and counts down in real time', async () => {
+		vi.useFakeTimers();
+		const t = new FakeTransport();
+		t.queueRead('setup_state', new Uint8Array([0]));
+		await session.connect(() => t);
+
+		expect(session.wizardDeadlineRemainingMs).toBe(setup.SETUP_DEADLINE_MS);
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(session.wizardDeadlineRemainingMs).toBe(setup.SETUP_DEADLINE_MS - 60_000);
+	});
+
+	it('floors at zero and stops rather than going negative', async () => {
+		vi.useFakeTimers();
+		const t = new FakeTransport();
+		t.queueRead('setup_state', new Uint8Array([0]));
+		await session.connect(() => t);
+
+		await vi.advanceTimersByTimeAsync(setup.SETUP_DEADLINE_MS + 30_000);
+
+		expect(session.wizardDeadlineRemainingMs).toBe(0);
+	});
+
+	it('does not run for a device that is past setup', async () => {
+		const t = new FakeTransport();
+		t.queueRead('setup_state', new Uint8Array([setup.SETUP_COMPLETE]));
+		await session.connect(() => t);
+
+		expect(session.view).not.toBe('wizard');
+		expect(session.wizardDeadlineRemainingMs).toBeNull();
+	});
+
+	it('clears on disconnect', async () => {
+		vi.useFakeTimers();
+		const t = new FakeTransport();
+		t.queueRead('setup_state', new Uint8Array([0]));
+		await session.connect(() => t);
+		expect(session.wizardDeadlineRemainingMs).not.toBeNull();
+
+		t.simulateDisconnect();
+
+		expect(session.wizardDeadlineRemainingMs).toBeNull();
+	});
+});
+
+describe('the enrolment step shows one instruction per phase', () => {
+	async function inWizard(t: FakeTransport): Promise<void> {
+		t.queueRead('setup_state', new Uint8Array([0]));
+		await session.connect(() => t);
+	}
+
+	it('idle offers a single start button and explains the finger', async () => {
+		const t = new FakeTransport();
+		await inWizard(t);
+		render(WizardView);
+
+		expect(session.wizardEnrollPhase).toBe('idle');
+		expect(screen.getByRole('button', { name: /start enrolment/i })).toBeTruthy();
+		expect(screen.getByText(/same finger/i)).toBeTruthy();
+	});
+
+	it('tells the user to place the finger while the device waits for scan 1', async () => {
+		const t = new FakeTransport();
+		await inWizard(t);
+		t.scriptWrite('enroll', { respond: jsonBytes({ req: 1, result: 'ok' }) });
+		await session.wizardEnrollAdmin();
+		render(WizardView);
+
+		expect(session.wizardEnrollPhase).toBe('scanning');
+		expect(screen.getByText(/place the admin's finger on the sensor/i)).toBeTruthy();
+		// The count also appears in ScanProgress's screen-reader labels, so
+		// match the visible sub-line specifically.
+		expect(screen.getByText(/scan 1 of 3\s+· hold still/i)).toBeTruthy();
+	});
+
+	it('tells the user to lift and place again once a scan is captured', async () => {
+		const t = new FakeTransport();
+		await inWizard(t);
+		t.scriptWrite('enroll', { respond: jsonBytes({ req: 1, result: 'ok' }) });
+		await session.wizardEnrollAdmin();
+		t.notify('enroll', jsonBytes({ status: 'progress', captured: 1, step: 2, total: 3 }));
+		render(WizardView);
+
+		expect(screen.getByText(/lift your finger, then place it again/i)).toBeTruthy();
+		expect(screen.getByText(/scan 2 of 3\s+· hold still/i)).toBeTruthy();
+	});
+
+	it('states success and waits for the user to continue', async () => {
+		const t = new FakeTransport();
+		await inWizard(t);
+		t.scriptWrite('enroll', { respond: jsonBytes({ req: 1, result: 'ok' }) });
+		await session.wizardEnrollAdmin();
+		t.notify('enroll', jsonBytes({ status: 'success', user_id: 1 }));
+		render(WizardView);
+
+		expect(screen.getByText(/admin fingerprint enrolled/i)).toBeTruthy();
+		expect(screen.getByRole('button', { name: /continue to account registration/i })).toBeTruthy();
+	});
+
+	it('states the failure and offers a retry', async () => {
+		const t = new FakeTransport();
+		await inWizard(t);
+		t.scriptWrite('enroll', { respond: jsonBytes({ req: 1, result: 'ok' }) });
+		await session.wizardEnrollAdmin();
+		t.notify('enroll', jsonBytes({ status: 'failed', step: 2, error_code: 1 }));
+		render(WizardView);
+
+		expect(screen.getByText(/that did not work/i)).toBeTruthy();
+		expect(screen.getByText(/failed at scan 2 of 3/i)).toBeTruthy();
+		expect(screen.getByRole('button', { name: /try again/i })).toBeTruthy();
+	});
+});
+
+describe('a rejected write is reported by every user-management caller', () => {
+	const refused = () => new Error('GATT operation not permitted.');
+
+	it('listUsers reports the refusal instead of rejecting', async () => {
+		const t = new FakeTransport();
+		await session.connect(() => t);
+		t.scriptWrite('enroll', { fail: refused() });
+
+		await expect(session.listUsers()).resolves.toBe('error');
+
+		expect(session.umStatus).toContain('GATT operation not permitted.');
+		expect(session.umStatusRefusal).toBe(true);
+	});
+
+	it('the dashboard enrolment clears its progress and states the refusal', async () => {
+		const t = new FakeTransport();
+		await session.connect(() => t);
+		t.scriptWrite('enroll', { fail: refused() });
+
+		await expect(session.enroll(2, 1)).resolves.toBe(false);
+
+		expect(session.enrollProgressVisible).toBe(false);
+		expect(session.enrollExpected).toBe(0);
+		expect(session.enrollResultText).toContain('GATT operation not permitted.');
+	});
+
+	it('a silent refresh does not overwrite the outcome its caller reported', async () => {
+		const t = new FakeTransport();
+		await session.connect(() => t);
+		// The rename itself succeeds; the refresh that follows is refused.
+		t.scriptWrite('enroll', { respond: jsonBytes({ req: 1, result: 'ok' }) });
+		t.scriptWrite('enroll', { fail: refused() });
+		vi.stubGlobal('prompt', () => 'Bob');
+
+		await session.renameUser(2, 'Alice');
+
+		expect(session.umStatus).toContain('renamed');
+		expect(session.umStatus).not.toContain('GATT operation not permitted.');
 	});
 });
