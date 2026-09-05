@@ -270,3 +270,52 @@ void test_um_parse_rejects_absurd_request_id_rather_than_clamping(void) {
   TEST_ASSERT_FALSE(sdf_ble_companion_um_parse_request(
       (const uint8_t *)json, strlen(json), &req));
 }
+
+/* --- Config-characteristic admission ------------------------------------- */
+
+/* Regression cover for the defect these tests could not previously see: the
+ * Config and Enrollment access callbacks applied a blanket admin gate ahead
+ * of the dispatchers, so both admission decisions were unreachable on the
+ * unauthenticated setup connection they exist for. The policy now lives in
+ * the dispatcher; these assert the policy, and the callbacks now consult it.
+ * Reachability itself is a wire-level property - see the BLE harness. */
+
+void test_config_admits_every_kind_for_a_live_admin(void) {
+  TEST_ASSERT_TRUE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_PRIVILEGED, true, false, true));
+  TEST_ASSERT_TRUE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_SETUP_NUKI_PAIR, true, false, true));
+  TEST_ASSERT_TRUE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_FINISH_SETUP, true, false, true));
+}
+
+void test_config_admits_wizard_requests_during_an_armed_setup_phase(void) {
+  /* No account and no admin exists yet, which is exactly why no authority
+   * can be required here. */
+  TEST_ASSERT_TRUE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_SETUP_NUKI_PAIR, false, true, false));
+  TEST_ASSERT_TRUE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_FINISH_SETUP, false, true, false));
+}
+
+void test_config_refuses_privileged_writes_without_authority(void) {
+  /* Admin-action triggers and plain config mutations stay admin-only even
+   * mid-setup: relaxing the callback gate must not hand an unauthenticated
+   * peer a factory reset. */
+  TEST_ASSERT_FALSE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_PRIVILEGED, false, true, false));
+}
+
+void test_config_refuses_wizard_requests_once_setup_is_complete(void) {
+  /* The completion latch closes the exception for a device in service. */
+  TEST_ASSERT_FALSE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_SETUP_NUKI_PAIR, false, true, true));
+  TEST_ASSERT_FALSE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_FINISH_SETUP, false, true, true));
+}
+
+void test_config_refuses_wizard_requests_when_the_phase_is_disarmed(void) {
+  /* A lapsed setup phase is not an open door. */
+  TEST_ASSERT_FALSE(sdf_ble_companion_config_admits(
+      SDF_BLE_COMPANION_CONFIG_WRITE_FINISH_SETUP, false, false, false));
+}

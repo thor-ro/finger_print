@@ -112,6 +112,32 @@ int sdf_ble_companion_um_format_list_part(uint32_t req_id, int part, bool end,
                                           const char *users_json, char *buf,
                                           size_t cap);
 
+/* The kinds of write the Config characteristic accepts, as far as the
+ * admission decision is concerned. */
+typedef enum {
+    /* {"action":"setup_nuki_pair"} - wizard step 3. */
+    SDF_BLE_COMPANION_CONFIG_WRITE_SETUP_NUKI_PAIR = 0,
+    /* {"action":"finish_setup"} - wizard step 4. */
+    SDF_BLE_COMPANION_CONFIG_WRITE_FINISH_SETUP,
+    /* An admin-action trigger, or a plain configuration mutation. */
+    SDF_BLE_COMPANION_CONFIG_WRITE_PRIVILEGED,
+} sdf_ble_companion_config_write_kind_t;
+
+/* Admission decision for a write to the Config characteristic. Live admin
+ * authority admits every kind. Without it, only the two wizard requests are
+ * admitted, and only while the setup phase is armed and incomplete - during
+ * first-time setup no account and no admin exists yet, so requiring
+ * authority there would make the wizard's own steps unreachable.
+ *
+ * Pure and host-testable for the same reason as
+ * sdf_ble_companion_um_admits(): the arguments come from the caller. Note
+ * that being tested is not by itself proof of being reached - see the
+ * access-callback note in sdf_ble_companion_config_access(). */
+bool sdf_ble_companion_config_admits(sdf_ble_companion_config_write_kind_t kind,
+                                     bool conn_has_admin_authority,
+                                     bool setup_phase_armed,
+                                     bool setup_complete);
+
 /* Admission decision for a write to the Enrollment characteristic: live
  * admin authority admits every verb; a setup-phase connection to a device
  * with no enrolled users admits ONLY enrolment (no account and no admin
