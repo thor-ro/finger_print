@@ -779,20 +779,69 @@ static int sdf_ble_companion_stage_write(struct os_mbuf *om, size_t len,
     return rc;
 }
 
+/* Classifies a staged Config payload for the admission decision. */
+static sdf_ble_companion_config_write_kind_t sdf_ble_companion_config_write_kind(
+    const uint8_t *data, size_t len) {
+    if (sdf_ble_companion_is_setup_nuki_pair_request(data, len)) {
+        return SDF_BLE_COMPANION_CONFIG_WRITE_SETUP_NUKI_PAIR;
+    }
+    if (sdf_ble_companion_is_finish_setup_request(data, len)) {
+        return SDF_BLE_COMPANION_CONFIG_WRITE_FINISH_SETUP;
+    }
+    return SDF_BLE_COMPANION_CONFIG_WRITE_PRIVILEGED;
+}
+
 static int sdf_ble_companion_dispatch_config_write(
     uint16_t conn_handle, const sdf_ble_companion_callbacks_t *cb,
     const uint8_t *data, size_t len) {
-    if (sdf_ble_companion_is_setup_nuki_pair_request(data, len)) {
+    /* Authority is resolved HERE, not in the access callback. The wizard's
+     * two setup requests must be reachable on an unauthenticated connection
+     * - during first-time setup no account and no admin exists yet - while
+     * every other Config write stays admin-only. A blanket gate in the
+     * access callback used to reject all three alike, which made the setup
+     * branches below unreachable on the only connection that needs them.
+     * Same shape as sdf_ble_companion_dispatch_enroll_write(). */
+    bool authority = false;
+    if (xSemaphoreTake(s_lock, pdMS_TO_TICKS(10)) == pdTRUE) {
+        authority = sdf_ble_companion_conn_has_admin_authority(
+            sdf_ble_companion_get_conn(conn_handle));
+        xSemaphoreGive(s_lock);
+    } else {
+        /* Lock contention denies rather than grants: a spurious refusal is
+         * retryable, a spurious grant is not. */
+        ESP_LOGW(TAG, "dispatch_config_write: lock contention");
+    }
+
+    bool setup_complete = false;
+    esp_err_t latch_err = sdf_storage_setup_complete_load(&setup_complete);
+    if (latch_err != ESP_OK && latch_err != ESP_ERR_NOT_FOUND) {
+        /* Unlike advertising's fail-open treatment of this latch, an
+         * unreadable latch here is treated as COMPLETE: the safe direction
+         * for an access decision is to withhold the setup exception. */
+        ESP_LOGW(TAG, "config admission: latch load failed (%s); treating as complete",
+                 esp_err_to_name(latch_err));
+        setup_complete = true;
+    }
+
+    const sdf_ble_companion_config_write_kind_t kind =
+        sdf_ble_companion_config_write_kind(data, len);
+    if (!sdf_ble_companion_config_admits(kind, authority,
+                                          sdf_services_setup_phase_is_armed(),
+                                          setup_complete)) {
+        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+    }
+
+    if (kind == SDF_BLE_COMPANION_CONFIG_WRITE_SETUP_NUKI_PAIR) {
         if (cb->on_setup_nuki_pair) {
             cb->on_setup_nuki_pair(cb->ctx, conn_handle);
         }
         return 0;
     }
 
-    if (sdf_ble_companion_is_finish_setup_request(data, len)) {
-        /* Explicit setup completion. Config's authenticated-only gate is
-         * the acceptance condition; prerequisites are checked by sdf_app,
-         * which reports any outstanding step back to this connection. */
+    if (kind == SDF_BLE_COMPANION_CONFIG_WRITE_FINISH_SETUP) {
+        /* Explicit setup completion. Admission is decided above;
+         * prerequisites are checked by sdf_app, which reports any
+         * outstanding step back to this connection. */
         if (cb->on_setup_complete) {
             cb->on_setup_complete(cb->ctx, conn_handle);
         }
@@ -948,12 +997,23 @@ static int sdf_ble_companion_config_access(uint16_t conn_handle, uint16_t attr_h
     }
 
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
-    if (!sdf_ble_companion_conn_has_admin_authority(conn)) {
+    if (!conn) {
         xSemaphoreGive(s_lock);
-        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+        return BLE_ATT_ERR_INVALID_HANDLE;
     }
 
+    /* As in sdf_ble_companion_enroll_access(): the write path carries no
+     * blanket authority gate, because the wizard's setup_nuki_pair and
+     * finish_setup requests arrive on an unauthenticated connection.
+     * sdf_ble_companion_dispatch_config_write() classifies the payload and
+     * applies sdf_ble_companion_config_admits(), so every other Config
+     * write - admin-action triggers and configuration mutations alike -
+     * still requires admin authority. Reads stay admin-only. */
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        if (!sdf_ble_companion_conn_has_admin_authority(conn)) {
+            xSemaphoreGive(s_lock);
+            return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+        }
         // Serialize current config subset to JSON
         const sdf_config_t *cfg = sdf_config_get();
         if (!cfg) {
@@ -1028,12 +1088,26 @@ static int sdf_ble_companion_enroll_access(uint16_t conn_handle, uint16_t attr_h
     }
 
     sdf_ble_companion_connection_t *conn = sdf_ble_companion_get_conn(conn_handle);
-    if (!sdf_ble_companion_conn_has_admin_authority(conn)) {
+    if (!conn) {
         xSemaphoreGive(s_lock);
-        return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+        return BLE_ATT_ERR_INVALID_HANDLE;
     }
 
+    /* NO blanket authority gate on the write path. Admission for a write is
+     * decided by sdf_ble_companion_dispatch_enroll_write(), which is the
+     * only place that can tell an enrolment verb from the rest and so the
+     * only place that can apply the setup-phase exception
+     * (sdf_ble_companion_um_admits()). A blanket gate here rejected the
+     * unauthenticated setup connection before that ran, which made
+     * first-time Admin enrolment impossible and left um_admits() unreachable
+     * on the one connection it exists for - passing unit tests and all.
+     * Reads stay admin-only: they serve back connection state, and nothing
+     * in the wizard reads this characteristic. */
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        if (!sdf_ble_companion_conn_has_admin_authority(conn)) {
+            xSemaphoreGive(s_lock);
+            return BLE_ATT_ERR_INSUFFICIENT_AUTHEN;
+        }
         /* os_mbuf_append() only copies into an already-allocated mbuf chain,
          * it doesn't block or call back into this component, so there's no
          * need to snapshot conn->enroll_value into a scratch buffer first -

@@ -454,6 +454,11 @@ extern void test_um_parse_rejects_empty_write_and_still_clears_request(void);
 extern void test_um_parse_rejects_null_data_and_still_clears_request(void);
 extern void test_um_parse_rejects_oversized_write_and_still_clears_request(void);
 extern void test_um_parse_rejects_absurd_request_id_rather_than_clamping(void);
+extern void test_config_admits_every_kind_for_a_live_admin(void);
+extern void test_config_admits_wizard_requests_during_an_armed_setup_phase(void);
+extern void test_config_refuses_privileged_writes_without_authority(void);
+extern void test_config_refuses_wizard_requests_once_setup_is_complete(void);
+extern void test_config_refuses_wizard_requests_when_the_phase_is_disarmed(void);
 
 /* BLE Companion GATT write staging tests */
 extern void test_gatt_scratch_acquire_release_round_trip(void);
@@ -1038,6 +1043,11 @@ void app_main(void) {
   RUN_TEST(test_um_parse_rejects_null_data_and_still_clears_request);
   RUN_TEST(test_um_parse_rejects_oversized_write_and_still_clears_request);
   RUN_TEST(test_um_parse_rejects_absurd_request_id_rather_than_clamping);
+  RUN_TEST(test_config_admits_every_kind_for_a_live_admin);
+  RUN_TEST(test_config_admits_wizard_requests_during_an_armed_setup_phase);
+  RUN_TEST(test_config_refuses_privileged_writes_without_authority);
+  RUN_TEST(test_config_refuses_wizard_requests_once_setup_is_complete);
+  RUN_TEST(test_config_refuses_wizard_requests_when_the_phase_is_disarmed);
 #endif
 
   /* sdf_app suites. Target-only: sdf_app is not built for the Linux host

@@ -351,3 +351,26 @@ bool sdf_ble_companion_um_admits(const sdf_ble_companion_um_request_t *req,
     return setup_phase_armed && no_users_enrolled &&
            req->verb == SDF_BLE_COMPANION_UM_VERB_ENROLL;
 }
+
+/* -------------------------------------------------------------------------
+ * Config-characteristic admission decision
+ *
+ * Lives here, beside sdf_ble_companion_um_admits(), for the same reason:
+ * target-independent, so the host test runner can cover it.
+ * ------------------------------------------------------------------------- */
+
+bool sdf_ble_companion_config_admits(sdf_ble_companion_config_write_kind_t kind,
+                                     bool conn_has_admin_authority,
+                                     bool setup_phase_armed,
+                                     bool setup_complete) {
+    if (conn_has_admin_authority) {
+        return true;
+    }
+    if (kind == SDF_BLE_COMPANION_CONFIG_WRITE_PRIVILEGED) {
+        return false;
+    }
+    /* The wizard's own two requests, on a device that has not been claimed
+     * yet. The completion latch closes this the moment setup finishes, so a
+     * device in service never accepts either without authority. */
+    return setup_phase_armed && !setup_complete;
+}
