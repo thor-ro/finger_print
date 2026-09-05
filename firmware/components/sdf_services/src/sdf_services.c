@@ -1894,6 +1894,31 @@ sdf_services_um_outcome_t sdf_services_request_enrollment(uint16_t user_id,
   s_state.enrollment_request_pending = true;
   xSemaphoreGive(s_state.lock);
 
+  /* Hand the request to sdf_enroll_task, which owns the state machine and
+   * the sensor. It picks work up ONLY from its event queue - setting
+   * enrollment_request_pending is not a signal it ever sees, and the
+   * wake_sem given below is taken by nobody. Without this emit the caller
+   * got SDF_SERVICES_UM_OK, the companion showed "place your finger", and
+   * no command was ever sent to the sensor. */
+  sdf_event_router_event_t evt = {
+      .type = SDF_EVENT_ROUTER_ENROLLMENT_START,
+      .timestamp_ms = (uint32_t)(esp_timer_get_time() / 1000ULL),
+      .priority = SDF_EVENT_ROUTER_PRIO_HIGH,
+      .payload.enrollment_start = {.action = permission, .user_id = user_id},
+  };
+  if (sdf_event_router_emit(&evt, SDF_EVENT_ROUTER_EMIT_TIMEOUT_DEFAULT_MS) != ESP_OK) {
+    /* Nothing will start the enrolment, so do not report OK: clear the
+     * pending flag and let the caller name the failure. */
+    if (xSemaphoreTake(s_state.lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
+        pdTRUE) {
+      s_state.enrollment_request_pending = false;
+      xSemaphoreGive(s_state.lock);
+    }
+    ESP_LOGE(TAG, "Failed to queue enrollment start for user_id=%u",
+             (unsigned)user_id);
+    return SDF_SERVICES_UM_FAILED;
+  }
+
   if (s_state.wake_sem != NULL) {
     xSemaphoreGive(s_state.wake_sem);
   }

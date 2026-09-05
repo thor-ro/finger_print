@@ -2304,6 +2304,13 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
         ESP_LOGW(TAG, "Pairing GDIO handling failed: %d", pairing_res);
         sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, pairing_res, 2);
         led_flash_red();
+        /* Terminal failure: release the pairing slot so the user can retry.
+         * sdf_app_check_pairing_complete() clears s_pairing_active only on
+         * SDF_NUKI_PAIRING_COMPLETE, so without this one failed attempt
+         * refused every later one with "pairing already active" until the
+         * device was rebooted. */
+        s_pairing_active = false;
+        return;
       }
 
       sdf_app_check_pairing_complete();
@@ -2318,6 +2325,9 @@ static void sdf_app_on_ble_rx(void *ctx, sdf_nuki_ble_channel_t channel,
       ESP_LOGW(TAG, "Pairing USDIO handling failed: %d", pairing_res);
       sdf_app_emit_audit(SDF_AUDIT_PAIRING_FAILED, 0, pairing_res, 3);
       led_flash_red();
+      /* Same release as the GDIO branch above. */
+      s_pairing_active = false;
+      return;
     }
 
     sdf_app_check_pairing_complete();
