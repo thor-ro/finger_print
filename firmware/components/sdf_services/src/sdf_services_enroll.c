@@ -19,7 +19,19 @@
 #define SDF_ENROLL_TASK_STACK 4096
 #define SDF_ENROLL_TASK_PRIORITY 4
 #define SDF_ENROLL_IDLE_WAIT_CAP_MS 1000u
-#define SDF_ENROLL_RETRY_INTERVAL_MS 200u
+/* A RETRY re-issues a step the sensor refused because the finger was still
+ * down or the scan was poor, so it is paced for a person lifting and
+ * replacing a finger - at 200 ms the whole retry budget was spent in under a
+ * second, faster than anyone can react. */
+#define SDF_ENROLL_RETRY_INTERVAL_MS 1500u
+
+/* ADVANCING to the next step is not paced for the user: the next ENROLL
+ * command blocks until a fresh press anyway. It must stay short, because the
+ * sensor holds the partial capture between steps and the merge at step 3
+ * fails if they are spread out - stretching this to the retry interval is
+ * what made a working enrolment start failing with ACK_FAIL on the store,
+ * while the enrolment that succeeded advanced in 250 ms. */
+#define SDF_ENROLL_STEP_ADVANCE_MS 200u
 
 static const char *TAG = "sdf_services_enroll";
 
@@ -35,6 +47,24 @@ void sdf_enroll_task_wake(void) {
     if (s_enroll_state.event_queue != NULL) {
         sdf_event_router_event_t evt = {
             .type = SDF_EVENT_ROUTER_INTERNAL_WAKE,
+        };
+        xQueueSend(s_enroll_state.event_queue, &evt, 0);
+    }
+}
+
+/* Asks the enroll task to run the next enrolment step. Posts the same event
+ * the retry timer uses, so the step runs on the enroll task - the only task
+ * that may block on the sensor - rather than on the caller's.
+ *
+ * Needed because starting the state machine does not by itself drive it: the
+ * task acts only on its queue, and it subscribes to ENROLLMENT_START,
+ * POWER_WAKE and POWER_SLEEP alone. A caller that starts the machine
+ * directly (the admin-authorized remote enrolment) must kick it here, or the
+ * enrolment sits started-but-idle and no scan is ever requested. */
+void sdf_enroll_task_run_step_soon(void) {
+    if (s_enroll_state.event_queue != NULL) {
+        sdf_event_router_event_t evt = {
+            .type = SDF_EVENT_ROUTER_ENROLLMENT_STEP_RESULT,
         };
         xQueueSend(s_enroll_state.event_queue, &evt, 0);
     }
@@ -249,6 +279,8 @@ void sdf_services_run_enrollment_step(void) {
             bool persisted = false;
             if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
                 sdf_enrollment_sm_init(&s->enrollment);
+                /* Third scan stored: the flow is over, so the sensor powers
+                 * down again until the next wake or read. */
                 fp_set_keep_power_on(false);
 
                 SDF_SERVICES_BMP_SET(s->enrolled_user_bmp, snapshot_user_id);
@@ -300,6 +332,7 @@ void sdf_services_run_enrollment_step(void) {
             sdf_enroll_task_emit_failed(step, (int8_t)result);
             if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
                 sdf_enrollment_sm_init(&s->enrollment);
+                /* Failed terminally: release the hold, same as completion. */
                 fp_set_keep_power_on(false);
                 xSemaphoreGive(s->lock);
             }
@@ -315,7 +348,7 @@ void sdf_services_run_enrollment_step(void) {
             sdf_enroll_task_emit_step_progress(captured, next_state);
             if (s_enroll_state.retry_timer) {
                 esp_timer_start_once(s_enroll_state.retry_timer,
-                                     (uint64_t)SDF_ENROLL_RETRY_INTERVAL_MS * 1000ULL);
+                                     (uint64_t)SDF_ENROLL_STEP_ADVANCE_MS * 1000ULL);
             }
             break;
         }
@@ -355,6 +388,27 @@ void sdf_enroll_task(void *arg) {
                     ESP_LOGI(TAG, "Enrollment start: user_id=%u permission=%u",
                              (unsigned)event.payload.enrollment_start.user_id,
                              (unsigned)event.payload.enrollment_start.action);
+
+                    /* Clear any stale template in the target slot first.
+                     *
+                     * The sensor and the enrolled-user cache can disagree: an
+                     * enrolment that captured images but failed before its
+                     * final store leaves the slot occupied on the sensor
+                     * while the device still counts it free, and the next
+                     * store into it would be refused. A safeguard, not a fix
+                     * for anything observed.
+                     *
+                     * Safe because the request was already refused with
+                     * ID_OCCUPIED if the device believes the slot is taken,
+                     * so anything still there is by definition a leftover.
+                     * Done once here, outside the services lock and before
+                     * the sequence starts - never between steps, which would
+                     * abort the sequence the sensor is running. */
+                    sdf_fingerprint_op_result_t cleared =
+                        fp_delete_user(event.payload.enrollment_start.user_id);
+                    ESP_LOGI(TAG, "Cleared slot %u before enrolment: %d",
+                             (unsigned)event.payload.enrollment_start.user_id,
+                             (int)cleared);
 
                     if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
                         s->request_user_id = event.payload.enrollment_start.user_id;

@@ -55,9 +55,15 @@ typedef struct {
   uint8_t retry_count;
 } sdf_enroll_next_t;
 
-/* Default retry policy: 3 retries on steps 1 & 2, 0 on step 3 */
+/* Default retry policy. Steps 1 and 2 each wait for a fresh finger press, so
+ * their retries are the user's second and third chances to lift and place -
+ * at SDF_ENROLL_RETRY_INTERVAL_MS apart that is the window they actually
+ * get. Step 3 is never retried and its budget here is inert: the state
+ * machine short-circuits it deliberately, because a store that reports the
+ * captures could not be merged will report the same on a retry without new
+ * scans. Kept at zero so the value does not imply otherwise. */
 #define SDF_ENROLLMENT_DEFAULT_RETRY_POLICY \
-  (sdf_enrollment_retry_policy_t){ .max_retries_step1 = 3, .max_retries_step2 = 3, .max_retries_step3 = 0 }
+  (sdf_enrollment_retry_policy_t){ .max_retries_step1 = 5, .max_retries_step2 = 5, .max_retries_step3 = 0 }
 
 typedef struct {
   sdf_enrollment_state_t state;

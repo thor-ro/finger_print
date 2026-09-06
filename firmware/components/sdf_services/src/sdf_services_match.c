@@ -494,6 +494,29 @@ void sdf_match_task(void *arg) {
             run_match = true;
         }
 
+        /* An armed admin action means the device has ASKED the user to scan,
+         * so look actively instead of waiting for the finger-detect edge.
+         *
+         * That edge is how an idle device wakes, and it arrives while the
+         * sensor's main power is off. It does not arrive once a flow holds
+         * the sensor powered - an armed gate then saw no wake, ran no match
+         * cycle at all, and timed out with the user's finger on the reader.
+         * Polling here costs nothing outside a gate: the window is bounded
+         * by SDF_ADMIN_ACTION_TIMEOUT_MS. */
+        if (!run_match) {
+            bool gate_armed = false;
+            if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) ==
+                pdTRUE) {
+                gate_armed =
+                    (s->pending_admin_action != SDF_SERVICES_ADMIN_ACTION_NONE);
+                xSemaphoreGive(s->lock);
+            }
+            if (gate_armed) {
+                s_match_state.suspended = false;
+                run_match = true;
+            }
+        }
+
         if (s_match_state.suspended && is_powered) {
             led_off();
             fp_set_power(false);

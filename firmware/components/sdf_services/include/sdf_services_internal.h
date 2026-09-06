@@ -136,7 +136,16 @@ void sdf_services_record_um_action_timeout_locked(sdf_services_admin_action_t ac
 void sdf_match_task(void *arg);
 void sdf_enroll_task(void *arg);
 void sdf_admin_task(void *arg);
+/* Holds the fingerprint sensor powered across a whole enrolment flow, or
+ * releases it. Every acquire is paired with a release on each terminal path:
+ * enrolment complete, enrolment failed, gate denied, gate timed out. */
+void sdf_services_fp_hold_power(bool hold);
+
 void sdf_enroll_task_wake(void);
+
+/* Posts a run-the-next-step request to the enroll task's queue. See the
+ * definition for why starting the state machine is not enough on its own. */
+void sdf_enroll_task_run_step_soon(void);
 void sdf_admin_task_wake(void);
 esp_err_t sdf_match_task_init_subscriptions(void);
 esp_err_t sdf_admin_task_init_subscriptions(void);
