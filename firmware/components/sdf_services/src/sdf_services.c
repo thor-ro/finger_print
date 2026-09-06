@@ -580,6 +580,40 @@ void sdf_services_execute_admin_action(
       }
       user_id = s_state.pending_admin_action_user_id;
       permission = s_state.pending_admin_action_permission;
+    }
+
+    /* Between the admitting scan and the start of the enrolment: clear any
+     * stale template in the target slot.
+     *
+     * The sensor and the enrolled-user cache can disagree - an enrolment
+     * that captured images but failed before its final store could leave the
+     * slot occupied on the sensor while the device still counts it free, and
+     * the next store into it would be refused.
+     *
+     * Kept as a cheap safeguard, not as a fix for anything observed: on this
+     * hardware the slot was always already empty (DELETE_USER answers
+     * ACK_NOUSER) and the sensor's list matched the cache exactly.
+     *
+     * Safe because the request was already refused with ID_OCCUPIED if the
+     * device believes the slot is taken, so anything still there is by
+     * definition a leftover. Outside the services lock, because it is sensor
+     * I/O; once per enrolment, never between steps, which would abort the
+     * sequence the sensor is running. */
+    sdf_fingerprint_op_result_t cleared = fp_delete_user(user_id);
+    ESP_LOGI(TAG, "Cleared slot %u before enrolment: %d", (unsigned)user_id,
+             (int)cleared);
+
+    {
+      SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
+      if (guard.acquired != pdTRUE) {
+        sdf_services_fp_hold_power(false);
+        sdf_services_record_um_result(user_id, permission,
+                                      SDF_SERVICES_UM_FAILED);
+        if (action_cb != NULL) {
+          action_cb(action_ctx, action);
+        }
+        return;
+      }
 
       /* Only NOW does the enrolment state machine start - a remote
        * enrolment waits for its authorizing scan first (companion-user-mgmt
@@ -599,18 +633,23 @@ void sdf_services_execute_admin_action(
 
     if (!start_ok) {
       led_flash_red();
+      sdf_services_fp_hold_power(false);
       sdf_services_record_um_result(user_id, permission, SDF_SERVICES_UM_FAILED);
     } else {
       ESP_LOGI(TAG, "Remote enrollment started user_id=%u permission=%u",
                (unsigned)user_id, (unsigned)permission);
-      esp_err_t power_hold_err = fp_set_keep_power_on(true);
-      if (power_hold_err != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to enable enrollment power hold: %s",
-                 esp_err_to_name(power_hold_err));
-      }
+      /* Already held since the scan was armed; idempotent, and covers a
+       * flow that reached here by another route. */
+      sdf_services_fp_hold_power(true);
       led_pulse_blue();
       sdf_services_emit_enrollment_event(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
                                          &s_state.enrollment);
+      /* STEP_COMPLETE above is for observers (sdf_app, the BLE companion);
+       * no one drives the machine from it - the enroll task is not even
+       * subscribed to it. Without this kick the enrolment stayed started but
+       * idle: the admin scan was accepted and then the new user's finger was
+       * never asked for. */
+      sdf_enroll_task_run_step_soon();
       sdf_services_record_um_result(user_id, permission, SDF_SERVICES_UM_OK);
     }
     /* Falls through to action_cb so sdf_app routes the terminal reply. */
@@ -692,6 +731,9 @@ bool sdf_services_try_claim_admin_action(
   sdf_services_admin_action_cb action_cb = NULL;
   void *action_ctx = NULL;
   bool has_pending = false;
+  /* Set when a gated flow ends without an enrolment starting, so the power
+   * hold taken at arming does not outlive it. */
+  bool release_fp_hold = false;
   bool authorized = false;
   bool um_denied = false;
   bool perm_denied = false;
@@ -732,6 +774,7 @@ bool sdf_services_try_claim_admin_action(
           s_state.pending_admin_action_permission;
       s_state.um_action_result_valid = true;
       um_denied = true;
+      release_fp_hold = true;
     } else if (has_pending && s_state.pending_admin_action ==
                                   SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION &&
                s_state.permission_change_pending) {
@@ -752,6 +795,12 @@ bool sdf_services_try_claim_admin_action(
       perm_denied = true;
     }
     xSemaphoreGive(s_state.lock);
+  }
+
+  if (release_fp_hold) {
+    /* Denied: no enrolment will run, so the hold taken at arming ends here
+     * rather than leaving the sensor powered until the next reboot. */
+    sdf_services_fp_hold_power(false);
   }
 
   if (!has_pending) {
@@ -1854,6 +1903,30 @@ void sdf_services_reset_enrolled_user_cache(void) {
   }
 }
 
+/* Holds the fingerprint sensor powered for the duration of an enrolment
+ * flow, and releases it when the flow ends.
+ *
+ * Default behaviour is per-operation: every bracketed access powers the
+ * sensor up and back down, which is what a wake-driven match and a user-list
+ * read want. An enrolment cannot work that way - it is three scans plus the
+ * authorizing admin scan, and the sensor answers nothing for a while after
+ * each power cycle, so a command issued between them times out or reads the
+ * line's own echo back.
+ *
+ * The hold is therefore taken when a flow BEGINS - for the gated path that
+ * means when the admin scan is armed, not after it succeeds, so the scan and
+ * the enrolment share one power-on - and released on every terminal path:
+ * completion after the third scan stores, failure, gate denial, and gate
+ * timeout. Call outside s_state.lock: this routes through the fp owner
+ * task's queue. */
+void sdf_services_fp_hold_power(bool hold) {
+  esp_err_t err = fp_set_keep_power_on(hold);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Fingerprint power %s failed: %s", hold ? "hold" : "release",
+             esp_err_to_name(err));
+  }
+}
+
 sdf_services_um_outcome_t sdf_services_request_enrollment(uint16_t user_id,
                                                           uint8_t permission) {
   if (user_id < SDF_FINGERPRINT_USER_ID_MIN ||
@@ -1894,6 +1967,9 @@ sdf_services_um_outcome_t sdf_services_request_enrollment(uint16_t user_id,
   s_state.enrollment_request_pending = true;
   xSemaphoreGive(s_state.lock);
 
+  /* Powered for the whole flow, released on its terminal paths. */
+  sdf_services_fp_hold_power(true);
+
   /* Hand the request to sdf_enroll_task, which owns the state machine and
    * the sensor. It picks work up ONLY from its event queue - setting
    * enrollment_request_pending is not a signal it ever sees, and the
@@ -1916,6 +1992,7 @@ sdf_services_um_outcome_t sdf_services_request_enrollment(uint16_t user_id,
     }
     ESP_LOGE(TAG, "Failed to queue enrollment start for user_id=%u",
              (unsigned)user_id);
+    sdf_services_fp_hold_power(false);
     return SDF_SERVICES_UM_FAILED;
   }
 
@@ -1989,6 +2066,22 @@ sdf_services_um_outcome_t sdf_services_request_remote_enrollment(
   sdf_services_pulse_pending_action_led(s_state.pending_admin_action);
   sdf_admin_task_wake();
   xSemaphoreGive(s_state.lock);
+
+  /* Held from here, so the authorizing scan and the three enrolment scans
+   * share ONE power-on. Cycling power between them is what broke enrolment:
+   * the sensor does not answer for some time after a cycle, and ENROLL_1
+   * issued a second later just times out, while the same command on an
+   * already-powered sensor returns ACK_SUCCESS.
+   *
+   * fp_set_keep_power_on() waits on the fp owner task, so this only became
+   * safe once idle match polls stopped occupying that task for their full
+   * 12 s timeout (FP_MATCH_POLL_TIMEOUT_MS): acquiring here used to stall
+   * for ~10 s and land after the gate had already expired.
+   *
+   * Released on every terminal path - enrolment complete or failed, gate
+   * denied, gate timed out - so an unanswered gate cannot leave the sensor
+   * powered. */
+  sdf_services_fp_hold_power(true);
 
   if (s_state.wake_sem != NULL) {
     xSemaphoreGive(s_state.wake_sem);
@@ -2194,11 +2287,9 @@ void sdf_services_start_pending_enrollment_if_any(void) {
   }
 
   if (started) {
-    esp_err_t power_hold_err = fp_set_keep_power_on(true);
-    if (power_hold_err != ESP_OK) {
-      ESP_LOGW(TAG, "Failed to enable enrollment power hold: %s",
-               esp_err_to_name(power_hold_err));
-    }
+    /* Idempotent: both entry points hold power before reaching here, and a
+     * button-driven start that arrives by another route still needs it. */
+    sdf_services_fp_hold_power(true);
     led_pulse_blue();
     sdf_services_emit_enrollment_event(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
                                        &s_state.enrollment);
@@ -2206,6 +2297,7 @@ void sdf_services_start_pending_enrollment_if_any(void) {
   }
 
   if (failed) {
+    sdf_services_fp_hold_power(false);
     sdf_services_emit_enrollment_event(SDF_EVENT_ROUTER_ENROLLMENT_STEP_COMPLETE,
                                        &s_state.enrollment);
   }

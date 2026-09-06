@@ -336,6 +336,9 @@ void sdf_admin_task(void *arg) {
                     xSemaphoreGive(s->lock);
 
                     led_flash_red();
+                    /* No scan arrived, so no enrolment will run: end the
+                     * power hold taken when the action was armed. */
+                    sdf_services_fp_hold_power(false);
                     if (timed_out == SDF_SERVICES_ADMIN_ACTION_CHANGE_PERMISSION) {
                         sdf_services_complete_permission_change(ESP_ERR_TIMEOUT);
                     }

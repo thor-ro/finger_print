@@ -32,7 +32,12 @@
 #define FP_CMD_QUERY_SN 0x2Au
 #define FP_CMD_QUERY_USERS 0x2Bu
 
-#define FP_POWER_SETTLE_MS 500u
+/* Read timeout for an idle match poll. Short so the reader is listening
+ * again quickly; the sensor answers within milliseconds when a finger is
+ * actually present. */
+#define FP_MATCH_POLL_TIMEOUT_MS 1500u
+
+#define FP_POWER_SETTLE_MS 1000u
 
 /* Owner task: exclusively owns the UART port and the power-enable GPIO. All
  * other tasks reach the sensor only by enqueueing an `fp_request_t` and
@@ -308,6 +313,14 @@ static esp_err_t fp_begin_uart_access_impl(void) {
   return ESP_OK;
 }
 
+/* Ends one bracketed access. The sensor is powered down again unless a flow
+ * is holding it up (see fp_set_keep_power_on): a wake-driven match and a
+ * user-list read each power on, do their one exchange, and power down, while
+ * an enrolment holds power across all three of its scans.
+ *
+ * Powering down between the commands of a single flow is what broke
+ * enrolment: the sensor answers nothing for some time after a cycle, so a
+ * command issued right after one times out or reads back the line's echo. */
 static void fp_end_uart_access_impl(void) {
   if (!s_state.keep_power_on && s_state.power_is_on) {
     fp_set_power_direct(false);
@@ -539,6 +552,80 @@ static sdf_fingerprint_op_result_t fp_transport_err_to_result(esp_err_t err) {
                                 : SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
 }
 
+/* Scans the stream for a well-formed frame answering `cmd`, until timeout.
+ *
+ * Reading a fixed 8 bytes and validating them in place assumes the response
+ * begins exactly where the read begins. It does not: the line reflects our
+ * own transmission back, and uart_flush_input() runs BEFORE the write, so
+ * the echo - whole or partial - sits in front of the real reply. Both were
+ * observed answering ENROLL_1 in the same millisecond it was sent:
+ *
+ *   TX  F5 01 00 02 03 00 00 F5
+ *   RX  F5 01 00 02 03 00 00 01   <- the echo entire
+ *   RX  02 03 00 00 F5 00 FF 01   <- the same echo, picked up 3 bytes in
+ *
+ * The echo itself is removed by fp_send_command_once(), which flushes the
+ * port once the transmission has drained; this reader handles what is left -
+ * line noise, and frames that begin part-way through the read. */
+static esp_err_t fp_read_frame_resync(uint8_t cmd,
+                                      uint8_t response[FP_FRAME_LEN],
+                                      uint32_t timeout_ms) {
+  uint8_t window[FP_FRAME_LEN] = {0};
+  size_t filled = 0;
+  const int64_t deadline_us =
+      esp_timer_get_time() + ((int64_t)timeout_ms * 1000LL);
+
+  /* Fast path: read a whole frame and take it if it is already aligned.
+   * Byte-at-a-time scanning is the fallback for a stream that is not, so the
+   * common case stays one read - which is also the contract the host mock
+   * serves. */
+  esp_err_t bulk = fp_uart_read_exact(s_state.uart_port, window, FP_FRAME_LEN,
+                                      timeout_ms);
+  if (bulk != ESP_OK) {
+    return bulk;
+  }
+  filled = FP_FRAME_LEN;
+  if (window[0] == FP_MARKER && window[FP_FRAME_LEN - 1] == FP_MARKER &&
+      window[1] == cmd && window[6] == fp_checksum(window)) {
+    memcpy(response, window, FP_FRAME_LEN);
+    return ESP_OK;
+  }
+
+  for (;;) {
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us >= deadline_us) {
+      return ESP_ERR_TIMEOUT;
+    }
+    const uint32_t remaining_ms =
+        (uint32_t)((deadline_us - now_us + 999LL) / 1000LL);
+
+    uint8_t byte = 0;
+    esp_err_t err =
+        fp_uart_read_exact(s_state.uart_port, &byte, 1, remaining_ms);
+    if (err != ESP_OK) {
+      return err;
+    }
+
+    if (filled < FP_FRAME_LEN) {
+      window[filled++] = byte;
+    } else {
+      memmove(window, window + 1, FP_FRAME_LEN - 1);
+      window[FP_FRAME_LEN - 1] = byte;
+    }
+    if (filled < FP_FRAME_LEN) {
+      continue;
+    }
+
+    if (window[0] != FP_MARKER || window[FP_FRAME_LEN - 1] != FP_MARKER ||
+        window[1] != cmd || window[6] != fp_checksum(window)) {
+      continue; /* not a frame boundary - shift one byte and keep looking */
+    }
+
+    memcpy(response, window, FP_FRAME_LEN);
+    return ESP_OK;
+  }
+}
+
 static esp_err_t fp_send_command_impl(uint8_t cmd, uint8_t p1, uint8_t p2,
                                       uint8_t p3,
                                       uint8_t response[FP_FRAME_LEN]) {
@@ -559,8 +646,24 @@ static esp_err_t fp_send_command_impl(uint8_t cmd, uint8_t p1, uint8_t p2,
     return ESP_FAIL;
   }
 
-  esp_err_t err = fp_uart_read_exact(s_state.uart_port, response, FP_FRAME_LEN,
-                                     s_state.response_timeout_ms);
+#ifndef CONFIG_IDF_TARGET_LINUX
+  /* The line reflects our own transmission back, and flushing only BEFORE
+   * the write leaves that echo sitting in the response slot - it was being
+   * read as the reply, instantly, which is why ENROLL_1 appeared to be
+   * "answered" in the same millisecond it was sent.
+   *
+   * Waiting for TX to drain and flushing again discards exactly the echo:
+   * the sensor cannot have replied before we finished asking. This is why
+   * the echo is rejected by timing and not by content - a command with
+   * all-zero parameters gets a success ACK that is byte-identical to the
+   * request (DELETE_ALL_USERS is one), so no content test can tell the two
+   * apart. */
+  uart_wait_tx_done((uart_port_t)s_state.uart_port, pdMS_TO_TICKS(100));
+  uart_flush_input((uart_port_t)s_state.uart_port);
+#endif
+
+  esp_err_t err =
+      fp_read_frame_resync(cmd, response, s_state.response_timeout_ms);
 
   ESP_LOGI(TAG,
            "TX %s cmd=0x%02X frame=%02X %02X %02X %02X %02X %02X %02X %02X",
@@ -721,7 +824,22 @@ fp_handle_match_1n(sdf_fingerprint_match_t *match) {
   }
 
   uint8_t response[FP_FRAME_LEN] = {0};
+  /* Poll with a short read timeout, not the shared 12 s one.
+   *
+   * The sensor's own capture window is far shorter than 12 s: once it has
+   * given up internally it sends nothing, and we spend the rest of the
+   * timeout blind. With polls issued back to back that left long dead
+   * periods in which a finger placed on the reader was simply never seen -
+   * an admin scan pressed immediately after being asked for could fall
+   * inside one and miss the 10 s gate entirely, while the very next poll
+   * matched the same finger instantly.
+   *
+   * Enrolment captures keep the long timeout: those legitimately wait for a
+   * person to present a finger. */
+  const uint32_t saved_timeout = s_state.response_timeout_ms;
+  s_state.response_timeout_ms = FP_MATCH_POLL_TIMEOUT_MS;
   err = fp_send_command_impl(FP_CMD_MATCH_1_N, 0, 0, 0, response);
+  s_state.response_timeout_ms = saved_timeout;
   fp_end_uart_access_impl();
 
   if (err != ESP_OK) {
@@ -776,9 +894,12 @@ fp_handle_enroll_step(sdf_fingerprint_enroll_step_t step, uint16_t user_id,
   }
 
   uint8_t response[FP_FRAME_LEN] = {0};
+
+
   ESP_LOGI(TAG, "Enrollment step %u (%s, cmd=0x%02X) user_id=%u permission=%u",
            (unsigned)step, fp_command_name(cmd), cmd, (unsigned)user_id,
            (unsigned)permission);
+
   err = fp_send_command_impl(cmd, (uint8_t)((user_id >> 8) & 0xFF),
                              (uint8_t)(user_id & 0xFF), permission, response);
   fp_end_uart_access_impl();
@@ -994,6 +1115,32 @@ fp_handle_query_users(uint16_t *user_ids, uint8_t *permissions, size_t *count,
   return SDF_FINGERPRINT_OP_OK;
 }
 
+/* Direct power control, used by the match task as it suspends and wakes.
+ *
+ * Honours an active enrolment hold: the match task and an enrolment are two
+ * owners of the same power line, and an idling match task powering the
+ * sensor down mid-enrolment is why an armed admin scan saw no wake signal
+ * and no poll at all for the whole gate.
+ *
+ * Also keeps power_is_on in step. It used to call fp_set_power_direct()
+ * straight, leaving the flag stale - so fp_begin_uart_access_impl() could
+ * believe the sensor was powered, skip the settle, and talk to a sensor that
+ * was off or still booting. */
+static void fp_handle_set_power(bool enabled) {
+  if (!enabled && s_state.keep_power_on) {
+    ESP_LOGD(TAG, "Power-off ignored: a flow is holding the sensor powered");
+    return;
+  }
+  if (enabled == s_state.power_is_on) {
+    return;
+  }
+  fp_set_power_direct(enabled);
+  if (enabled) {
+    fp_wait_for_power_ready();
+  }
+  s_state.power_is_on = enabled;
+}
+
 static esp_err_t fp_handle_set_keep_power_on(bool keep_power_on) {
   s_state.keep_power_on = keep_power_on;
   if (keep_power_on && !s_state.power_is_on) {
@@ -1081,7 +1228,7 @@ static void fp_dispatch_request(const fp_request_t *request) {
     break;
   }
   case FP_OP_SET_POWER:
-    fp_set_power_direct(request->args.set_power.enabled);
+    fp_handle_set_power(request->args.set_power.enabled);
     break;
   case FP_OP_SET_KEEP_POWER_ON: {
     esp_err_t *out = (esp_err_t *)request->result_out;
