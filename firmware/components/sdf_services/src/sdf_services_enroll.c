@@ -389,26 +389,7 @@ void sdf_enroll_task(void *arg) {
                              (unsigned)event.payload.enrollment_start.user_id,
                              (unsigned)event.payload.enrollment_start.action);
 
-                    /* Clear any stale template in the target slot first.
-                     *
-                     * The sensor and the enrolled-user cache can disagree: an
-                     * enrolment that captured images but failed before its
-                     * final store leaves the slot occupied on the sensor
-                     * while the device still counts it free, and the next
-                     * store into it would be refused. A safeguard, not a fix
-                     * for anything observed.
-                     *
-                     * Safe because the request was already refused with
-                     * ID_OCCUPIED if the device believes the slot is taken,
-                     * so anything still there is by definition a leftover.
-                     * Done once here, outside the services lock and before
-                     * the sequence starts - never between steps, which would
-                     * abort the sequence the sensor is running. */
-                    sdf_fingerprint_op_result_t cleared =
-                        fp_delete_user(event.payload.enrollment_start.user_id);
-                    ESP_LOGI(TAG, "Cleared slot %u before enrolment: %d",
-                             (unsigned)event.payload.enrollment_start.user_id,
-                             (int)cleared);
+
 
                     if (xSemaphoreTake(s->lock, pdMS_TO_TICKS(SDF_SERVICES_LOCK_WAIT_MS)) == pdTRUE) {
                         s->request_user_id = event.payload.enrollment_start.user_id;

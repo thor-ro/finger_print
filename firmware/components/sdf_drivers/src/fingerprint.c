@@ -25,12 +25,16 @@
 #define FP_CMD_ENROLL_3 0x03u
 #define FP_CMD_DELETE_USER 0x04u
 #define FP_CMD_DELETE_ALL_USERS 0x05u
+#define FP_CMD_QUERY_USER_COUNT 0x09u
 #define FP_CMD_QUERY_PERMISSION 0x0Au
 #define FP_CMD_MATCH_1_N 0x0Cu
-#define FP_CMD_UPLOAD_EIGENVALUES 0x31u
-#define FP_CMD_SAVE_EIGENVALUES 0x41u
+#define FP_CMD_GET_VALUE 0x23u
+#define FP_CMD_SET_READ_MATCH_LEVEL 0x28u
 #define FP_CMD_QUERY_SN 0x2Au
 #define FP_CMD_QUERY_USERS 0x2Bu
+#define FP_CMD_SET_READ_ADD_MODE 0x2Du
+#define FP_CMD_UPLOAD_EIGENVALUES 0x31u
+#define FP_CMD_SAVE_EIGENVALUES 0x41u
 
 /* Read timeout for an idle match poll. Short so the reader is listening
  * again quickly; the sensor answers within milliseconds when a finger is
@@ -207,18 +211,26 @@ static const char *fp_command_name(uint8_t cmd) {
     return "DELETE_USER";
   case FP_CMD_DELETE_ALL_USERS:
     return "DELETE_ALL_USERS";
+  case FP_CMD_QUERY_USER_COUNT:
+    return "QUERY_USER_COUNT";
   case FP_CMD_QUERY_PERMISSION:
     return "QUERY_PERMISSION";
   case FP_CMD_MATCH_1_N:
     return "MATCH_1_N";
-  case FP_CMD_UPLOAD_EIGENVALUES:
-    return "UPLOAD_EIGENVALUES";
-  case FP_CMD_SAVE_EIGENVALUES:
-    return "SAVE_EIGENVALUES";
+  case FP_CMD_GET_VALUE:
+    return "GET_VALUE";
+  case FP_CMD_SET_READ_MATCH_LEVEL:
+    return "SET_READ_MATCH_LEVEL";
   case FP_CMD_QUERY_SN:
     return "QUERY_SN";
   case FP_CMD_QUERY_USERS:
     return "QUERY_USERS";
+  case FP_CMD_SET_READ_ADD_MODE:
+    return "SET_READ_ADD_MODE";
+  case FP_CMD_UPLOAD_EIGENVALUES:
+    return "UPLOAD_EIGENVALUES";
+  case FP_CMD_SAVE_EIGENVALUES:
+    return "SAVE_EIGENVALUES";
   default:
     return "UNKNOWN";
   }
@@ -328,10 +340,53 @@ static void fp_end_uart_access_impl(void) {
   }
 }
 
-/* Forward declaration – needed by fp_handle_probe below. */
+/* Forward declarations – needed by fp_handle_probe below. */
 static esp_err_t fp_send_command_impl(uint8_t cmd, uint8_t p1, uint8_t p2,
                                       uint8_t p3,
                                       uint8_t response[FP_FRAME_LEN]);
+static esp_err_t fp_read_frame_resync(uint8_t cmd,
+                                      uint8_t response[FP_FRAME_LEN],
+                                      uint32_t timeout_ms);
+static sdf_fingerprint_op_result_t
+fp_upload_eigenvalues_impl(uint16_t user_id, uint8_t *permission,
+                           uint8_t eigenvalues[SDF_FINGERPRINT_EIGENVALUE_SIZE]);
+static sdf_fingerprint_op_result_t
+fp_save_eigenvalues_impl(uint16_t user_id, uint8_t permission,
+                         const uint8_t eigenvalues[SDF_FINGERPRINT_EIGENVALUE_SIZE]);
+static sdf_fingerprint_op_result_t fp_delete_user_impl(uint16_t user_id);
+
+static void fp_probe_diagnostics_impl(void) {
+  uint8_t resp[FP_FRAME_LEN] = {0};
+
+  /* 1. Query User Count (0x09) */
+  if (fp_send_command_impl(FP_CMD_QUERY_USER_COUNT, 0, 0, 0, resp) == ESP_OK) {
+    uint16_t count = ((uint16_t)resp[2] << 8) | resp[3];
+    ESP_LOGI(TAG, "Sensor diagnostic: user count=%u, ack=%s (0x%02X)",
+             (unsigned)count, fp_ack_name(resp[4]), resp[4]);
+  }
+
+  /* 2. Read Add Mode (0x2D, p3=1) */
+  if (fp_send_command_impl(FP_CMD_SET_READ_ADD_MODE, 0, 0, 1, resp) == ESP_OK) {
+    ESP_LOGI(TAG, "Sensor diagnostic: add mode=%u (%s), ack=%s (0x%02X)",
+             (unsigned)resp[3], resp[3] == 0 ? "ALLOW_REPEAT" : "PROHIBIT_REPEAT",
+             fp_ack_name(resp[4]), resp[4]);
+  }
+
+  /* 3. Read Match Level (0x28, p3=1) */
+  if (fp_send_command_impl(FP_CMD_SET_READ_MATCH_LEVEL, 0, 0, 1, resp) == ESP_OK) {
+    ESP_LOGI(TAG, "Sensor diagnostic: comparison level=%u, ack=%s (0x%02X)",
+             (unsigned)resp[3], fp_ack_name(resp[4]), resp[4]);
+  }
+
+  /* 4. Query Permission of User 1, 2, 3 */
+  for (uint16_t uid = 1; uid <= 3; uid++) {
+    if (fp_send_command_impl(FP_CMD_QUERY_PERMISSION, (uint8_t)(uid >> 8),
+                             (uint8_t)(uid & 0xFF), 0, resp) == ESP_OK) {
+      ESP_LOGI(TAG, "Sensor diagnostic: user %u permission=%u, ack=%s (0x%02X)",
+               (unsigned)uid, (unsigned)resp[4], fp_ack_name(resp[4]), resp[4]);
+    }
+  }
+}
 
 /* Runs on the owner task only - see FP_OP_PROBE in fp_dispatch_request(). */
 static esp_err_t fp_handle_probe(void) {
@@ -362,6 +417,7 @@ static esp_err_t fp_handle_probe(void) {
                     "SN=0x%02X%02X%02X",
                (unsigned)(attempt + 1), (unsigned long)settle_ms[attempt],
                response[2], response[3], response[4]);
+      fp_probe_diagnostics_impl();
       fp_set_power_direct(false);
       s_state.power_is_on = false;
       s_state.response_timeout_ms = saved_timeout;
@@ -529,8 +585,13 @@ static esp_err_t fp_send_large_command_impl(uint8_t cmd,
     return ESP_FAIL;
   }
 
-  esp_err_t err = fp_uart_read_exact(s_state.uart_port, response, FP_FRAME_LEN,
-                                     s_state.response_timeout_ms);
+#ifndef CONFIG_IDF_TARGET_LINUX
+  uart_wait_tx_done((uart_port_t)s_state.uart_port, pdMS_TO_TICKS(100));
+  uart_flush_input((uart_port_t)s_state.uart_port);
+#endif
+
+  esp_err_t err =
+      fp_read_frame_resync(cmd, response, s_state.response_timeout_ms);
   ESP_LOGI(TAG, "TX %s cmd=0x%02X payload_len=%u", fp_command_name(cmd), cmd,
            (unsigned)payload_len);
   if (err != ESP_OK) {
@@ -810,6 +871,37 @@ fp_save_eigenvalues_impl(uint16_t user_id, uint8_t permission,
   return fp_map_ack_code(response[4]);
 }
 
+static sdf_fingerprint_op_result_t
+fp_get_eigenvalues_impl(uint8_t eigenvalues[SDF_FINGERPRINT_EIGENVALUE_SIZE]) {
+  uint8_t response[FP_FRAME_LEN] = {0};
+  esp_err_t err = fp_send_command_impl(FP_CMD_GET_VALUE, 0x00, 0x00, 0x00, response);
+  if (err != ESP_OK) {
+    return fp_transport_err_to_result(err);
+  }
+
+  sdf_fingerprint_op_result_t result = fp_map_ack_code(response[4]);
+  if (result != SDF_FINGERPRINT_OP_OK) {
+    return result;
+  }
+
+  const uint16_t data_len = ((uint16_t)response[2] << 8) | response[3];
+  if (data_len != (uint16_t)(3u + SDF_FINGERPRINT_EIGENVALUE_SIZE)) {
+    ESP_LOGE(TAG, "GET_VALUE: invalid data length %u (expected %u)",
+             (unsigned)data_len, (unsigned)(3u + SDF_FINGERPRINT_EIGENVALUE_SIZE));
+    return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+  }
+
+  uint8_t payload[3u + SDF_FINGERPRINT_EIGENVALUE_SIZE] = {0};
+  err = fp_read_data_packet_impl(payload, data_len);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "GET_VALUE: failed to read data packet: %s", esp_err_to_name(err));
+    return fp_transport_err_to_result(err);
+  }
+
+  memcpy(eigenvalues, &payload[3], SDF_FINGERPRINT_EIGENVALUE_SIZE);
+  return SDF_FINGERPRINT_OP_OK;
+}
+
 /* ---------- Owner-task request handlers ----------
  * Everything below this point that touches the UART port or the power-enable
  * GPIO runs exclusively on the owner task (see fp_owner_task()). Handlers
@@ -873,6 +965,33 @@ fp_handle_match_1n(sdf_fingerprint_match_t *match) {
 static sdf_fingerprint_op_result_t
 fp_handle_enroll_step(sdf_fingerprint_enroll_step_t step, uint16_t user_id,
                       uint8_t permission) {
+  if (step == SDF_FINGERPRINT_ENROLL_STEP_3) {
+    esp_err_t err = fp_begin_uart_access_impl();
+    if (err != ESP_OK) {
+      return SDF_FINGERPRINT_OP_PROTOCOL_ERROR;
+    }
+
+    ESP_LOGI(TAG,
+             "Enrollment step 3 (GET_VALUE + SAVE_EIGENVALUES) user_id=%u permission=%u",
+             (unsigned)user_id, (unsigned)permission);
+
+    uint8_t eigenvalues[SDF_FINGERPRINT_EIGENVALUE_SIZE] = {0};
+    sdf_fingerprint_op_result_t gv_res = fp_get_eigenvalues_impl(eigenvalues);
+    if (gv_res != SDF_FINGERPRINT_OP_OK) {
+      fp_end_uart_access_impl();
+      ESP_LOGW(TAG, "Enrollment step 3: GET_VALUE failed: %s", fp_result_name(gv_res));
+      return gv_res;
+    }
+
+    ESP_LOGI(TAG, "Enrollment step 3: GET_VALUE OK, saving to slot %u...", (unsigned)user_id);
+    sdf_fingerprint_op_result_t sv_res =
+        fp_save_eigenvalues_impl(user_id, permission, eigenvalues);
+    fp_end_uart_access_impl();
+    ESP_LOGI(TAG, "Enrollment step 3: direct save to slot %u result: %s",
+             (unsigned)user_id, fp_result_name(sv_res));
+    return sv_res;
+  }
+
   uint8_t cmd = 0;
   switch (step) {
   case SDF_FINGERPRINT_ENROLL_STEP_1:
@@ -880,9 +999,6 @@ fp_handle_enroll_step(sdf_fingerprint_enroll_step_t step, uint16_t user_id,
     break;
   case SDF_FINGERPRINT_ENROLL_STEP_2:
     cmd = FP_CMD_ENROLL_2;
-    break;
-  case SDF_FINGERPRINT_ENROLL_STEP_3:
-    cmd = FP_CMD_ENROLL_3;
     break;
   default:
     return SDF_FINGERPRINT_OP_BAD_ARG;
@@ -894,7 +1010,6 @@ fp_handle_enroll_step(sdf_fingerprint_enroll_step_t step, uint16_t user_id,
   }
 
   uint8_t response[FP_FRAME_LEN] = {0};
-
 
   ESP_LOGI(TAG, "Enrollment step %u (%s, cmd=0x%02X) user_id=%u permission=%u",
            (unsigned)step, fp_command_name(cmd), cmd, (unsigned)user_id,
@@ -917,9 +1032,11 @@ fp_handle_enroll_step(sdf_fingerprint_enroll_step_t step, uint16_t user_id,
 
   sdf_fingerprint_op_result_t result = fp_map_ack_code(response[4]);
   ESP_LOGI(TAG,
-           "Enrollment step %u (%s, cmd=0x%02X) ack=%s (0x%02X) -> %s",
+           "Enrollment step %u (%s, cmd=0x%02X) ack=%s (0x%02X) raw=[%02X %02X %02X %02X %02X %02X %02X %02X] -> %s",
            (unsigned)step, fp_command_name(cmd), cmd, fp_ack_name(response[4]),
-           response[4], fp_result_name(result));
+           response[4], response[0], response[1], response[2], response[3],
+           response[4], response[5], response[6], response[7],
+           fp_result_name(result));
   return result;
 }
 

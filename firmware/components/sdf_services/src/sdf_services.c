@@ -582,26 +582,7 @@ void sdf_services_execute_admin_action(
       permission = s_state.pending_admin_action_permission;
     }
 
-    /* Between the admitting scan and the start of the enrolment: clear any
-     * stale template in the target slot.
-     *
-     * The sensor and the enrolled-user cache can disagree - an enrolment
-     * that captured images but failed before its final store could leave the
-     * slot occupied on the sensor while the device still counts it free, and
-     * the next store into it would be refused.
-     *
-     * Kept as a cheap safeguard, not as a fix for anything observed: on this
-     * hardware the slot was always already empty (DELETE_USER answers
-     * ACK_NOUSER) and the sensor's list matched the cache exactly.
-     *
-     * Safe because the request was already refused with ID_OCCUPIED if the
-     * device believes the slot is taken, so anything still there is by
-     * definition a leftover. Outside the services lock, because it is sensor
-     * I/O; once per enrolment, never between steps, which would abort the
-     * sequence the sensor is running. */
-    sdf_fingerprint_op_result_t cleared = fp_delete_user(user_id);
-    ESP_LOGI(TAG, "Cleared slot %u before enrolment: %d", (unsigned)user_id,
-             (int)cleared);
+
 
     {
       SDF_LOCK_GUARD(guard, s_state.lock, SDF_SERVICES_LOCK_WAIT_MS);
